@@ -8,12 +8,16 @@ import {
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { formatDuration } from "@/lib/format";
+import { Progress } from "@/components/ui/progress";
 
 export function TaskSelector({
   contracts,
   contractId,
   activity,
   notes,
+  contractUsedMs,
+  activityUsedMs,
   onContractChange,
   onActivityChange,
   onNotesChange,
@@ -22,12 +26,21 @@ export function TaskSelector({
   contractId: string;
   activity: string;
   notes: string;
+  contractUsedMs: number;
+  activityUsedMs: number;
   onContractChange: (v: string) => void;
   onActivityChange: (v: string) => void;
   onNotesChange: (v: string) => void;
 }) {
   const notesMissing = notes.trim().length === 0;
   
+  // TETOS FALSOS (MOCKS) - Até criarmos as colunas no Supabase
+  const contractBudgetMs = 100 * 3600 * 1000; // 100 horas
+  const activityBudgetMs = 20 * 3600 * 1000;  // 20 horas
+
+  const contractPercent = Math.min(100, (contractUsedMs / contractBudgetMs) * 100);
+  const activityPercent = Math.min(100, (activityUsedMs / activityBudgetMs) * 100);
+
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
@@ -70,7 +83,25 @@ export function TaskSelector({
         </div>
       </div>
 
-      <div className="space-y-2">
+      {/* PAINEL DE SALDO DE HORAS */}
+      <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span>Saldo do Contrato</span>
+            <span className="font-mono">{formatDuration(contractUsedMs)} / 100h</span>
+          </div>
+          <Progress value={contractPercent} className="h-1.5" />
+        </div>
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span>Saldo da Atividade</span>
+            <span className="font-mono">{formatDuration(activityUsedMs)} / 20h</span>
+          </div>
+          <Progress value={activityPercent} className="h-1.5" />
+        </div>
+      </div>
+
+      <div className="space-y-2 border-t pt-4">
         <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-2">
           Observações
           <span className="text-[10px] normal-case tracking-normal text-destructive">
