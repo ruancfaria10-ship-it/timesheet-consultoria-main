@@ -4,6 +4,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "main": "src/server.ts",
   "assets": {
     "directory": "dist/client"
   }

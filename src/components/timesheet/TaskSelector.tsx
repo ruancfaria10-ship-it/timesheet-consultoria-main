@@ -14,7 +14,6 @@ export function TaskSelector({
   contractId,
   activity,
   notes,
-  notesRequired,
   onContractChange,
   onActivityChange,
   onNotesChange,
@@ -23,12 +22,11 @@ export function TaskSelector({
   contractId: string;
   activity: string;
   notes: string;
-  notesRequired: boolean;
   onContractChange: (v: string) => void;
   onActivityChange: (v: string) => void;
   onNotesChange: (v: string) => void;
 }) {
-  const notesMissing = notesRequired && notes.trim().length === 0;
+  const notesMissing = notes.trim().length === 0;
   
   return (
     <div className="space-y-4">
@@ -75,20 +73,14 @@ export function TaskSelector({
       <div className="space-y-2">
         <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-2">
           Observações
-          {notesRequired && (
-            <span className="text-[10px] normal-case tracking-normal text-destructive">
-              obrigatório para "Outros"
-            </span>
-          )}
+          <span className="text-[10px] normal-case tracking-normal text-destructive">
+            *obrigatório
+          </span>
         </Label>
         <Textarea
           value={notes}
           onChange={(e) => onNotesChange(e.target.value)}
-          placeholder={
-            notesRequired
-              ? "Descreva a atividade realizada..."
-              : "Notas opcionais sobre o apontamento..."
-          }
+          placeholder="Descreva a atividade realizada..."
           className={notesMissing ? "border-destructive focus-visible:ring-destructive" : ""}
           rows={2}
         />

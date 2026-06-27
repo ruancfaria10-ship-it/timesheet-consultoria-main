@@ -1,20 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
-import { Play, Pause, RotateCcw, Moon, Sun, Settings2, Timer, LogOut } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Moon, Sun, Timer, LogOut, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
-import { ACTIVITY_REQUIRING_NOTES, type TimeEntry } from "@/lib/mock-data";
+import { type TimeEntry } from "@/lib/mock-data";
 import { useTheme } from "@/hooks/use-theme";
-import { useIdle } from "@/hooks/use-idle";
-import { TimerDisplay } from "@/components/timesheet/TimerDisplay";
+import { toLocalInputValue, fromLocalInputValue } from "@/lib/format";
 import { TaskSelector } from "@/components/timesheet/TaskSelector";
 import { HistoryList } from "@/components/timesheet/HistoryList";
 import { DailyDashboard } from "@/components/timesheet/DailyDashboard";
-import { IdleDialog } from "@/components/timesheet/IdleDialog";
 import { supabase } from "@/lib/supabase";
 import { Login } from "@/components/Login";
 import type { User } from "@supabase/supabase-js";
@@ -23,7 +20,7 @@ export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "Timesheet — Engenharia de Custos" },
-      { name: "description", content: "Apontamento de horas por contrato e atividade para consultores de engenharia de custos." },
+      { name: "description", content: "Apontamento de horas por contrato e atividade para consultores." },
     ],
   }),
   component: TimesheetPage,
@@ -42,22 +39,14 @@ function TimesheetPage() {
   const [contractId, setContractId] = useState<string>("loading");
   const [activity, setActivity] = useState<string>("Orçamento");
   const [notes, setNotes] = useState<string>("");
-  const [running, setRunning] = useState(false);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
   
-  const [idleOpen, setIdleOpen] = useState(false);
-  const [idleStartedAt, setIdleStartedAt] = useState<number | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [idleMinutes, setIdleMinutes] = useState(5);
+  // Novos campos de Início e Fim (Lançamento Manual)
+  const [startVal, setStartVal] = useState(() => toLocalInputValue(Date.now()));
+  const [endVal, setEndVal] = useState(() => toLocalInputValue(Date.now()));
 
-  const contract = contractsList.find((c) => c.id === contractId) || contractsList[0];
-  const contractLabel = contract.code !== "Aguarde" ? `${contract.code} — ${contract.name.split(" — ")[0]}` : "";
-  const notesRequired = activity === ACTIVITY_REQUIRING_NOTES;
-  const notesValid = !notesRequired || notes.trim().length > 0;
-  const openEntry = entries.find((e) => e.end === null) ?? null;
+  const notesValid = notes.trim().length > 0;
 
   useEffect(() => {
-    // 1. Verifica autenticação
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) fetchTimesheets(session.user.id);
@@ -69,13 +58,12 @@ function TimesheetPage() {
       if (session?.user) fetchTimesheets(session.user.id);
     });
 
-    // 2. Busca contratos do arquivo local (simulando a nuvem)
     fetch('/contratos.json')
       .then(res => res.json())
       .then(data => {
         if(data && data.length > 0) {
           setContractsList(data);
-          setContractId(data[0].id); // Seleciona o primeiro contrato automaticamente
+          setContractId(data[0].id);
         }
       })
       .catch(err => console.error("Erro ao ler contratos", err));
@@ -96,6 +84,10 @@ function TimesheetPage() {
     }
 
     if (data) {
+      // Filtro para mostrar apenas os de hoje (opcional, mas ajuda na visualização limpa do dia)
+      const todayStart = new Date();
+      todayStart.setHours(0,0,0,0);
+      
       const mapped: TimeEntry[] = data.map(row => ({
         id: row.id,
         contractId: row.contract_id,
@@ -105,114 +97,54 @@ function TimesheetPage() {
         start: new Date(row.start_at).getTime(),
         end: row.end_at ? new Date(row.end_at).getTime() : null,
         edited: row.edited
-      }));
+      })).filter(e => e.start >= todayStart.getTime()); // Mostra apenas o histórico do dia atual na lista principal
+      
       setEntries(mapped);
-
-      const runningEntry = mapped.find(e => e.end === null);
-      if (runningEntry) {
-        setContractId(runningEntry.contractId);
-        setActivity(runningEntry.activity);
-        setNotes(runningEntry.notes || "");
-        setStartedAt(runningEntry.start);
-        setRunning(true);
-      }
     }
   };
 
-  const openNewEntry = async (cId: string, act: string, nts: string) => {
-    const c = contractsList.find((x) => x.id === cId) || contractsList[0];
+  const handleAddEntry = async () => {
+    if (!contractId || contractId === "loading" || !activity) return toast.error("Selecione contrato e atividade");
+    if (!notesValid) return toast.error("A observação é obrigatória para registar as horas.");
+
+    const startMs = fromLocalInputValue(startVal);
+    const endMs = fromLocalInputValue(endVal);
+
+    if (endMs <= startMs) return toast.error("A hora de fim deve ser posterior à hora de início.");
+
+    const c = contractsList.find((x) => x.id === contractId) || contractsList[0];
     const label = `${c.code} — ${c.name.split(" — ")[0]}`;
-    const now = Date.now();
     const newEntryId = crypto.randomUUID();
 
     const newEntry: TimeEntry = {
       id: newEntryId,
-      contractId: cId,
+      contractId: contractId,
       contractName: label,
-      activity: act,
-      notes: nts.trim() || undefined,
-      start: now,
-      end: null,
+      activity: activity,
+      notes: notes.trim(),
+      start: startMs,
+      end: endMs,
     };
     
     setEntries((p) => [newEntry, ...p]);
-    setStartedAt(now);
-    setRunning(true);
+    toast.success("Apontamento lançado com sucesso!");
+    
+    // Limpa a observação e adianta o relógio para evitar repetição automática de notas
+    setNotes("");
+    setStartVal(endVal);
 
     if (user) {
       const { error } = await supabase.from('timesheets').insert({
         id: newEntryId,
         user_id: user.id,
-        contract_id: cId,
+        contract_id: contractId,
         contract_name: label,
-        activity: act,
-        notes: nts.trim() || null,
-        start_at: new Date(now).toISOString(),
+        activity: activity,
+        notes: notes.trim(),
+        start_at: new Date(startMs).toISOString(),
+        end_at: new Date(endMs).toISOString(),
       });
       if (error) toast.error("Erro ao salvar online!");
-    }
-  };
-
-  const start = () => {
-    if (!contractId || contractId === "loading" || !activity) return toast.error("Selecione contrato e atividade");
-    if (!notesValid) return toast.error('Observações são obrigatórias para a atividade "Outros"');
-    openNewEntry(contractId, activity, notes);
-    toast.success("Cronômetro iniciado");
-  };
-
-  const pause = async () => {
-    if (!running) return;
-    const now = Date.now();
-    const activeEntry = entries.find((e) => e.end === null);
-    
-    setEntries((p) => p.map((e) => (e.end === null ? { ...e, end: now } : e)));
-    setRunning(false);
-    setStartedAt(null);
-    toast("Cronômetro pausado");
-
-    if (activeEntry && user) {
-      const { error } = await supabase.from('timesheets').update({
-        end_at: new Date(now).toISOString()
-      }).eq('id', activeEntry.id);
-      if (error) toast.error("Erro ao pausar online!");
-    }
-  };
-
-  const resume = () => start();
-
-  const handleContractChange = (v: string) => {
-    if (v === contractId) return;
-    if (running) {
-      if (!notesValid) return toast.error('Preencha as observações antes de alterar');
-      pause().then(() => {
-        setContractId(v);
-        openNewEntry(v, activity, notes);
-        toast.success("Contrato alterado");
-      });
-    } else {
-      setContractId(v);
-    }
-  };
-
-  const handleActivityChange = (v: string) => {
-    if (v === activity) return;
-    if (running) {
-      if (v === ACTIVITY_REQUIRING_NOTES && notes.trim().length === 0) {
-        setActivity(v);
-        toast.error('Preencha as observações para iniciar a atividade "Outros"');
-        pause();
-        return;
-      }
-      if (activity === ACTIVITY_REQUIRING_NOTES && !notesValid) {
-        return toast.error("Preencha as observações antes de alterar");
-      }
-      pause().then(() => {
-        setActivity(v);
-        openNewEntry(contractId, v, notes);
-        toast.success("Atividade alterada");
-      });
-    } else {
-      setActivity(v);
     }
   };
 
@@ -230,50 +162,6 @@ function TimesheetPage() {
       }).eq('id', id);
     }
   };
-
-  useIdle(
-    idleMinutes * 60 * 1000,
-    () => {
-      if (running) {
-        setIdleStartedAt(Date.now());
-        pause();
-        setIdleOpen(true);
-      }
-    },
-    running,
-  );
-
-  const handleResumeFromIdle = () => {
-    setIdleOpen(false);
-    setIdleStartedAt(null);
-    resume();
-  };
-
-  const handleDiscardIdle = () => {
-    setIdleOpen(false);
-    setIdleStartedAt(null);
-  };
-
-  const baseMs = useMemo(() => {
-    if (!openEntry || !running) return 0;
-    return 0;
-  }, [openEntry, running]);
-
-  useEffect(() => {
-    if (!running || !startedAt) {
-      document.title = "Timesheet — Engenharia de Custos";
-      return;
-    }
-    const id = setInterval(() => {
-      const sec = Math.floor((Date.now() - startedAt) / 1000);
-      const h = String(Math.floor(sec / 3600)).padStart(2, "0");
-      const m = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
-      document.title = ` ▶  ${h}:${m}  —  ${contract.code}`;
-    }, 1000);
-    return () => clearInterval(id);
-  }, [running, startedAt, contract.code]);
-
-  const playDisabled = !notesValid || contractId === "loading";
 
   if (authLoading) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Carregando sistema...</div>;
 
@@ -297,9 +185,6 @@ function TimesheetPage() {
             <span className="hidden sm:inline text-xs text-muted-foreground">
               Olá, <span className="font-medium text-foreground">{user.email?.split('@')[0]}</span>
             </span>
-            <Button size="icon" variant="ghost" onClick={() => setSettingsOpen(true)} aria-label="Configurações">
-              <Settings2 className="h-4 w-4" />
-            </Button>
             <Button size="icon" variant="ghost" onClick={toggle} aria-label="Alternar tema">
               {mounted ? (
                 theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />
@@ -321,52 +206,41 @@ function TimesheetPage() {
               contractId={contractId}
               activity={activity}
               notes={notes}
-              notesRequired={notesRequired}
-              onContractChange={handleContractChange}
-              onActivityChange={handleActivityChange}
+              onContractChange={setContractId}
+              onActivityChange={setActivity}
               onNotesChange={setNotes}
             />
-            <div className="flex flex-col items-center gap-6 py-4">
-              <TimerDisplay startedAt={startedAt} baseMs={baseMs} running={running} />
-              <div className="grid grid-cols-2 gap-2 w-full max-w-md">
-                {!running ? (
-                  <Button
-                    onClick={start}
-                    disabled={playDisabled}
-                    className="h-14 bg-success text-success-foreground hover:bg-success/90"
-                  >
-                    <Play className="h-4 w-4 mr-2" /> Play
-                  </Button>
-                ) : (
-                  <Button onClick={pause} className="h-14 bg-warning text-warning-foreground hover:bg-warning/90">
-                    <Pause className="h-4 w-4 mr-2" /> Pause
-                  </Button>
-                )}
-                <Button
-                  onClick={resume}
-                  variant="outline"
-                  className="h-14"
-                  disabled={running || entries.length === 0 || playDisabled}
-                >
-                  <RotateCcw className="h-4 w-4 mr-2" /> Retomar
-                </Button>
+            
+            <div className="grid gap-4 md:grid-cols-2 pt-2 border-t">
+              <div className="space-y-1.5">
+                <Label>Início</Label>
+                <Input type="datetime-local" value={startVal} onChange={(e) => setStartVal(e.target.value)} />
               </div>
-              {notesRequired && !notesValid && (
-                <p className="text-xs text-destructive">
-                  Preencha as observações para iniciar/alterar com a atividade "Outros".
-                </p>
-              )}
+              <div className="space-y-1.5">
+                <Label>Fim</Label>
+                <Input type="datetime-local" value={endVal} onChange={(e) => setEndVal(e.target.value)} />
+              </div>
             </div>
+
+            <Button
+              onClick={handleAddEntry}
+              disabled={!notesValid || contractId === "loading"}
+              className="w-full h-14 bg-primary text-primary-foreground text-lg"
+            >
+              <Check className="h-5 w-5 mr-2" /> Registar Horas
+            </Button>
           </div>
+          
           <DailyDashboard
             entries={entries}
-            currentContractId={running ? contractId : null}
-            currentContractName={running ? contractLabel : null}
+            currentContractId={null}
+            currentContractName={null}
           />
         </section>
+        
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Histórico do dia</h2>
+            <h2 className="text-sm font-semibold">Histórico de Hoje</h2>
             <span className="text-xs text-muted-foreground">
               {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}
             </span>
@@ -374,36 +248,6 @@ function TimesheetPage() {
           <HistoryList entries={entries} onEdit={handleEditEntry} />
         </section>
       </main>
-      <IdleDialog
-        open={idleOpen}
-        contractName={contractLabel}
-        idleMs={idleStartedAt ? Date.now() - idleStartedAt : idleMinutes * 60 * 1000}
-        onResume={handleResumeFromIdle}
-        onDiscard={handleDiscardIdle}
-      />
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Configurações</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label>Tempo de inatividade (minutos)</Label>
-            <Input
-              type="number"
-              min={1}
-              max={60}
-              value={idleMinutes}
-              onChange={(e) => setIdleMinutes(Math.max(1, Number(e.target.value) || 5))}
-            />
-            <p className="text-xs text-muted-foreground">
-              Após esse período sem mouse ou teclado, o cronômetro pausa automaticamente.
-            </p>
-          </div>
-          <DialogFooter>
-            <Button onClick={() => setSettingsOpen(false)}>Fechar</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

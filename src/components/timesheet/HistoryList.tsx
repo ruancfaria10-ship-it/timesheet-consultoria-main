@@ -36,12 +36,11 @@ export function HistoryList({
       <div className="space-y-2">
         {entries.length === 0 && (
           <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-            Nenhum apontamento hoje. Selecione um contrato e pressione Play.
+            Nenhum apontamento hoje.
           </div>
         )}
         {entries.map((e) => {
           const dur = (e.end ?? Date.now()) - e.start;
-          const live = e.end === null;
           return (
             <div
               key={e.id}
@@ -56,12 +55,7 @@ export function HistoryList({
                   <span className="text-xs text-muted-foreground">· {e.activity}</span>
                   {e.edited && (
                     <Badge variant="secondary" className="text-[10px]">
-                      Editado manualmente
-                    </Badge>
-                  )}
-                  {live && (
-                    <Badge className="text-[10px] bg-success text-success-foreground">
-                      Em andamento
+                      Editado
                     </Badge>
                   )}
                 </div>
@@ -79,7 +73,6 @@ export function HistoryList({
                 size="icon"
                 variant="ghost"
                 onClick={() => openEdit(e)}
-                disabled={live}
                 aria-label="Editar"
               >
                 <Pencil className="h-4 w-4" />
@@ -104,7 +97,7 @@ export function HistoryList({
               <Input type="datetime-local" value={endVal} onChange={(e) => setEndVal(e.target.value)} />
             </div>
             <p className="text-xs text-muted-foreground">
-              O registro será marcado como "Editado manualmente" para transparência.
+              Pode alterar a data para lançar horas de dias anteriores.
             </p>
           </div>
           <DialogFooter>
