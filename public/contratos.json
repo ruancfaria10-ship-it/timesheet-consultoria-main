@@ -1,0 +1,133 @@
+[
+  {
+    "id": "0001",
+    "code": "EC - OVERHEAD",
+    "name": "ENGEPRICE"
+  },
+  {
+    "id": "CT004.23",
+    "code": "CRB",
+    "name": "EC - METRO L4"
+  },
+  {
+    "id": "CT048.25",
+    "code": "SACYR",
+    "name": "EC - ASSESSORIA-SCR"
+  },
+  {
+    "id": "CT034.25",
+    "code": "SACYR",
+    "name": "EC - PARECER RSC-287"
+  },
+  {
+    "id": "CT051.25",
+    "code": "PROURBAN",
+    "name": "ET - ASSESSORIA-PRO"
+  },
+  {
+    "id": "CT049.25",
+    "code": "CONSÓRCIO L2 SP",
+    "name": "EC - PU HIDRÁULICA"
+  },
+  {
+    "id": "CT001.23",
+    "code": "TRACTEBEL",
+    "name": "EC - ANGRA"
+  },
+  {
+    "id": "CT015.24",
+    "code": "CNO",
+    "name": "EC - PROSUB"
+  },
+  {
+    "id": "CT072.25",
+    "code": "CNO",
+    "name": "EC - RODOANEL"
+  },
+  {
+    "id": "CT069.25",
+    "code": "A. VELLOSO",
+    "name": "ET - HOSPITAL - TANGARÁ/ARAGUAIA"
+  },
+  {
+    "id": "CT059.25",
+    "code": "TRACTEBEL",
+    "name": "EC - UTE JAUÁ"
+  },
+  {
+    "id": "CT062.25",
+    "code": "LD ENG.",
+    "name": "ET - HBO"
+  },
+  {
+    "id": "CT077.25",
+    "code": "LD ENG.",
+    "name": "ET - HOSPITAL JE"
+  },
+  {
+    "id": "CT079.25",
+    "code": "CNO",
+    "name": "ET - CANAL SERTÃO - TUBO"
+  },
+  {
+    "id": "CT086.26",
+    "code": "DRATEC",
+    "name": "ET - EXTRAVASOR DA BEIRA RIO"
+  },
+  {
+    "id": "CT038.25",
+    "code": "CNO",
+    "name": "ET - DESVIO BRASKEM"
+  },
+  {
+    "id": "CT104.26",
+    "code": "DRATEC",
+    "name": "ET - DRAGAGEM - BEBERIBE"
+  },
+  {
+    "id": "CT087.26",
+    "code": "LD ENG.",
+    "name": "ET - ESTRUT. SETOR"
+  },
+  {
+    "id": "CT106.26",
+    "code": "M FIGUEIRA (EAP)",
+    "name": "ET - ED. LEMONDE"
+  },
+  {
+    "id": "CT101.26",
+    "code": "METRIOS",
+    "name": "ET - ASSESSORIA - METRIOS"
+  },
+  {
+    "id": "CT112.26",
+    "code": "OEC",
+    "name": "ET - EPR - CURITIBA"
+  },
+  {
+    "id": "CT108.26",
+    "code": "ITA IRON",
+    "name": "EC - UNAMGEN"
+  },
+  {
+    "id": "CT115.26",
+    "code": "AFONSO FRANÇA",
+    "name": "ET - H. MATER DEI BRADESCO"
+  },
+  {
+    "id": "CT116.26",
+    "code": "GEOCOBA",
+    "name": "ET - LOTE 2 CG"
+  },
+  {
+    "id": "CT123.26",
+    "code": "AFONSO FRANÇA",
+    "name": "ET - Torres Residenciais"
+  },
+  {
+    "id": "CT121.26",
+    "code": "OEC",
+    "name": "ET - Assessoria Trecho 2 CG"
+  }
+
+]

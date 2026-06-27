@@ -1,0 +1,71 @@
+import { useState } from "react";
+import { supabase } from "@/lib/supabase";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
+import { Timer } from "lucide-react";
+
+export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      toast.error("Erro ao entrar: Verifique seu e-mail e senha.");
+    } else {
+      toast.success("Login realizado com sucesso!");
+      onLoginSuccess();
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="w-full max-w-md space-y-8 rounded-2xl border bg-card p-8 shadow-sm">
+        <div className="flex flex-col items-center gap-2 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <Timer className="h-6 w-6" />
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight">Timesheet Engeprice</h1>
+          <p className="text-sm text-muted-foreground">Faça login para apontar suas horas</p>
+        </div>
+        <form onSubmit={handleLogin} className="space-y-6">
+          <div className="space-y-2">
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              placeholder="seuemail@teste.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Senha</Label>
+            <Input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          <Button type="submit" className="w-full h-12 text-md" disabled={loading}>
+            {loading ? "Entrando..." : "Entrar"}
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+}
