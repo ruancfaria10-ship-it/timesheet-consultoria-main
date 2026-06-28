@@ -26,21 +26,33 @@ export const Route = createFileRoute("/")({
   component: TimesheetPage,
 });
 
+interface AllocationRow {
+  id: string;
+  user_id: string;
+  contract_id: string;
+  atividade: string;
+  horas_disponiveis: number;
+  contratos: {
+    codigo: string;
+    nome: string;
+    status_ativo: boolean;
+  } | null;
+}
+
 function TimesheetPage() {
   const { theme, mounted, toggle } = useTheme();
   
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  // Estados da Aplicação
+  // Estados Principais
   const [entries, setEntries] = useState<TimeEntry[]>([]);
-  const [contractsList, setContractsList] = useState<{id: string, code: string, name: string}[]>([{ id: "loading", code: "Aguarde", name: "Carregando contratos..." }]);
+  const [allocations, setAllocations] = useState<AllocationRow[]>([]);
   
-  const [contractId, setContractId] = useState<string>("loading");
-  const [activity, setActivity] = useState<string>("Orçamento");
+  const [contractId, setContractId] = useState<string>("");
+  const [activity, setActivity] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   
-  // Novos Estados Simplificados de Data e Hora
   const [daySelection, setDaySelection] = useState<"hoje" | "ontem">("hoje");
   
   const getInitialTimeStr = () => {
@@ -53,7 +65,6 @@ function TimesheetPage() {
 
   const notesValid = notes.trim().length > 0;
 
-  // Helper para converter campos em Timestamp Unix Puro
   const getTimestampFromTimeFields = (timeStr: string, day: "hoje" | "ontem") => {
     const [hours, minutes] = timeStr.split(":").map(Number);
     const date = new Date();
@@ -67,27 +78,59 @@ function TimesheetPage() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
-      if (session?.user) fetchTimesheets(session.user.id);
+      if (session?.user) {
+        fetchTimesheets(session.user.id);
+        fetchAllocations(session.user.id);
+      }
       setAuthLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      if (session?.user) fetchTimesheets(session.user.id);
+      if (session?.user) {
+        fetchTimesheets(session.user.id);
+        fetchAllocations(session.user.id);
+      }
     });
-
-    fetch('/contratos.json')
-      .then(res => res.json())
-      .then(data => {
-        if(data && data.length > 0) {
-          setContractsList(data);
-          setContractId(data[0].id);
-        }
-      })
-      .catch(err => console.error("Erro ao ler contratos", err));
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Busca as alocações vinculadas pelo gestor cruzando com a tabela mãe de contratos ativos
+  const fetchAllocations = async (userId: string) => {
+    const { data, error } = await supabase
+      .from('alocacoes')
+      .select(`
+        id,
+        user_id,
+        contract_id,
+        atividade,
+        horas_disponiveis,
+        contratos (
+          codigo,
+          nome,
+          status_ativo
+        )
+      `)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error("Erro ao carregar alocações:", error);
+      return;
+    }
+
+    if (data) {
+      const typedData = data as unknown as AllocationRow[];
+      setAllocations(typedData);
+      
+      // Pré-seleciona a primeira alocação encontrada para agilizar a UX
+      const activeAllocations = typedData.filter(a => a.contratos?.status_ativo);
+      if (activeAllocations.length > 0) {
+        setContractId(activeAllocations[0].contract_id);
+        setActivity(activeAllocations[0].atividade);
+      }
+    }
+  };
 
   const fetchTimesheets = async (userId: string) => {
     const { data, error } = await supabase
@@ -116,8 +159,55 @@ function TimesheetPage() {
     }
   };
 
+  // --- CÁLCULOS FILTRADOS DERIVADOS DO BANCO DE DADOS REAL ---
+
+  // 1. Extrai a lista de contratos exclusivos e ativos do consultor logado
+  const contractsList = Array.from(
+    new Map(
+      allocations
+        .filter(a => a.contratos?.status_ativo)
+        .map(a => [
+          a.contract_id, 
+          { id: a.contract_id, code: a.contratos!.codigo, name: a.contratos!.nome }
+        ])
+    ).values()
+  );
+
+  // 2. Filtra as atividades específicas permitidas para o contrato atual selecionado
+  const availableActivities = allocations
+    .filter(a => a.contract_id === contractId)
+    .map(a => a.atividade);
+
+  // Ajusta automaticamente a seleção da atividade caso mude o contrato
+  useEffect(() => {
+    if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
+      setActivity(availableActivities[0]);
+    }
+  }, [contractId, allocations]);
+
+  // 3. Define tetos orçados dinâmicos em milissegundos extraídos das linhas do Supabase
+  const currentActivityAlloc = allocations.find(
+    a => a.contract_id === contractId && a.atividade === activity
+  );
+  const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
+
+  const contractBudgetMs = allocations
+    .filter(a => a.contract_id === contractId)
+    .reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+
+  // 4. Soma de consumo de tempo local e em nuvem
+  const contractUsedMs = entries
+    .filter(e => e.contractId === contractId)
+    .reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+
+  const activityUsedMs = entries
+    .filter(e => e.contractId === contractId && e.activity === activity)
+    .reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+
   const handleAddEntry = async () => {
-    if (!contractId || contractId === "loading" || !activity) return toast.error("Selecione contrato e atividade");
+    if (!contractId || contractId === "" || contractId === "none" || !activity) {
+      return toast.error("Selecione contrato e atividade válidos.");
+    }
     if (!notesValid) return toast.error("A observação é obrigatória para registrar as horas.");
 
     const startMs = getTimestampFromTimeFields(startTime, daySelection);
@@ -134,8 +224,10 @@ function TimesheetPage() {
       return toast.error("Conflito de horário! Você já registrou horas nesse mesmo período.");
     }
 
-    const c = contractsList.find((x) => x.id === contractId) || contractsList[0];
-    const label = `${c.code} — ${c.name.split(" — ")[0]}`;
+    const currentContract = contractsList.find((x) => x.id === contractId);
+    if (!currentContract) return toast.error("Contrato inválido ou inativo.");
+    
+    const label = `${currentContract.code} — ${currentContract.name}`;
     const newEntryId = crypto.randomUUID();
 
     const newEntry: TimeEntry = {
@@ -152,7 +244,7 @@ function TimesheetPage() {
     toast.success("Apontamento lançado com sucesso!");
     
     setNotes("");
-    setStartTime(endTime); // Joga o início do próximo para o fim do atual automaticamente
+    setStartTime(endTime);
 
     if (user) {
       const { error } = await supabase.from('timesheets').insert({
@@ -169,7 +261,7 @@ function TimesheetPage() {
     }
   };
 
-  const handleEditEntry = async (id: string, newStart: number, newEnd: number) => {
+  const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
     if (newEnd <= newStart) return toast.error("A hora de fim deve ser posterior à hora de início.");
 
     const hasOverlap = entries.some(entry => {
@@ -182,8 +274,12 @@ function TimesheetPage() {
       return toast.error("Conflito! O novo horário invade o período de outro apontamento.");
     }
 
+    if (newNotes.trim().length === 0) {
+      return toast.error("A observação é obrigatória.");
+    }
+
     setEntries((p) =>
-      p.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd, edited: true } : e)),
+      p.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd, notes: newNotes.trim(), edited: true } : e)),
     );
     toast.success("Apontamento atualizado");
 
@@ -191,6 +287,7 @@ function TimesheetPage() {
       await supabase.from('timesheets').update({
         start_at: new Date(newStart).toISOString(),
         end_at: new Date(newEnd).toISOString(),
+        notes: newNotes.trim(),
         edited: true
       }).eq('id', id);
     }
@@ -207,28 +304,18 @@ function TimesheetPage() {
         .eq('id', id);
       
       if (error) {
-        toast.error("Erro ao deletar do banco de dados.");
+        toast.error("Erro ao deletar do banco.");
         fetchTimesheets(user.id);
       }
     }
   };
 
-  const contractUsedMs = entries
-    .filter(e => e.contractId === contractId)
-    .reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-
-  const activityUsedMs = entries
-    .filter(e => e.contractId === contractId && e.activity === activity)
-    .reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-
-  // Filtro do Dashboard Geral do dia atual
   const todayStart = new Date();
   todayStart.setHours(0,0,0,0);
   const todayEnd = new Date(todayStart);
   todayEnd.setHours(23,59,59,999);
   const todayEntries = entries.filter(e => e.start >= todayStart.getTime() && e.start <= todayEnd.getTime());
 
-  // Envia todo o histórico dos dois dias para renderização segmentada no painel lateral
   const yesterdayStart = new Date(todayStart);
   yesterdayStart.setDate(yesterdayStart.getDate() - 1);
   const targetHistoryEntries = entries.filter(e => e.start >= yesterdayStart.getTime());
@@ -278,12 +365,14 @@ function TimesheetPage() {
               notes={notes}
               contractUsedMs={contractUsedMs}
               activityUsedMs={activityUsedMs}
+              contractBudgetMs={contractBudgetMs}
+              activityBudgetMs={activityBudgetMs}
+              availableActivities={availableActivities}
               onContractChange={setContractId}
               onActivityChange={setActivity}
               onNotesChange={setNotes}
             />
             
-            {/* NOVO PAINEL DE DATA SIMPLIFICADO EM FORMATO DE BOLINHAS */}
             <div className="space-y-4 pt-2 border-t">
               <div className="space-y-2">
                 <Label className="text-xs uppercase tracking-wider text-muted-foreground">Quando foi realizado?</Label>
@@ -317,7 +406,7 @@ function TimesheetPage() {
 
             <Button
               onClick={handleAddEntry}
-              disabled={!notesValid || contractId === "loading"}
+              disabled={!notesValid || contractId === "" || contractsList.length === 0}
               className="w-full h-14 bg-primary text-primary-foreground text-lg"
             >
               <Check className="h-5 w-5 mr-2" /> Registrar Horas

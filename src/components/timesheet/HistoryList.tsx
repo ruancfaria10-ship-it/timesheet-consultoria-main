@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Textarea } from "@/components/ui/textarea";
 import { Pencil, Clock, Trash2 } from "lucide-react";
 
 export function HistoryList({
@@ -20,15 +21,15 @@ export function HistoryList({
   onDelete,
 }: {
   entries: TimeEntry[];
-  onEdit: (id: string, start: number, end: number) => void;
+  onEdit: (id: string, start: number, end: number, notes: string) => void;
   onDelete: (id: string) => void;
 }) {
   const [editing, setEditing] = useState<TimeEntry | null>(null);
   const [editDay, setEditDay] = useState<"hoje" | "ontem">("hoje");
   const [editStart, setEditStart] = useState("");
   const [editEnd, setEditEnd] = useState("");
+  const [editNotes, setEditNotes] = useState("");
 
-  // Funções Auxiliares de Conversão Matemática de Tempo
   const determineDayOption = (timestamp: number): "hoje" | "ontem" => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -55,9 +56,9 @@ export function HistoryList({
     setEditDay(determineDayOption(e.start));
     setEditStart(formatTimeToHHMM(e.start));
     setEditEnd(formatTimeToHHMM(e.end ?? Date.now()));
+    setEditNotes(e.notes || "");
   };
 
-  // Separação dos apontamentos por Grupos de Dias
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const todayEnd = new Date(todayStart);
@@ -127,7 +128,6 @@ export function HistoryList({
   return (
     <>
       <div className="space-y-6">
-        {/* SEÇÃO: HOJE */}
         <div className="space-y-2">
           <div className="text-xs uppercase font-semibold tracking-wider text-muted-foreground px-1">
             Hoje
@@ -141,7 +141,6 @@ export function HistoryList({
           )}
         </div>
 
-        {/* SEÇÃO: ONTEM */}
         <div className="space-y-2 pt-2 border-t border-dashed">
           <div className="text-xs uppercase font-semibold tracking-wider text-muted-foreground px-1">
             Ontem
@@ -156,7 +155,6 @@ export function HistoryList({
         </div>
       </div>
 
-      {/* DIALOG DE EDIÇÃO SIMPLIFICADO */}
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent>
           <DialogHeader>
@@ -191,6 +189,16 @@ export function HistoryList({
                 <Input type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} />
               </div>
             </div>
+
+            <div className="space-y-1.5">
+              <Label>Observações</Label>
+              <Textarea 
+                value={editNotes} 
+                onChange={(e) => setEditNotes(e.target.value)} 
+                rows={2}
+                placeholder="Descreva a atividade..." 
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setEditing(null)}>Cancelar</Button>
@@ -199,7 +207,7 @@ export function HistoryList({
                 if (!editing) return;
                 const finalStart = getTimestampFromFields(editStart, editDay);
                 const finalEnd = getTimestampFromFields(editEnd, editDay);
-                onEdit(editing.id, finalStart, finalEnd);
+                onEdit(editing.id, finalStart, finalEnd, editNotes);
                 setEditing(null);
               }}
             >

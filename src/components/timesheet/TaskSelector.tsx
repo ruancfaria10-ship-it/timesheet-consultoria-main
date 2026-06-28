@@ -1,4 +1,3 @@
-import { ACTIVITIES } from "@/lib/mock-data";
 import {
   Select,
   SelectContent,
@@ -18,6 +17,9 @@ export function TaskSelector({
   notes,
   contractUsedMs,
   activityUsedMs,
+  contractBudgetMs,
+  activityBudgetMs,
+  availableActivities,
   onContractChange,
   onActivityChange,
   onNotesChange,
@@ -28,18 +30,22 @@ export function TaskSelector({
   notes: string;
   contractUsedMs: number;
   activityUsedMs: number;
+  contractBudgetMs: number;
+  activityBudgetMs: number;
+  availableActivities: string[];
   onContractChange: (v: string) => void;
   onActivityChange: (v: string) => void;
   onNotesChange: (v: string) => void;
 }) {
   const notesMissing = notes.trim().length === 0;
-  
-  // TETOS FALSOS (MOCKS) - Até criarmos as colunas no Supabase
-  const contractBudgetMs = 100 * 3600 * 1000; // 100 horas
-  const activityBudgetMs = 20 * 3600 * 1000;  // 20 horas
 
-  const contractPercent = Math.min(100, (contractUsedMs / contractBudgetMs) * 100);
-  const activityPercent = Math.min(100, (activityUsedMs / activityBudgetMs) * 100);
+  // Cálculo percentual exato baseado nos limites reais vindos da planilha/Supabase
+  const contractPercent = contractBudgetMs > 0 ? Math.min(100, (contractUsedMs / contractBudgetMs) * 100) : 0;
+  const activityPercent = activityBudgetMs > 0 ? Math.min(100, (activityUsedMs / activityBudgetMs) * 100) : 0;
+
+  const formatHoursDisplay = (ms: number) => {
+    return (ms / (3600 * 1000)).toFixed(1) + "h";
+  };
 
   return (
     <div className="space-y-4">
@@ -53,14 +59,18 @@ export function TaskSelector({
               <SelectValue placeholder="Selecione um contrato" />
             </SelectTrigger>
             <SelectContent>
-              {contracts.map((c) => (
-                <SelectItem key={c.id} value={c.id}>
-                  <div className="flex flex-col">
-                    <span className="font-medium">{c.code}</span>
-                    <span className="text-xs text-muted-foreground">{c.name}</span>
-                  </div>
-                </SelectItem>
-              ))}
+              {contracts.length === 0 ? (
+                <SelectItem value="none" disabled>Nenhum contrato alocado</SelectItem>
+              ) : (
+                contracts.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    <div className="flex flex-col">
+                      <span className="font-medium">{c.code}</span>
+                      <span className="text-xs text-muted-foreground">{c.name}</span>
+                    </div>
+                  </SelectItem>
+                ))
+              )}
             </SelectContent>
           </Select>
         </div>
@@ -68,12 +78,16 @@ export function TaskSelector({
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">
             Atividade
           </Label>
-          <Select value={activity} onValueChange={onActivityChange}>
+          <Select 
+            value={activity} 
+            onValueChange={onActivityChange} 
+            disabled={availableActivities.length === 0}
+          >
             <SelectTrigger className="h-12">
-              <SelectValue placeholder="Selecione uma atividade" />
+              <SelectValue placeholder={availableActivities.length === 0 ? "Sem atividades" : "Selecione uma atividade"} />
             </SelectTrigger>
             <SelectContent>
-              {ACTIVITIES.map((a) => (
+              {availableActivities.map((a) => (
                 <SelectItem key={a} value={a}>
                   {a}
                 </SelectItem>
@@ -83,19 +97,23 @@ export function TaskSelector({
         </div>
       </div>
 
-      {/* PAINEL DE SALDO DE HORAS */}
+      {/* PAINEL DE SALDO DE HORAS REAL E DINÂMICO */}
       <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
         <div className="space-y-1.5">
           <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
             <span>Saldo do Contrato</span>
-            <span className="font-mono">{formatDuration(contractUsedMs)} / 100h</span>
+            <span className="font-mono">
+              {formatDuration(contractUsedMs)} / {formatHoursDisplay(contractBudgetMs)}
+            </span>
           </div>
           <Progress value={contractPercent} className="h-1.5" />
         </div>
         <div className="space-y-1.5">
           <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
             <span>Saldo da Atividade</span>
-            <span className="font-mono">{formatDuration(activityUsedMs)} / 20h</span>
+            <span className="font-mono">
+              {formatDuration(activityUsedMs)} / {formatHoursDisplay(activityBudgetMs)}
+            </span>
           </div>
           <Progress value={activityPercent} className="h-1.5" />
         </div>
