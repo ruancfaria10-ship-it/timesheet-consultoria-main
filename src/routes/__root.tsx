@@ -7,7 +7,9 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-
+import { ShieldCheck, Clock } from 'lucide-react';
+import { usePerfil } from '@/hooks/use-perfil';
+import { useTheme } from '@/hooks/use-theme';
 import appCss from "../styles.css?url";
 
 function NotFoundComponent() {
@@ -114,10 +116,53 @@ function RootShell({ children }: { children: React.ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const { isAdmin, isAuthenticated, loading } = usePerfil();
+  useTheme();
+  if (loading) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center text-muted-foreground bg-background">
+        Carregando chaves de acesso...
+      </div>
+    );
+  }
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Outlet />
+      {!isAuthenticated ? (
+        <main className="w-full min-h-screen bg-background">
+          <Outlet />
+        </main>
+      ) : (
+        /* A MÁGICA AQUI: h-screen e overflow-hidden travam o layout geral */
+        <div className="flex h-screen overflow-hidden bg-background">
+          
+          {/* MENU LATERAL - Fica fixo à esquerda */}
+          <aside className="w-64 border-r bg-card p-4 flex flex-col gap-4 shrink-0 overflow-y-auto">
+            <div className="font-bold text-xl mb-6 text-primary flex items-center gap-2 px-3 select-none w-full">
+              <img src="/favicon.ico" alt="Logo Engeprice" className="w-7 h-7 object-contain transition-colors dark:bg-white dark:p-1 dark:rounded-md" />
+              <span>Engeprice</span>
+            </div>
+            
+            <Link to="/" className="flex items-center gap-2 p-3 rounded-md hover:bg-muted transition-colors [&.active]:bg-primary/10 [&.active]:text-primary">
+              <Clock className="w-5 h-5" />
+              Meu Timesheet
+            </Link>
+
+            {isAdmin && (
+              <Link to="/admin" className="flex items-center gap-2 p-3 rounded-md hover:bg-primary/10 text-primary/80 hover:text-primary transition-colors [&.active]:bg-primary [&.active]:text-primary-foreground mt-auto">
+                <ShieldCheck className="w-5 h-5" />
+                Central de Comando
+              </Link>
+            )}
+          </aside>
+
+          {/* ÁREA PRINCIPAL - Apenas essa parte rola (scroll) */}
+          <main className="flex-1 overflow-y-auto pb-10">
+            <Outlet />
+          </main>
+
+        </div>
+      )}
     </QueryClientProvider>
   );
 }

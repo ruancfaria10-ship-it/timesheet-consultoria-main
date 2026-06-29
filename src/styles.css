@@ -102,3 +102,22 @@
   100% { box-shadow: 0 0 0 0 oklch(0.52 0.18 255 / 0); }
 }
 .running-pulse { animation: pulse-ring 2s infinite; }
+/* FORÇA O RELÓGIO A APARECER NOS INPUTS DE HORA EM QUALQUER TELA */
+input[type="time"] {
+  position: relative;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator {
+  display: block !important;
+  position: absolute;
+  right: 10px;
+  cursor: pointer !important;
+  opacity: 0.8 !important;
+  width: 20px;
+  height: 20px;
+}
+
+/* Inverte para branco quando o fundo for escuro */
+.dark input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(2) !important;
+}
