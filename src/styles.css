@@ -121,3 +121,20 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 .dark input[type="time"]::-webkit-calendar-picker-indicator {
   filter: invert(1) brightness(2) !important;
 }
+/* ==========================================
+   CORREÇÃO DO ÍCONE DE RELÓGIO (TIMESHEET)
+   ========================================== */
+input[type="time"], input[type="date"] {
+  /* Força o navegador a usar ícones brancos no modo escuro */
+  color-scheme: light dark !important; 
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator {
+  display: block !important;
+  cursor: pointer !important;
+  opacity: 0.6 !important;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1 !important;
+}
