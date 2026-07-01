@@ -102,39 +102,24 @@
   100% { box-shadow: 0 0 0 0 oklch(0.52 0.18 255 / 0); }
 }
 .running-pulse { animation: pulse-ring 2s infinite; }
-/* FORÇA O RELÓGIO A APARECER NOS INPUTS DE HORA EM QUALQUER TELA */
-input[type="time"] {
-  position: relative;
-}
-
-input[type="time"]::-webkit-calendar-picker-indicator {
-  display: block !important;
-  position: absolute;
-  right: 10px;
-  cursor: pointer !important;
-  opacity: 0.8 !important;
-  width: 20px;
-  height: 20px;
-}
-
-/* Inverte para branco quando o fundo for escuro */
-.dark input[type="time"]::-webkit-calendar-picker-indicator {
-  filter: invert(1) brightness(2) !important;
-}
 /* ==========================================
-   CORREÇÃO DO ÍCONE DE RELÓGIO (TIMESHEET)
+   O RELÓGIO DEFINITIVO (TIMESHEET)
    ========================================== */
-input[type="time"], input[type="date"] {
-  /* Força o navegador a usar ícones brancos no modo escuro */
-  color-scheme: light dark !important; 
-}
-
 input[type="time"]::-webkit-calendar-picker-indicator {
   display: block !important;
   cursor: pointer !important;
-  opacity: 0.6 !important;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>') !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  opacity: 0.5 !important;
+  transition: opacity 0.2s;
 }
 
 input[type="time"]::-webkit-calendar-picker-indicator:hover {
   opacity: 1 !important;
+}
+
+.dark input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) !important;
+  opacity: 0.8 !important;
 }
