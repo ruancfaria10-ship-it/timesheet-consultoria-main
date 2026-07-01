@@ -9,10 +9,12 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "@/lib/format";
 import { Progress } from "@/components/ui/progress";
+import { Infinity } from "lucide-react";
 
 export function TaskSelector({
   contracts,
   contractId,
+  contractType, // Recebe o tipo (horas ou fechado)
   activity,
   notes,
   contractUsedMs,
@@ -26,6 +28,7 @@ export function TaskSelector({
 }: {
   contracts: { id: string; code: string; name: string }[];
   contractId: string;
+  contractType: string;
   activity: string;
   notes: string;
   contractUsedMs: number;
@@ -39,13 +42,14 @@ export function TaskSelector({
 }) {
   const notesMissing = notes.trim().length === 0;
 
-  // Cálculo percentual exato baseado nos limites reais vindos da planilha/Supabase
   const contractPercent = contractBudgetMs > 0 ? Math.min(100, (contractUsedMs / contractBudgetMs) * 100) : 0;
   const activityPercent = activityBudgetMs > 0 ? Math.min(100, (activityUsedMs / activityBudgetMs) * 100) : 0;
 
   const formatHoursDisplay = (ms: number) => {
     return (ms / (3600 * 1000)).toFixed(1) + "h";
   };
+
+  const isFechado = contractType === 'fechado';
 
   return (
     <div className="space-y-4">
@@ -76,7 +80,7 @@ export function TaskSelector({
         </div>
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-            Atividade
+            Disciplina / Escopo
           </Label>
           <Select 
             value={activity} 
@@ -100,22 +104,34 @@ export function TaskSelector({
       {/* PAINEL DE SALDO DE HORAS REAL E DINÂMICO */}
       <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
         <div className="space-y-1.5">
-          <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
             <span>Saldo do Contrato</span>
-            <span className="font-mono">
-              {formatDuration(contractUsedMs)} / {formatHoursDisplay(contractBudgetMs)}
-            </span>
+            {isFechado ? (
+              <span className="font-semibold text-primary flex items-center gap-1">
+                <Infinity className="w-3 h-3" /> Horas Ilimitadas
+              </span>
+            ) : (
+              <span className="font-mono">
+                {formatDuration(contractUsedMs)} / {formatHoursDisplay(contractBudgetMs)}
+              </span>
+            )}
           </div>
-          <Progress value={contractPercent} className="h-1.5" />
+          {!isFechado && <Progress value={contractPercent} className="h-1.5" />}
         </div>
         <div className="space-y-1.5">
-          <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
-            <span>Saldo da Atividade</span>
-            <span className="font-mono">
-              {formatDuration(activityUsedMs)} / {formatHoursDisplay(activityBudgetMs)}
-            </span>
+          <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span>Saldo da Disciplina</span>
+            {isFechado ? (
+              <span className="font-semibold text-primary flex items-center gap-1">
+                <Infinity className="w-3 h-3" /> Horas Ilimitadas
+              </span>
+            ) : (
+              <span className="font-mono">
+                {formatDuration(activityUsedMs)} / {formatHoursDisplay(activityBudgetMs)}
+              </span>
+            )}
           </div>
-          <Progress value={activityPercent} className="h-1.5" />
+          {!isFechado && <Progress value={activityPercent} className="h-1.5" />}
         </div>
       </div>
 

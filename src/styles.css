@@ -62,6 +62,7 @@
 }
 
 .dark {
+  color-scheme: dark; /* ESSA É A LINHA MÁGICA QUE RESOLVE TUDO! */
   --background: oklch(0.16 0.02 250);
   --foreground: oklch(0.97 0.005 250);
   --card: oklch(0.21 0.025 250);
@@ -102,24 +103,11 @@
   100% { box-shadow: 0 0 0 0 oklch(0.52 0.18 255 / 0); }
 }
 .running-pulse { animation: pulse-ring 2s infinite; }
-/* ==========================================
-   O RELÓGIO DEFINITIVO (TIMESHEET)
-   ========================================== */
+
 input[type="time"]::-webkit-calendar-picker-indicator {
-  display: block !important;
   cursor: pointer !important;
-  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>') !important;
-  background-position: center !important;
-  background-repeat: no-repeat !important;
-  opacity: 0.5 !important;
-  transition: opacity 0.2s;
+  opacity: 0.6;
 }
-
 input[type="time"]::-webkit-calendar-picker-indicator:hover {
-  opacity: 1 !important;
-}
-
-.dark input[type="time"]::-webkit-calendar-picker-indicator {
-  filter: invert(1) !important;
-  opacity: 0.8 !important;
+  opacity: 1;
 }
