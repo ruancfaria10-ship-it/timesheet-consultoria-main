@@ -1,6 +1,6 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Moon, Sun, Timer, LogOut, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,7 +8,8 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
-import { type TimeEntry } from "@/lib/mock-data";
+import { type TimeEntry as BaseTimeEntry } from "@/lib/mock-data";
+type TimeEntry = BaseTimeEntry & { os_id?: string };
 import { useTheme } from "@/hooks/use-theme";
 import { TaskSelector } from "@/components/timesheet/TaskSelector";
 import { HistoryList } from "@/components/timesheet/HistoryList";
@@ -16,6 +17,7 @@ import { DailyDashboard } from "@/components/timesheet/DailyDashboard";
 import { supabase } from "@/lib/supabase";
 import { Login } from "@/components/Login";
 import type { User } from "@supabase/supabase-js";
+
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -38,6 +40,8 @@ interface AllocationRow {
     nome: string;
     status_ativo: boolean;
     tipo: string;
+    ciclo_inicio: number;
+    ciclo_fim: number;
   } | null;
 }
 
@@ -49,8 +53,10 @@ function TimesheetPage() {
 
   const [entries, setEntries] = useState<TimeEntry[]>([]);
   const [allocations, setAllocations] = useState<AllocationRow[]>([]);
+  const [osList, setOsList] = useState<any[]>([]); // Estado para lista de OS
   
   const [contractId, setContractId] = useState<string>("");
+  const [osId, setOsId] = useState<string>(""); // Estado para OS selecionada
   const [activity, setActivity] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   
@@ -80,6 +86,7 @@ function TimesheetPage() {
       if (session?.user) {
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
+        fetchOs(); // Busca as OS ao iniciar
       }
       setAuthLoading(false);
     });
@@ -89,6 +96,7 @@ function TimesheetPage() {
       if (session?.user) {
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
+        fetchOs(); // Busca as OS ao mudar de usuário
       }
     });
 
@@ -100,7 +108,7 @@ function TimesheetPage() {
       .from('alocacoes')
       .select(`
         id, user_id, contract_id, atividade, horas_disponiveis,
-        contratos ( codigo, nome, status_ativo, tipo )
+        contratos ( codigo, nome, status_ativo, tipo, ciclo_inicio, ciclo_fim )
       `)
       .eq('user_id', userId);
 
@@ -118,6 +126,14 @@ function TimesheetPage() {
         setContractId(activeAllocations[0].contract_id);
         setActivity(activeAllocations[0].atividade);
       }
+    }
+  };
+
+  // Função para buscar as Ordens de Serviço
+  const fetchOs = async () => {
+    const { data, error } = await supabase.from('ordens_servico').select('*').eq('status_ativa', true);
+    if (!error && data) {
+      setOsList(data);
     }
   };
 
@@ -142,7 +158,8 @@ function TimesheetPage() {
         notes: row.notes || undefined,
         start: new Date(row.start_at).getTime(),
         end: row.end_at ? new Date(row.end_at).getTime() : null,
-        edited: row.edited
+        edited: row.edited,
+        os_id: row.os_id // <-- ESTA É A LINHA QUE PUXA A OS DO BANCO!
       }));
       setEntries(mapped);
     }
@@ -167,17 +184,75 @@ function TimesheetPage() {
     if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
       setActivity(availableActivities[0]);
     }
-  }, [contractId, allocations]);
+
+    // Auto-selecionar a primeira OS caso o contrato mude e seja do Tipo 4 (continuado_com_os)
+    const cObj = contractsList.find((x) => x.id === contractId);
+    if (cObj?.tipo === 'continuado_com_os') {
+      const osDoContrato = osList.filter(o => o.contract_id === contractId);
+      if (osDoContrato.length > 0 && !osDoContrato.find(o => o.id === osId)) {
+        setOsId(osDoContrato[0].id);
+      } else if (osDoContrato.length === 0) {
+          setOsId("");
+      }
+    } else {
+        setOsId(""); // Limpa OS se mudar para um contrato que não precisa
+    }
+  }, [contractId, allocations, osList]);
+
+  // =====================================
+  // CALCULADORA DO MOTOR DE CICLOS/HORAS
+  // =====================================
+  const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
+  const currentContractType = currentContractObjFull?.tipo || 'horas';
+  const cInicio = currentContractObjFull?.ciclo_inicio || 25;
+  const cFim = currentContractObjFull?.ciclo_fim || 24;
 
   const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity);
   const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
   const contractBudgetMs = allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+  const currentOsObj = osList.find(o => o.id === osId);
+  const osBudgetMs = currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0;
 
-  const contractUsedMs = entries.filter(e => e.contractId === contractId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-  const activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+  // Calcula o início e fim do ciclo atual do contrato selecionado
+  const cycleBounds = useMemo(() => {
+    const now = new Date(); 
+    const currentDay = now.getDate(); 
+    const currentMonth = now.getMonth(); 
+    const currentYear = now.getFullYear();
+    let start, end;
 
-  const currentContractObj = contractsList.find((x) => x.id === contractId);
-  const currentContractType = currentContractObj?.tipo || 'horas';
+    if (cInicio > cFim) {
+      if (currentDay >= cInicio) { 
+        start = new Date(currentYear, currentMonth, cInicio, 0,0,0); 
+        end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59); 
+      } else { 
+        start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cInicio, 0,0,0); 
+        end = new Date(currentYear, currentMonth, cFim, 23,59,59); 
+      }
+    } else {
+      start = new Date(currentYear, currentMonth, cInicio, 0,0,0); 
+      end = new Date(currentYear, currentMonth, cFim, 23,59,59);
+    }
+    return { start: start.getTime(), end: end.getTime() };
+  }, [cInicio, cFim, daySelection, startTime]);
+
+  // Filtra as horas usadas dependendo se a regra é global ou mensal
+  const isMensal = ['overhead', 'continuado_limite_mensal'].includes(currentContractType);
+  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType);
+
+  let contractUsedMs = 0;
+  let activityUsedMs = 0;
+
+  if (isMensal) {
+    // Busca só as horas gastas DENTRO deste ciclo (Zera todo mês)
+    contractUsedMs = entries.filter(e => e.contractId === contractId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+    activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+  } else {
+    // Global Histórico
+    contractUsedMs = entries.filter(e => e.contractId === contractId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+    activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+  }
+  const osUsedMs = entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 
   // ==========================================
   // LÓGICA DE REGISTRO DE HORAS (COM TRAVA)
@@ -185,6 +260,10 @@ function TimesheetPage() {
   const handleAddEntry = async () => {
     if (!contractId || contractId === "" || contractId === "none" || !activity) {
       return toast.error("Selecione contrato e atividade válidos.");
+    }
+    // Trava para exigir OS se o contrato for do tipo continuado_com_os
+    if (currentContractType === 'continuado_com_os' && !osId) {
+      return toast.error("Selecione uma Ordem de Serviço (OS) para este contrato.");
     }
     if (!notesValid) return toast.error("A observação é obrigatória para registrar as horas.");
 
@@ -200,18 +279,29 @@ function TimesheetPage() {
 
     if (hasOverlap) return toast.error("Conflito de horário! Você já registrou horas nesse mesmo período.");
 
-    // --- MÓDULO DA TRAVA DE SALDO ---
+    // --- MÓDULO DA TRAVA DE SALDO (Adaptado para Mensal vs Global e Horas Ilimitadas) ---
     const durationMs = endMs - startMs;
-    if (currentContractType !== 'fechado') {
+    if (!isIlimitado) {
       // Bloqueio por Atividade
       if (activityBudgetMs > 0 && (activityUsedMs + durationMs > activityBudgetMs)) {
         const remaining = Math.max(0, activityBudgetMs - activityUsedMs);
-        return toast.error(`⚠️ Saldo insuficiente na disciplina! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
+        return toast.error(`⚠️ Saldo insuficiente na disciplina! Restam apenas ${(remaining / 3600000).toFixed(1)}h${isMensal ? ' neste mês' : ''}.`);
       }
       // Bloqueio Global do Contrato
       if (contractBudgetMs > 0 && (contractUsedMs + durationMs > contractBudgetMs)) {
         const remaining = Math.max(0, contractBudgetMs - contractUsedMs);
-        return toast.error(`⚠️ Saldo global insuficiente no contrato! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
+        return toast.error(`⚠️ Saldo global insuficiente no contrato! Restam apenas ${(remaining / 3600000).toFixed(1)}h${isMensal ? ' neste mês' : ''}.`);
+      }
+      // --- Trava de Horas da Ordem de Serviço (OS) ---
+      if (currentContractType === 'continuado_com_os' && osId) {
+        const selectedOs = osList.find(o => o.id === osId);
+        if (selectedOs && selectedOs.horas_previstas > 0) {
+          const osUsedMs = entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+          if (osUsedMs + durationMs > selectedOs.horas_previstas * 3600 * 1000) {
+            const rem = Math.max(0, (selectedOs.horas_previstas * 3600 * 1000) - osUsedMs);
+            return toast.error(`⚠️ Saldo estourado na OS ${selectedOs.codigo}! Restam apenas ${(rem / 3600000).toFixed(1)}h.`);
+          }
+        }
       }
     }
 
@@ -233,11 +323,18 @@ function TimesheetPage() {
     setStartTime(endTime);
 
     if (user) {
-      const { error } = await supabase.from('timesheets').insert({
+      const payload: any = {
         id: newEntryId, user_id: user.id, contract_id: contractId, contract_name: label,
         activity: activity, notes: notes.trim(),
         start_at: new Date(startMs).toISOString(), end_at: new Date(endMs).toISOString(),
-      });
+      };
+      
+      // Anexa a OS se o contrato for do tipo adequado e uma OS estiver selecionada
+      if (currentContractType === 'continuado_com_os' && osId) {
+          payload.os_id = osId;
+      }
+
+      const { error } = await supabase.from('timesheets').insert(payload);
       if (error) toast.error("Erro ao salvar online!");
     }
   };
@@ -263,24 +360,45 @@ function TimesheetPage() {
       const diffMs = newDurationMs - oldDurationMs; // Se aumentou o tempo, precisamos verificar o saldo
       
       const entryContractObj = contractsList.find(x => x.id === entryToEdit.contractId);
-      const isEntryFechado = entryContractObj?.tipo === 'fechado';
+      const isEntryIlimitado = ['continuado_sem_os', 'fechado'].includes(entryContractObj?.tipo || '');
+      const isEntryMensal = ['overhead', 'continuado_limite_mensal'].includes(entryContractObj?.tipo || '');
 
-      if (!isEntryFechado && diffMs > 0) {
-        // Puxamos quanto já foi usado e quanto é o limite
+      if (!isEntryIlimitado && diffMs > 0) {
         const aAlloc = allocations.find(a => a.contract_id === entryToEdit.contractId && a.atividade === entryToEdit.activity);
         const aBudget = aAlloc ? aAlloc.horas_disponiveis * 3600 * 1000 : 0;
         const cBudget = allocations.filter(a => a.contract_id === entryToEdit.contractId).reduce((s, a) => s + (a.horas_disponiveis * 3600 * 1000), 0);
 
-        const aUsed = entries.filter(e => e.contractId === entryToEdit.contractId && e.activity === entryToEdit.activity).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
-        const cUsed = entries.filter(e => e.contractId === entryToEdit.contractId).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
+        let aUsed = 0;
+        let cUsed = 0;
+
+        if (isEntryMensal) {
+             // Busca horas apenas no ciclo do apontamento
+             const entryDate = new Date(entryToEdit.start);
+             const cIni = entryContractObj?.tipo ? allocations.find(a => a.contract_id === entryToEdit.contractId)?.contratos?.ciclo_inicio || 25 : 25;
+             const cF = entryContractObj?.tipo ? allocations.find(a => a.contract_id === entryToEdit.contractId)?.contratos?.ciclo_fim || 24 : 24;
+             
+             const eMonth = entryDate.getMonth(); const eYear = entryDate.getFullYear(); const eDay = entryDate.getDate();
+             let bStart, bEnd;
+             if (cIni > cF) {
+                if (eDay >= cIni) { bStart = new Date(eYear, eMonth, cIni, 0,0,0); bEnd = new Date(eMonth === 11 ? eYear + 1 : eYear, eMonth === 11 ? 0 : eMonth + 1, cF, 23,59,59); } 
+                else { bStart = new Date(eMonth === 0 ? eYear - 1 : eYear, eMonth === 0 ? 11 : eMonth - 1, cIni, 0,0,0); bEnd = new Date(eYear, eMonth, cF, 23,59,59); }
+             } else {
+                bStart = new Date(eYear, eMonth, cIni, 0,0,0); bEnd = new Date(eYear, eMonth, cF, 23,59,59);
+             }
+             cUsed = entries.filter(e => e.contractId === entryToEdit.contractId && e.start >= bStart.getTime() && e.start <= bEnd.getTime()).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
+             aUsed = entries.filter(e => e.contractId === entryToEdit.contractId && e.activity === entryToEdit.activity && e.start >= bStart.getTime() && e.start <= bEnd.getTime()).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
+        } else {
+             aUsed = entries.filter(e => e.contractId === entryToEdit.contractId && e.activity === entryToEdit.activity).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
+             cUsed = entries.filter(e => e.contractId === entryToEdit.contractId).reduce((s, e) => s + ((e.end ?? Date.now()) - e.start), 0);
+        }
 
         if (aBudget > 0 && (aUsed + diffMs > aBudget)) {
           const remaining = Math.max(0, aBudget - aUsed);
-          return toast.error(`⚠️ Saldo insuficiente na disciplina para este aumento! Restam ${(remaining / 3600000).toFixed(1)}h.`);
+          return toast.error(`⚠️ Saldo insuficiente na disciplina para este aumento! Restam ${(remaining / 3600000).toFixed(1)}h${isEntryMensal ? ' neste mês' : ''}.`);
         }
         if (cBudget > 0 && (cUsed + diffMs > cBudget)) {
           const remaining = Math.max(0, cBudget - cUsed);
-          return toast.error(`⚠️ Saldo global insuficiente no contrato para este aumento! Restam ${(remaining / 3600000).toFixed(1)}h.`);
+          return toast.error(`⚠️ Saldo global insuficiente no contrato para este aumento! Restam ${(remaining / 3600000).toFixed(1)}h${isEntryMensal ? ' neste mês' : ''}.`);
         }
       }
     }
@@ -349,6 +467,8 @@ function TimesheetPage() {
               contracts={contractsList}
               contractId={contractId}
               contractType={currentContractType}
+              osList={osList}
+              osId={osId}
               activity={activity}
               notes={notes}
               contractUsedMs={contractUsedMs}
@@ -357,8 +477,11 @@ function TimesheetPage() {
               activityBudgetMs={activityBudgetMs}
               availableActivities={availableActivities}
               onContractChange={setContractId}
+              onOsChange={setOsId}
               onActivityChange={setActivity}
               onNotesChange={setNotes}
+              osUsedMs={osUsedMs}
+              osBudgetMs={osBudgetMs}
             />
             
             <div className="space-y-4 pt-2 border-t">

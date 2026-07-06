@@ -14,52 +14,72 @@ import { Infinity } from "lucide-react";
 export function TaskSelector({
   contracts,
   contractId,
-  contractType, // Recebe o tipo (horas ou fechado)
+  contractType,
+  osList,
+  osId,
   activity,
   notes,
   contractUsedMs,
   activityUsedMs,
   contractBudgetMs,
   activityBudgetMs,
+  osUsedMs,
+  osBudgetMs,
   availableActivities,
   onContractChange,
+  onOsChange,
   onActivityChange,
   onNotesChange,
 }: {
-  contracts: { id: string; code: string; name: string }[];
+  contracts: { id: string; code: string; name: string; tipo: string }[];
   contractId: string;
   contractType: string;
+  osList: { id: string; codigo: string; descricao: string; contract_id: string }[];
+  osId: string;
   activity: string;
   notes: string;
   contractUsedMs: number;
   activityUsedMs: number;
   contractBudgetMs: number;
   activityBudgetMs: number;
+  osUsedMs?: number;
+  osBudgetMs?: number;
   availableActivities: string[];
   onContractChange: (v: string) => void;
+  onOsChange: (v: string) => void;
   onActivityChange: (v: string) => void;
   onNotesChange: (v: string) => void;
 }) {
   const notesMissing = notes.trim().length === 0;
 
+  // Lógica dos Tipos de Contrato
+  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contractType);
+  const isMensal = ['overhead', 'continuado_limite_mensal'].includes(contractType);
+  const isComOS = contractType === 'continuado_com_os';
+  
+  const saldoTexto = isMensal ? "Saldo Mensal" : "Saldo Global";
+
   const contractPercent = contractBudgetMs > 0 ? Math.min(100, (contractUsedMs / contractBudgetMs) * 100) : 0;
-  const activityPercent = activityBudgetMs > 0 ? Math.min(100, (activityUsedMs / activityBudgetMs) * 100) : 0;
+  
+  // Define o que mostrar na barra inferior (OS ou Disciplina)
+  const subLabel = isComOS ? "Saldo da OS" : "Saldo da Disciplina";
+  const displayUsedMs = isComOS ? (osUsedMs || 0) : activityUsedMs;
+  const displayBudgetMs = isComOS ? (osBudgetMs || 0) : activityBudgetMs;
+  const subPercent = displayBudgetMs > 0 ? Math.min(100, (displayUsedMs / displayBudgetMs) * 100) : 0;
 
   const formatHoursDisplay = (ms: number) => {
     return (ms / (3600 * 1000)).toFixed(1) + "h";
   };
 
-  const isFechado = contractType === 'fechado';
+  const availableOs = osList ? osList.filter(os => os.contract_id === contractId) : [];
 
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-            Contrato
-          </Label>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Contrato / Cliente</Label>
           <Select value={contractId} onValueChange={onContractChange}>
-            <SelectTrigger className="h-12">
+            <SelectTrigger className="h-12 border-primary/50">
               <SelectValue placeholder="Selecione um contrato" />
             </SelectTrigger>
             <SelectContent>
@@ -78,35 +98,64 @@ export function TaskSelector({
             </SelectContent>
           </Select>
         </div>
+
+        {/* CAMPO DE OS SÓ APARECE SE O CONTRATO FOR TIPO 4 */}
+        {isComOS ? (
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Ordem de Serviço (OS)</Label>
+            <Select value={osId} onValueChange={onOsChange} disabled={availableOs.length === 0}>
+              <SelectTrigger className="h-12 border-amber-500/50">
+                <SelectValue placeholder={availableOs.length === 0 ? "Nenhuma OS cadastrada" : "Selecione a OS"} />
+              </SelectTrigger>
+              <SelectContent>
+                {availableOs.map((os) => (
+                  <SelectItem key={os.id} value={os.id}>
+                    <span className="font-bold">{os.codigo}</span> {os.descricao ? `- ${os.descricao}` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Disciplina / Escopo</Label>
+            <Select value={activity} onValueChange={onActivityChange} disabled={availableActivities.length === 0}>
+              <SelectTrigger className="h-12">
+                <SelectValue placeholder={availableActivities.length === 0 ? "Sem atividades" : "Selecione uma atividade"} />
+              </SelectTrigger>
+              <SelectContent>
+                {availableActivities.map((a) => (
+                  <SelectItem key={a} value={a}>{a}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+      </div>
+
+      {/* SE FOR COM OS, A ATIVIDADE CAI PRA LINHA DE BAIXO */}
+      {isComOS && (
         <div className="space-y-2">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-            Disciplina / Escopo
-          </Label>
-          <Select 
-            value={activity} 
-            onValueChange={onActivityChange} 
-            disabled={availableActivities.length === 0}
-          >
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Disciplina / Escopo</Label>
+          <Select value={activity} onValueChange={onActivityChange} disabled={availableActivities.length === 0}>
             <SelectTrigger className="h-12">
               <SelectValue placeholder={availableActivities.length === 0 ? "Sem atividades" : "Selecione uma atividade"} />
             </SelectTrigger>
             <SelectContent>
               {availableActivities.map((a) => (
-                <SelectItem key={a} value={a}>
-                  {a}
-                </SelectItem>
+                <SelectItem key={a} value={a}>{a}</SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
-      </div>
+      )}
 
       {/* PAINEL DE SALDO DE HORAS REAL E DINÂMICO */}
       <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
-            <span>Saldo do Contrato</span>
-            {isFechado ? (
+            <span>{saldoTexto} do Contrato</span>
+            {isIlimitado ? (
               <span className="font-semibold text-primary flex items-center gap-1">
                 <Infinity className="w-3 h-3" /> Horas Ilimitadas
               </span>
@@ -116,22 +165,22 @@ export function TaskSelector({
               </span>
             )}
           </div>
-          {!isFechado && <Progress value={contractPercent} className="h-1.5" />}
+          {!isIlimitado && <Progress value={contractPercent} className="h-1.5" />}
         </div>
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
-            <span>Saldo da Disciplina</span>
-            {isFechado ? (
+            <span>{subLabel}</span>
+            {isIlimitado ? (
               <span className="font-semibold text-primary flex items-center gap-1">
                 <Infinity className="w-3 h-3" /> Horas Ilimitadas
               </span>
             ) : (
               <span className="font-mono">
-                {formatDuration(activityUsedMs)} / {formatHoursDisplay(activityBudgetMs)}
+                {formatDuration(displayUsedMs)} / {formatHoursDisplay(displayBudgetMs)}
               </span>
             )}
           </div>
-          {!isFechado && <Progress value={activityPercent} className="h-1.5" />}
+          {!isIlimitado && <Progress value={subPercent} className="h-1.5" />}
         </div>
       </div>
 
@@ -145,7 +194,7 @@ export function TaskSelector({
         <Textarea
           value={notes}
           onChange={(e) => onNotesChange(e.target.value)}
-          placeholder="Descreva a atividade realizada..."
+          placeholder="Descreva a atividade realizada detalhadamente..."
           className={notesMissing ? "border-destructive focus-visible:ring-destructive" : ""}
           rows={2}
         />
