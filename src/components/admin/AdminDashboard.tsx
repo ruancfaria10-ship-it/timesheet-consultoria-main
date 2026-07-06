@@ -685,7 +685,7 @@ export function AdminDashboard() {
 if (loading) return <div className="h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-muted/20 dark:bg-background">
+    <div className="flex h-full w-full overflow-hidden bg-transparent">
       
       {/* 🧭 SIDEBAR LATERAL PROFISSIONAL */}
       <aside className="w-64 bg-card border-r flex flex-col shrink-0 h-full">
