@@ -90,7 +90,7 @@ export function AdminDashboard() {
   const [medLoading, setMedLoading] = useState(false)
 
   // Estados Gestão e Dashboards
-  const [dashVisaoTipo, setDashVisaoTipo] = useState<'horas' | 'fechado' | 'continuado_sem_os' | 'continuado_com_os' | 'continuado_limite_mensal'>('horas')
+  const [dashVisaoTipo, setDashVisaoTipo] = useState<'horas' | 'fechado' | 'continuado_sem_os' | 'continuado_com_os' | 'continuado_limite_mensal' | 'overhead'>('horas')
   const [dashMes, setDashMes] = useState<string>(new Date().getMonth().toString())
   const [dashAno, setDashAno] = useState<string>(new Date().getFullYear().toString())
   const [dashContratosSelecionados, setDashContratosSelecionados] = useState<string[]>([]) 
@@ -747,7 +747,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                     <SelectContent>
                       <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
                       <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                      <SelectItem value="continuado_com_os">Guarda-Chuva (Com OS)</SelectItem>
+                      <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
                       <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
                       <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
                     </SelectContent>
@@ -777,13 +777,13 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                         <Input value={editNome} onChange={(e) => setEditNome(e.target.value)} className="flex-1 min-w-[200px]" />
                         <Select value={editTipo} onValueChange={editTipo => setEditTipo(editTipo)}>
                           <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                            <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                            <SelectItem value="continuado_com_os">Guarda-Chuva (Com OS)</SelectItem>
-                            <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
-                            <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
-                          </SelectContent>
+                            <SelectContent>
+                                <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
+                                <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
+                                <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
+                                <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
+                                <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
+                              </SelectContent>
                         </Select>
                         <Select value={editFonte} onValueChange={editFonte => setEditFonte(editFonte)}><SelectTrigger className="w-24"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EC">EC</SelectItem><SelectItem value="ET">ET</SelectItem></SelectContent></Select>
                         <Input type="number" value={editInicio} onChange={(e) => setEditInicio(Number(e.target.value))} className="w-16" />
@@ -821,10 +821,10 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
         {/* VIEW: ORDENS DE SERVIÇO */}
         {menuAtivo === 'os' && (
           <Card className="border-t-4 border-t-amber-500">
-            <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas das obras Guarda-Chuva.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas das obras Sob Demanda.</CardDescription></CardHeader>
             <CardContent className="space-y-6">
               <div className="flex flex-wrap gap-4 items-end bg-amber-500/5 p-4 rounded-xl border border-amber-500/10">
-                <div className="space-y-2 flex-1 min-w-[250px]"><Label>Contrato Mestre (Guarda-Chuva)</Label>
+                <div className="space-y-2 flex-1 min-w-[250px]"><Label>Contrato Mestre (Sob Demanda)</Label>
                   <Select value={osContratoId} onValueChange={setOsContratoId}>
                     <SelectTrigger className="bg-background border-amber-500/30"><SelectValue placeholder="Selecione..." /></SelectTrigger>
                     <SelectContent>{contratos.filter(c => c.tipo === 'continuado_com_os' && c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
@@ -1105,13 +1105,14 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm">
                 <Select value={dashVisaoTipo} onValueChange={(v: any) => { setDashVisaoTipo(v); setDashContratosSelecionados([]); }}>
                   <SelectTrigger className="w-56 h-8 text-xs border-primary"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="horas">Escopo Fechado (Horas)</SelectItem>
-                    <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                    <SelectItem value="continuado_com_os">Guarda-Chuva (Com OS)</SelectItem>
-                    <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
-                    <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
-                  </SelectContent>
+                    <SelectContent>
+                        <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
+                        <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
+                        <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
+                        <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
+                        <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
+                        <SelectItem value="overhead">Overhead (Custos/Apoio)</SelectItem>
+                      </SelectContent>
                 </Select>
                 {/* 🌟 FILTRO EC/ET INTEGRADO NO DASHBOARD MENSAL */}
                 <Select value={dashFonte} onValueChange={setDashFonte}>
@@ -1151,13 +1152,14 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm">
                 <Select value={dashVisaoTipo} onValueChange={(v: any) => { setDashVisaoTipo(v); setDashContratosSelecionados([]); }}>
                   <SelectTrigger className="w-56 h-8 text-xs border-primary"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                    <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                    <SelectItem value="continuado_com_os">Guarda-Chuva (Com OS)</SelectItem>
-                    <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
-                    <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
-                  </SelectContent>
+                    <SelectContent>
+                        <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
+                        <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
+                        <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
+                        <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
+                        <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
+                        <SelectItem value="overhead">Overhead (Custos/Apoio)</SelectItem>
+                      </SelectContent>
                 </Select>
                 {/* 🌟 FILTRO EC/ET INTEGRADO NO DASHBOARD FINANCEIRO */}
                 <Select value={dashFonte} onValueChange={setDashFonte}>
@@ -1171,7 +1173,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
               {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div> : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
                   <div className="space-y-4">
-                    {['horas', 'continuado_com_os', 'continuado_limite_mensal'].includes(dashVisaoTipo) ? (
+                    {['horas', 'continuado_com_os', 'continuado_limite_mensal', 'overhead'].includes(dashVisaoTipo) ? (
                       <>
                         <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Budget Total Alocado</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.orcadoGlobal}h</p></div>
                         <div className="border p-4 rounded-xl bg-red-500/5 border-red-500/10"><p className="text-[10px] font-bold text-red-600 uppercase">Horas Consumidas</p><p className="text-3xl font-bold font-mono text-red-600 mt-0.5">{dashData.gastoGlobal.toFixed(1)}h</p></div>
@@ -1179,7 +1181,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                       </>
                     ) : (
                       <>
-                        <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Rateio Distribuído Equipe</p><p className="text-3xl font-bold text-primary mt-0.5">{dashData.percentualGlobal}%</p></div>
+                        <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Rateio Distribuído Equipe</p><p className="text-3xl font-bold text-primary mt-0.5">{dashVisaoTipo === 'fechado' ? `${dashData.percentualGlobal}%` : '---'}</p></div>
                         <div className="border p-4 rounded-xl bg-primary/5 border-primary/10"><p className="text-[10px] font-bold text-primary uppercase">{dashVisaoTipo === 'fechado' ? 'Avanço Físico Medido' : 'Tempo de Apoio Investido'}</p><p className="text-3xl font-bold text-primary mt-0.5">{dashVisaoTipo === 'fechado' ? `${dashData.medidoGlobal}%` : `${dashData.gastoGlobal.toFixed(1)}h`}</p></div>
                       </>
                     )}
