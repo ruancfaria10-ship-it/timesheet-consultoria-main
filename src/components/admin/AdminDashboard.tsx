@@ -28,7 +28,7 @@ type Contrato = { id: string, codigo: string, nome: string, status_ativo: boolea
 type OrdemServico = { id: string, contract_id: string, codigo: string, descricao: string, status_ativa: boolean, horas_previstas: number }
 type AtividadeAlocada = { id: string, dbId?: string, nome: string, horas: number }
 type Alocacao = { consultorId: string, horasTotais: number, geralId?: string, atividades: AtividadeAlocada[] }
-type TimesheetLog = { id: string, user_id: string, contract_id: string, activity: string, start_at: string, end_at: string | null, notes?: string }
+type TimesheetLog = { id: string, user_id: string, contract_id: string, os_id?: string, activity: string, start_at: string, end_at: string | null, notes?: string }
 type Medicao = { id?: string, contract_id: string, user_id: string, mes: string, ano: string, percentual: number }
 
 const MESES_NOME = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
@@ -74,6 +74,7 @@ export function AdminDashboard() {
 
   // Estados Alocações
   const [contratoAtivo, setContratoAtivo] = useState<string>('')
+  const [alocacaoOsId, setAlocacaoOsId] = useState<string>('global') // NOVO: Controla se a alocação é global ou numa OS
   const [alocacoes, setAlocacoes] = useState<Record<string, Alocacao>>({})
   const [carregandoAlocacoes, setCarregandoAlocacoes] = useState(false)
 
@@ -84,16 +85,17 @@ export function AdminDashboard() {
   const [medContrato, setMedContrato] = useState<string>('')
   const [medMes, setMedMes] = useState<string>(new Date().getMonth().toString())
   const [medAno, setMedAno] = useState<string>(new Date().getFullYear().toString())
-  const [medFonte, setMedFonte] = useState<string>('todas') // NOVO FILTRO EC/ET NAS MEDIÇÕES
+  const [medFonte, setMedFonte] = useState<string>('todas')
   const [medicoesInput, setMedicoesInput] = useState<Record<string, number>>({})
   const [medConsultores, setMedConsultores] = useState<Consultor[]>([])
   const [medLoading, setMedLoading] = useState(false)
 
   // Estados Gestão e Dashboards
-  const [dashVisaoTipo, setDashVisaoTipo] = useState<'horas' | 'fechado' | 'continuado_sem_os' | 'continuado_com_os' | 'continuado_limite_mensal' | 'overhead'>('horas')
+  const [dashVisaoTipos, setDashVisaoTipos] = useState<string[]>(['horas', 'continuado_com_os', 'continuado_limite_mensal', 'overhead'])
   const [dashMes, setDashMes] = useState<string>(new Date().getMonth().toString())
   const [dashAno, setDashAno] = useState<string>(new Date().getFullYear().toString())
   const [dashContratosSelecionados, setDashContratosSelecionados] = useState<string[]>([]) 
+  const [dashOs, setDashOs] = useState<string>('todas') // NOVO: Filtro de OS nos gráficos
   const [dashConsultor, setDashConsultor] = useState<string>('todos')
   const [dashAtividade, setDashAtividade] = useState<string>('todas')
   const [dashFonte, setDashFonte] = useState<string>('todas')
@@ -224,32 +226,34 @@ export function AdminDashboard() {
   }
 
   // ==========================================
-  // FUNÇÕES DE EQUIPE & METAS (CORRIGIDO)
+  // FUNÇÕES DE EQUIPE & METAS
   // ==========================================
   async function atualizarMetaConsultor(id: string, valor: number) {
-    // Atualiza a tela imediatamente para não travar o usuário
     setConsultores(p => p.map(c => c.id === id ? { ...c, horas_minimas_mes: valor } : c));
-    
-    // Tenta atualizar no banco e pede para o banco DEVOLVER a linha alterada (.select)
     const { data, error } = await supabase.from('consultores').update({ horas_minimas_mes: valor }).eq('id', id).select();
     
     if (error) {
       alert("❌ Erro do banco: " + error.message);
     } else if (!data || data.length === 0) {
-      alert("❌ Falha Silenciosa: O Supabase bloqueou o salvamento. Verifique se rodou o script SQL de permissão!");
+      alert("❌ Falha Silenciosa: O Supabase bloqueou o salvamento. Verifique as políticas (RLS) do banco de dados.");
     } else {
       alert("✅ Meta salva com segurança na nuvem!");
     }
   }
 
   // ==========================================
-  // FUNÇÕES DE ALOCAÇÃO
+  // FUNÇÕES DE ALOCAÇÃO (ATUALIZADO COM OS)
   // ==========================================
-  useEffect(() => { if (contratoAtivo && menuAtivo === 'alocacoes') carregarAlocacoesDoContrato(contratoAtivo) }, [contratoAtivo, menuAtivo])
+  useEffect(() => { if (contratoAtivo && menuAtivo === 'alocacoes') carregarAlocacoesDoContrato(contratoAtivo, alocacaoOsId) }, [contratoAtivo, alocacaoOsId, menuAtivo])
   
-  async function carregarAlocacoesDoContrato(idContrato: string) {
+  async function carregarAlocacoesDoContrato(idContrato: string, idOs: string) {
     setCarregandoAlocacoes(true)
-    const { data } = await supabase.from('alocacoes').select('*').eq('contract_id', idContrato)
+    let query = supabase.from('alocacoes').select('*').eq('contract_id', idContrato)
+    
+    if (idOs !== 'global') query = query.eq('os_id', idOs);
+    else query = query.is('os_id', null);
+
+    const { data } = await query;
     const alocSalvas: Record<string, Alocacao> = {}
     ;(data || []).forEach(row => {
       if (!alocSalvas[row.user_id]) alocSalvas[row.user_id] = { consultorId: row.user_id, horasTotais: 0, atividades: [] }
@@ -276,6 +280,8 @@ export function AdminDashboard() {
     const { data: currentTimesheets } = await supabase.from('timesheets').select('*').eq('contract_id', contratoAtivo);
     const cObj = contratos.find(c => c.id === contratoAtivo);
     const isHora = cObj?.tipo === 'horas';
+    const isComOs = cObj?.tipo === 'continuado_com_os';
+    const targetOsId = (isComOs && alocacaoOsId !== 'global') ? alocacaoOsId : null;
 
     const upserts: any[] = []; const inserts: any[] = []; const deletes: string[] = [];
     let bloqueio = false;
@@ -291,8 +297,8 @@ export function AdminDashboard() {
               bloqueio = true;
             }
           }
-          if (ativ.dbId) upserts.push({ id: ativ.dbId, user_id: aloc.consultorId, contract_id: contratoAtivo, horas_disponiveis: ativ.horas, atividade: ativ.nome.trim() })
-          else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, horas_disponiveis: ativ.horas, atividade: ativ.nome.trim() })
+          if (ativ.dbId) upserts.push({ id: ativ.dbId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: ativ.horas, atividade: ativ.nome.trim() })
+          else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: ativ.horas, atividade: ativ.nome.trim() })
         })
         if (aloc.geralId) deletes.push(aloc.geralId)
       } else {
@@ -303,18 +309,18 @@ export function AdminDashboard() {
             bloqueio = true;
           }
         }
-        if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, horas_disponiveis: aloc.horasTotais, atividade: 'Sem atividade específica' })
-        else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, horas_disponiveis: aloc.horasTotais, atividade: 'Sem atividade específica' })
+        if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: aloc.horasTotais, atividade: 'Sem atividade específica' })
+        else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: aloc.horasTotais, atividade: 'Sem atividade específica' })
       }
     })
 
     if (bloqueio) return setSalvando(false);
 
     try {
-      for (const u of upserts) await supabase.from('alocacoes').update({ horas_disponiveis: u.horas_disponiveis, atividade: u.atividade }).eq('id', u.id)
+      for (const u of upserts) await supabase.from('alocacoes').update({ horas_disponiveis: u.horas_disponiveis, atividade: u.atividade, os_id: u.os_id }).eq('id', u.id)
       if (inserts.length > 0) await supabase.from('alocacoes').insert(inserts)
       if (deletes.length > 0) await supabase.from('alocacoes').delete().in('id', deletes)
-      alert("Alocações salvas com sucesso!"); carregarAlocacoesDoContrato(contratoAtivo)
+      alert("Alocações salvas com sucesso!"); carregarAlocacoesDoContrato(contratoAtivo, alocacaoOsId)
     } catch (e) { alert("Erro ao salvar.") }
     setSalvando(false)
   }
@@ -342,6 +348,9 @@ export function AdminDashboard() {
     if (dbIds.length > 0) await supabase.from('alocacoes').delete().in('id', dbIds as string[]); 
     setAlocacoes(p => { const n = { ...p }; delete n[cid]; return n }) 
   }
+
+  const contratoSelecionadoObj = contratos.find(c => c.id === contratoAtivo)
+  const isGlobalType4 = contratoSelecionadoObj?.tipo === 'continuado_com_os' && alocacaoOsId === 'global';
 
   // ==========================================
   // MEDIÇÕES MENSAIS
@@ -488,8 +497,49 @@ export function AdminDashboard() {
   }, [allTimesheets, gestaoConsultor])
 
   // ==========================================
-  // DASHBOARDS, CALCULADORA E ALERTAS (RADAR)
+  // DASHBOARDS E COMPONENTES AUXILIARES
   // ==========================================
+  const MAPEAMENTO_TIPOS: Record<string, string> = {
+    horas: "Escopo Fechado (Horas)",
+    fechado: "Preço Fechado (%)",
+    continuado_com_os: "Sob Demanda (Com OS)",
+    continuado_sem_os: "Assessoria (Horas Livres)",
+    continuado_limite_mensal: "Assessoria (Teto Mensal)",
+    overhead: "Overhead (Custos/Apoio)"
+  };
+
+  const renderFiltroTiposContratoMultiplos = () => (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" className="w-64 justify-start font-normal bg-background h-8 text-xs border-primary truncate overflow-hidden">
+          {dashVisaoTipos.length === 0 ? "Nenhum Tipo Selecionado" : `${dashVisaoTipos.length} Tipo(s) de Contrato`}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-64 p-2 bg-card border shadow-md" align="start">
+        <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+          {Object.entries(MAPEAMENTO_TIPOS).map(([key, label]) => (
+            <div key={key} className="flex items-center space-x-2 py-1">
+              <Checkbox 
+                id={`chk-tipo-${key}`} 
+                checked={dashVisaoTipos.includes(key)} 
+                onCheckedChange={(checked) => { 
+                  if (checked) {
+                    setDashVisaoTipos(prev => [...prev, key]);
+                    setDashContratosSelecionados([]);
+                  } else {
+                    setDashVisaoTipos(prev => prev.filter(id => id !== key));
+                    setDashContratosSelecionados([]);
+                  }
+                }} 
+              />
+              <Label htmlFor={`chk-tipo-${key}`} className="cursor-pointer text-sm leading-tight flex-1">{label}</Label>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+
   useEffect(() => { if (['dash-mensal', 'dash-global', 'alertas', 'gestao'].includes(menuAtivo)) carregarTudoParaDash() }, [menuAtivo])
 
   async function carregarTudoParaDash() {
@@ -514,9 +564,29 @@ export function AdminDashboard() {
 
   const contratosVisao = contratos.filter(c => 
     c.status_ativo && 
-    c.tipo === dashVisaoTipo && 
+    dashVisaoTipos.includes(c.tipo) && 
     (dashFonte === 'todas' ? true : c.fonte_pagamento === dashFonte)
   )
+
+  // 🌟 NOVO: Listas Dependentes para os Filtros do Dashboard
+  const consultoresDashDisponiveis = useMemo(() => {
+    if (dashContratosSelecionados.length === 0) return consultores;
+    const userIds = new Set(allAlocacoes.filter(a => dashContratosSelecionados.includes(a.contract_id)).map(a => a.user_id));
+    return consultores.filter(c => userIds.has(c.id));
+  }, [dashContratosSelecionados, consultores, allAlocacoes]);
+
+  const osDashDisponiveis = useMemo(() => {
+    if (dashContratosSelecionados.length === 0) return osList;
+    return osList.filter(o => dashContratosSelecionados.includes(o.contract_id));
+  }, [dashContratosSelecionados, osList]);
+
+  const atividadesDashDisponiveis = useMemo(() => {
+    let alocs = allAlocacoes;
+    if (dashContratosSelecionados.length > 0) alocs = alocs.filter(a => dashContratosSelecionados.includes(a.contract_id));
+    if (dashOs !== 'todas') alocs = alocs.filter(a => a.os_id === dashOs);
+    const acts = new Set(alocs.map(a => a.atividade || a.activity));
+    return Array.from(acts).filter(Boolean).filter(a => a !== 'Sem atividade específica');
+  }, [dashContratosSelecionados, dashOs, allAlocacoes]);
 
   const dashData = useMemo(() => {
     let fTimes = allTimesheets.filter(t => contratosVisao.some(cv => cv.id === t.contract_id))
@@ -534,6 +604,10 @@ export function AdminDashboard() {
       fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id))
       fMeds = fMeds.filter(m => dashContratosSelecionados.includes(m.contract_id))
     }
+    if (dashOs !== 'todas') {
+      fTimes = fTimes.filter(t => t.os_id === dashOs);
+      fAlocs = fAlocs.filter(a => a.os_id === dashOs);
+    }
     if (dashConsultor !== 'todos') {
       fTimes = fTimes.filter(t => t.user_id === dashConsultor); fAlocs = fAlocs.filter(a => a.user_id === dashConsultor); fMeds = fMeds.filter(m => m.user_id === dashConsultor)
     }
@@ -541,9 +615,11 @@ export function AdminDashboard() {
       fTimes = fTimes.filter(t => t.activity === dashAtividade); fAlocs = fAlocs.filter(a => a.atividade === dashAtividade || a.atividade === 'Sem atividade específica')
     }
 
+    const isFechadoMode = dashVisaoTipos.includes('fechado') && dashVisaoTipos.length === 1;
+
     const consultoresPagamento = consultores.map(c => {
       let valorGrafico = 0; let tooltipExtra = ""
-      if (dashVisaoTipo === 'fechado') {
+      if (isFechadoMode) {
         valorGrafico = fMeds.filter(m => m.user_id === c.id && m.mes === dashMes && m.ano === dashAno).reduce((acc, m) => acc + m.percentual, 0)
         const horasInfinitas = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, contratos.find(con => con.id === t.contract_id)?.ciclo_inicio || 25, contratos.find(con => con.id === t.contract_id)?.ciclo_fim || 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
         tooltipExtra = horasInfinitas > 0 ? `(Tempo investido: ${horasInfinitas.toFixed(1)}h)` : ""
@@ -561,11 +637,10 @@ export function AdminDashboard() {
     const saldoPositivo = orcadoGlobal - gastoGlobal > 0 ? orcadoGlobal - gastoGlobal : 0;
     const saldoMedido = 100 - medidoGlobal > 0 ? 100 - medidoGlobal : 0;
     
-    let pieData = dashVisaoTipo === 'fechado' 
+    let pieData = isFechadoMode 
       ? [ { name: '% Entregue (Medida)', value: Number(medidoGlobal.toFixed(1)) }, { name: 'A Entregar', value: Number(saldoMedido.toFixed(1)) } ]
       : [ { name: 'Consumido', value: Number(gastoGlobal.toFixed(2)) }, { name: 'Saldo Restante', value: Number(saldoPositivo.toFixed(2)) } ]
     
-    // Trava para a Pizza não desaparecer se estiver tudo 0
     pieData = pieData.filter(p => p.value > 0);
     if (pieData.length === 0) pieData.push({ name: 'Sem Registros', value: 1 });
 
@@ -573,24 +648,23 @@ export function AdminDashboard() {
       consultoresPagamento, maxValor: Math.max(...consultoresPagamento.map(c => c.valorGrafico), 1), 
       orcadoGlobal, gastoGlobal: Number(gastoGlobal.toFixed(2)), medidoGlobal: Number(medidoGlobal.toFixed(1)),
       saldoGlobal: Number((orcadoGlobal - gastoGlobal).toFixed(2)),
-      percentualGlobal: dashVisaoTipo === 'horas' ? (orcadoGlobal > 0 ? ((gastoGlobal / orcadoGlobal) * 100).toFixed(1) : '0') : orcadoGlobal.toString(),
-      pieData
+      percentualGlobal: orcadoGlobal > 0 ? ((gastoGlobal / orcadoGlobal) * 100).toFixed(1) : '0',
+      pieData,
+      isFechadoMode
     }
-  }, [allTimesheets, allAlocacoes, allMedicoes, dashMes, dashAno, dashContratosSelecionados, dashConsultor, dashAtividade, consultores, dashVisaoTipo, contratosVisao, contratos])
+  }, [allTimesheets, allAlocacoes, allMedicoes, dashMes, dashAno, dashContratosSelecionados, dashOs, dashConsultor, dashAtividade, consultores, dashVisaoTipos, contratosVisao, contratos])
 
-// LÓGICA DO RADAR DE ALERTAS REPROGRAMADA
   const radarAlertas = useMemo(() => {
     const ociosos: any[] = [];
     const estourados: any[] = [];
 
-    // Cálculo dinâmico da metade do ciclo padrão vigente (25 a 24)
     const now = new Date();
     const currentDay = now.getDate();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
 
     let startDt, endDt;
-    if (25 > 24) { // Ciclo padrão Engeprice
+    if (25 > 24) { 
       if (currentDay >= 25) {
         startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0);
         endDt = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, 24, 23, 59, 59);
@@ -606,7 +680,6 @@ export function AdminDashboard() {
     const meioDoCicloMs = startDt.getTime() + (endDt.getTime() - startDt.getTime()) / 2;
     const jaPassouDaMetade = Date.now() >= meioDoCicloMs;
 
-    // Alerta de Ociosidade (< 30% da Meta Mensal - Apenas se passou da metade do ciclo)
     consultores.forEach(c => {
       if (c.horas_minimas_mes > 0) {
         const horasTrabalhadas = allTimesheets.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, 25, 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
@@ -618,10 +691,14 @@ export function AdminDashboard() {
       }
     });
 
-    // Alerta de Estouro (> 70% do Contrato/Alocação)
-    contratos.filter(c => c.status_ativo && ['horas', 'continuado_limite_mensal', 'continuado_com_os'].includes(c.tipo)).forEach(cont => {
+    contratos.filter(c => c.status_ativo && ['horas', 'continuado_limite_mensal', 'continuado_com_os', 'overhead'].includes(c.tipo)).forEach(cont => {
       const orcado = allAlocacoes.filter(a => a.contract_id === cont.id).reduce((sum, a) => sum + a.horas_disponiveis, 0);
-      const consumido = allTimesheets.filter(t => t.contract_id === cont.id && (cont.tipo === 'continuado_limite_mensal' ? isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim) : true)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+      let consumido = 0;
+      if (cont.tipo === 'continuado_limite_mensal' || cont.tipo === 'overhead') {
+        consumido = allTimesheets.filter(t => t.contract_id === cont.id && isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+      } else {
+        consumido = allTimesheets.filter(t => t.contract_id === cont.id).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+      }
       
       if (orcado > 0) {
         const perc = (consumido / orcado) * 100;
@@ -634,8 +711,9 @@ export function AdminDashboard() {
 
   const exportarExcel = () => {
     let registros = allTimesheets.filter(t => {
-      const cont = contratos.find(c => c.id === t.contract_id); if (cont?.tipo !== dashVisaoTipo) return false;
-      return isWithinCycle(t.start_at, dashMes, dashAno, cont?.ciclo_inicio || 25, cont?.ciclo_fim || 24)
+      const cont = contratos.find(c => c.id === t.contract_id); 
+      if (!cont || !dashVisaoTipos.includes(cont.tipo)) return false;
+      return isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio || 25, cont.ciclo_fim || 24)
     })
     if (dashContratosSelecionados.length > 0) registros = registros.filter(t => dashContratosSelecionados.includes(t.contract_id))
     if (dashConsultor !== 'todos') registros = registros.filter(t => t.user_id === dashConsultor)
@@ -653,13 +731,13 @@ export function AdminDashboard() {
     })
     const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' })
     const link = document.createElement("a"); link.href = URL.createObjectURL(blob); 
-    link.download = `Apontamentos_Engeprice_${dashVisaoTipo}_${MESES_NOME[parseInt(dashMes)]}_${dashAno}.csv`; link.click()
+    link.download = `Apontamentos_Engeprice_${MESES_NOME[parseInt(dashMes)]}_${dashAno}.csv`; link.click()
   }
 
   const renderFiltroContratosMultiplos = () => (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="outline" className="w-full justify-start font-normal bg-background h-9 border-input truncate overflow-hidden">
+        <Button variant="outline" className="w-full justify-start font-normal bg-background h-8 text-xs border-input truncate overflow-hidden">
           {dashContratosSelecionados.length === 0 ? "Todos os Contratos" : `${dashContratosSelecionados.length} Contrato(s) selecionado(s)`}
         </Button>
       </PopoverTrigger>
@@ -677,12 +755,7 @@ export function AdminDashboard() {
     </Popover>
   )
 
-  const listaAtividadesDash = Array.from(new Set([...allTimesheets.map(t => t.activity), ...allAlocacoes.map(a => a.atividade)]))
-  const contratoSelecionadoObj = contratos.find(c => c.id === contratoAtivo)
-
   if (loading) return <div className="h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
-
-if (loading) return <div className="h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-transparent">
@@ -695,7 +768,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
           <div><h2 className="font-bold text-sm tracking-tight leading-none">Engeprice</h2><p className="text-[10px] text-muted-foreground mt-1">Management ERP</p></div>
         </div>
         
-        {/* MENU DE NAVEGAÇÃO ROLÁVEL (O 'min-h-0' é a trava que salva o rodapé) */}
+        {/* MENU DE NAVEGAÇÃO ROLÁVEL */}
         <nav className="p-4 flex-1 space-y-6 overflow-y-auto min-h-0">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Engenharia & Cadastros</p>
@@ -769,7 +842,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
               </div>
 
               <div className="border rounded-xl divide-y max-h-[500px] overflow-y-auto bg-card shadow-sm">
-                {contratos.filter(c => c.tipo !== 'overhead').map(c => (
+                {contratos.map(c => (
                   <div key={c.id} className="p-4 flex flex-wrap gap-4 justify-between items-center hover:bg-muted/20">
                     {editandoId === c.id ? (
                       <div className="flex flex-1 flex-wrap gap-3 items-center">
@@ -929,71 +1002,116 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
         )}
 
         {/* VIEW: ALOCAÇÃO DE HORAS */}
-        {menuAtivo === 'alocacoes' && (
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-            <div className="md:col-span-4 space-y-4">
-              <Card>
-                <CardHeader className="pb-3"><CardTitle className="text-sm">1. Projeto Mestre</CardTitle></CardHeader>
-                <CardContent>
-                  <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); }}>
-                    <SelectTrigger className="w-full"><SelectValue placeholder="Escolha a obra..." /></SelectTrigger>
-                    <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
-                  </Select>
-                </CardContent>
-              </Card>
-              <Card className={!contratoAtivo ? 'opacity-40 pointer-events-none' : ''}>
-                <CardHeader className="pb-3"><CardTitle className="text-sm">2. Selecionar Engenheiro</CardTitle></CardHeader>
-                <CardContent className="space-y-1.5 max-h-[350px] overflow-y-auto p-3">
-                  {consultores.map(user => {
-                    const jaAlocado = !!alocacoes[user.id]
-                    return (
-                      <div key={user.id} onClick={() => addConsultor(user.id)} className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}>
-                        <span className="font-medium">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
-                      </div>
-                    )
-                  })}
-                </CardContent>
-              </Card>
-            </div>
-            <div className="md:col-span-8">
-              <Card className="h-full min-h-[450px] flex flex-col">
-                <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
-                  <div><CardTitle className="text-base">3. Distribuição de Metas de Custo</CardTitle></div>
-                  {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm"><Save className="w-4 h-4" /> Gravar Matriz</Button>}
-                </CardHeader>
-                <CardContent className="p-4 space-y-4 overflow-y-auto max-h-[500px]">
-                  {carregandoAlocacoes ? (
-                    <div className="flex justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
-                  ) : Object.values(alocacoes).length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Selecione uma obra e adicione consultores.</div> : 
-                    Object.values(alocacoes).map(aloc => (
-                      <div key={aloc.consultorId} className="border rounded-xl p-4 bg-card shadow-sm">
-                        <div className="flex justify-between items-center border-b pb-3 mb-3">
-                          <div><h4 className="font-bold text-sm text-primary">{consultores.find(c => c.id === aloc.consultorId)?.nome}</h4><p className="text-[10px] text-muted-foreground mt-0.5">{contratoSelecionadoObj?.tipo === 'continuado_limite_mensal' ? 'Teto Mensal (Horas)' : 'Teto Global (Horas)'}</p></div>
-                          <div className="flex items-center gap-2">
-                            <div className="relative flex items-center">
-                              <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHoras(aloc.consultorId, Number(e.target.value))} className="w-24 h-8 pr-6 font-bold text-right text-primary bg-muted/50" disabled={aloc.atividades.length > 0} />
-                              <span className="absolute right-2 text-xs text-muted-foreground">h</span>
-                            </div>
-                            <Button variant="ghost" size="icon" onClick={() => removeConsultor(aloc.consultorId)} className="h-8 w-8 text-red-500"><Trash2 className="w-4 h-4" /></Button>
+          {menuAtivo === 'alocacoes' && (
+            <div className="space-y-6">
+              
+              {/* CABEÇALHO MANEIRO */}
+              <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm">
+                <div>
+                  <h2 className="text-2xl font-black text-primary tracking-tight flex items-center gap-2">
+                    <Clock className="w-6 h-6" /> Matriz de Distribuição de Custo
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+                    Defina o limite global de horas de cada engenheiro por contrato e, caso necessário, fragmente esse saldo em disciplinas específicas. Para contratos de Assessoria e Overhead, os tetos configurados aqui se <strong className="text-foreground">renovam automaticamente</strong> a cada ciclo.
+                  </p>
+                </div>
+                {contratoAtivo && (
+                  <div className="bg-background/80 backdrop-blur-sm border rounded-xl p-3 px-5 text-right shrink-0 shadow-sm">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Contrato Selecionado</p>
+                    <p className="font-bold text-sm text-foreground mt-0.5">{contratos.find(c => c.id === contratoAtivo)?.codigo || "Nenhum"}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+                <div className="md:col-span-4 space-y-4">
+                  <Card>
+                    <CardHeader className="pb-3"><CardTitle className="text-sm">1. Projeto Mestre</CardTitle></CardHeader>
+                    <CardContent>
+                      <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacaoOsId('global'); setAlocacoes({}); }}>
+                        <SelectTrigger className="w-full"><SelectValue placeholder="Escolha a obra..." /></SelectTrigger>
+                        <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
+                      </Select>
+                      
+                      {/* 🌟 NOVO: SELEÇÃO DE SUBNÍVEL DE OS PARA ALOCAÇÃO */}
+                      {contratoSelecionadoObj?.tipo === 'continuado_com_os' && (
+                        <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                          <Label className="text-xs font-bold text-amber-700 mb-2 block">Ordem de Serviço (Subnível)</Label>
+                          <Select value={alocacaoOsId} onValueChange={setAlocacaoOsId}>
+                            <SelectTrigger className="bg-background border-amber-500/30 text-xs"><SelectValue/></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="global" className="font-bold">Alocação Global do Contrato</SelectItem>
+                              {osList.filter(o => o.contract_id === contratoAtivo).map(o => (
+                                <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <p className="text-[10px] text-amber-700/70 mt-2 leading-tight">Dica: Aloque primeiro o limite global do consultor na obra. Depois selecione uma OS para dividir as horas em atividades específicas.</p>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                  <Card className={!contratoAtivo ? 'opacity-40 pointer-events-none' : ''}>
+                    <CardHeader className="pb-3"><CardTitle className="text-sm">2. Selecionar Engenheiro</CardTitle></CardHeader>
+                    <CardContent className="space-y-1.5 max-h-[350px] overflow-y-auto p-3">
+                      {consultores.map(user => {
+                        const jaAlocado = !!alocacoes[user.id]
+                        return (
+                          <div key={user.id} onClick={() => addConsultor(user.id)} className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}>
+                            <span className="font-medium">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
                           </div>
-                        </div>
-                        <div className="pl-3 border-l-2 border-primary/20 space-y-2">
-                          <div className="flex justify-between items-center text-xs"><span className="font-medium text-muted-foreground">Disciplinas / Escopos</span><Button variant="outline" size="sm" className="h-7 text-[10px]" onClick={() => addAtiv(aloc.consultorId)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar</Button></div>
-                          {aloc.atividades.map(a => (
-                            <div key={a.id} className="flex gap-2 items-center bg-muted/30 p-2 rounded-lg text-xs">
-                              <span className="flex-1 font-medium">{a.nome}</span>
-                              <div className="relative w-24"><Input type="number" className="h-7 text-right font-bold pr-5" value={a.horas || ''} onChange={(e) => updateAtiv(aloc.consultorId, a.id, Number(e.target.value))} /><span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span></div>
-                              <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => removeAtiv(aloc.consultorId, a.id, a.dbId)}><X className="w-3.5 h-3.5" /></Button>
-                            </div>
-                          ))}
-                        </div>
+                        )
+                      })}
+                    </CardContent>
+                  </Card>
+                </div>
+                <div className="md:col-span-8">
+                  <Card className="h-full min-h-[450px] flex flex-col">
+                    <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
+                      <div>
+                        <CardTitle className="text-base">3. Distribuição de Metas de Custo</CardTitle>
+                        {isGlobalType4 && <CardDescription className="text-amber-600 mt-1">Modo Global: Defina apenas o teto total do consultor na Obra.</CardDescription>}
                       </div>
-                    ))}
-                </CardContent>
-              </Card>
+                      {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm"><Save className="w-4 h-4" /> Gravar Matriz</Button>}
+                    </CardHeader>
+                    <CardContent className="p-4 space-y-4 overflow-y-auto max-h-[500px]">
+                      {carregandoAlocacoes ? (
+                        <div className="flex justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
+                      ) : Object.values(alocacoes).length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Selecione uma obra/OS e adicione consultores.</div> : 
+                        Object.values(alocacoes).map(aloc => (
+                          <div key={aloc.consultorId} className="border rounded-xl p-4 bg-card shadow-sm">
+                            <div className={`flex justify-between items-center ${!isGlobalType4 ? 'border-b pb-3 mb-3' : ''}`}>
+                              <div><h4 className="font-bold text-sm text-primary">{consultores.find(c => c.id === aloc.consultorId)?.nome}</h4><p className="text-[10px] text-muted-foreground mt-0.5">{contratoSelecionadoObj?.tipo === 'continuado_limite_mensal' || contratoSelecionadoObj?.tipo === 'overhead' ? 'Teto Mensal (Horas)' : 'Teto Global (Horas)'}</p></div>
+                              <div className="flex items-center gap-2">
+                                <div className="relative flex items-center">
+                                  <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHoras(aloc.consultorId, Number(e.target.value))} className="w-24 h-8 pr-6 font-bold text-right text-primary bg-muted/50" disabled={aloc.atividades.length > 0} />
+                                  <span className="absolute right-2 text-xs text-muted-foreground">h</span>
+                                </div>
+                                <Button variant="ghost" size="icon" onClick={() => removeConsultor(aloc.consultorId)} className="h-8 w-8 text-red-500"><Trash2 className="w-4 h-4" /></Button>
+                              </div>
+                            </div>
+                            
+                            {/* SE FOR ALOCAÇÃO GLOBAL DE CONTRATO COM OS, ESCONDE AS ATIVIDADES */}
+                            {!isGlobalType4 && (
+                              <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3">
+                                <div className="flex justify-between items-center text-xs"><span className="font-medium text-muted-foreground">Disciplinas / Escopos Específicos</span><Button variant="outline" size="sm" className="h-7 text-[10px]" onClick={() => addAtiv(aloc.consultorId)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar</Button></div>
+                                {aloc.atividades.map(a => (
+                                  <div key={a.id} className="flex gap-2 items-center bg-muted/30 p-2 rounded-lg text-xs">
+                                    <span className="flex-1 font-medium">{a.nome}</span>
+                                    <div className="relative w-24"><Input type="number" className="h-7 text-right font-bold pr-5" value={a.horas || ''} onChange={(e) => updateAtiv(aloc.consultorId, a.id, Number(e.target.value))} /><span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span></div>
+                                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => removeAtiv(aloc.consultorId, a.id, a.dbId)}><X className="w-3.5 h-3.5" /></Button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
         {/* VIEW: MEDIÇÕES MENSAIS (%) */}
         {menuAtivo === 'medicoes' && (
@@ -1010,7 +1128,6 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                   <SelectTrigger className="w-24 h-9"><SelectValue /></SelectTrigger>
                   <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
                 </Select>
-                {/* 🌟 NOVO FILTRO DE FONTE (EC/ET) NAS MEDIÇÕES */}
                 <Select value={medFonte} onValueChange={setMedFonte}>
                   <SelectTrigger className="w-36 h-9 border-primary/50"><SelectValue placeholder="Divisão" /></SelectTrigger>
                   <SelectContent><SelectItem value="todas">Todas (EC + ET)</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent>
@@ -1103,18 +1220,7 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                 <Button onClick={exportarExcel} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8"><Download className="w-4 h-4" /> Exportar CSV</Button>
               </div>
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm">
-                <Select value={dashVisaoTipo} onValueChange={(v: any) => { setDashVisaoTipo(v); setDashContratosSelecionados([]); }}>
-                  <SelectTrigger className="w-56 h-8 text-xs border-primary"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                        <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                        <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                        <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
-                        <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
-                        <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
-                        <SelectItem value="overhead">Overhead (Custos/Apoio)</SelectItem>
-                      </SelectContent>
-                </Select>
-                {/* 🌟 FILTRO EC/ET INTEGRADO NO DASHBOARD MENSAL */}
+                {renderFiltroTiposContratoMultiplos()}
                 <Select value={dashFonte} onValueChange={setDashFonte}>
                   <SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger>
                   <SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent>
@@ -1131,10 +1237,10 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                     <BarChart data={dashData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
                       <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
-                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => dashVisaoTipo === 'fechado' ? `${v}%` : `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} formatter={(v: number, name: string, props: any) => [dashVisaoTipo === 'fechado' ? `${v}%` : `${v} horas`, dashVisaoTipo === 'fechado' ? 'Medição' : 'Trabalhado']} />
+                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => dashData.isFechadoMode ? `${v}%` : `${v}h`} />
+                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} formatter={(v: number, name: string, props: any) => [dashData.isFechadoMode ? `${v}%` : `${v} horas`, dashData.isFechadoMode ? 'Medição' : 'Trabalhado']} />
                       <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={45}>
-                        {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={dashVisaoTipo === 'fechado' ? '#f59e0b' : CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
+                        {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={dashData.isFechadoMode ? '#f59e0b' : CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -1148,32 +1254,53 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
         {menuAtivo === 'dash-global' && (
           <Card className="border-t-4 border-t-amber-500 shadow-sm min-h-[500px]">
             <CardHeader className="bg-muted/10 border-b pb-4">
-              <div><CardTitle className="text-lg">Saúde Financeira Consolidade</CardTitle><CardDescription>Monitore a queima do saldo global ou o avanço das entregas por divisão comercial.</CardDescription></div>
-              <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm">
-                <Select value={dashVisaoTipo} onValueChange={(v: any) => { setDashVisaoTipo(v); setDashContratosSelecionados([]); }}>
-                  <SelectTrigger className="w-56 h-8 text-xs border-primary"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                        <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                        <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                        <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
-                        <SelectItem value="continuado_sem_os">Assessoria (Horas Livres)</SelectItem>
-                        <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
-                        <SelectItem value="overhead">Overhead (Custos/Apoio)</SelectItem>
+              <div><CardTitle className="text-lg">Saúde Financeira Consolidado</CardTitle><CardDescription>Visão geral dos contratos selecionados.</CardDescription></div>
+              <div className="flex flex-col gap-4 mt-6">
+                <div className="flex items-center gap-4 bg-muted/30 p-2 rounded-md border w-fit">
+                  <Label className="font-bold uppercase tracking-wider text-xs ml-2">Filtro de Modalidade:</Label>
+                  {renderFiltroTiposContratoMultiplos()}
+                </div>
+                <div className="flex flex-wrap gap-3 p-4 bg-background border rounded-lg shadow-sm">
+                  <Select value={dashFonte} onValueChange={setDashFonte}>
+                    <SelectTrigger className="w-32 h-9 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger>
+                    <SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent>
+                  </Select>
+                  <div className="w-44">{renderFiltroContratosMultiplos()}</div>
+                  
+                  {/* 🌟 NOVO FILTRO DE OS SE CONTRATO DEMANDA ESTIVER SELECIONADO */}
+                  {dashVisaoTipos.includes('continuado_com_os') && (
+                    <Select value={dashOs} onValueChange={setDashOs}>
+                      <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Todas as OS" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="todas">Todas as OS</SelectItem>
+                        {osDashDisponiveis.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo}</SelectItem>)}
                       </SelectContent>
-                </Select>
-                {/* 🌟 FILTRO EC/ET INTEGRADO NO DASHBOARD FINANCEIRO */}
-                <Select value={dashFonte} onValueChange={setDashFonte}>
-                  <SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger>
-                  <SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent>
-                </Select>
-                <div className="w-44">{renderFiltroContratosMultiplos()}</div>
+                    </Select>
+                  )}
+                  
+                  {/* 🌟 FILTROS DE EQUIPE E ATIVIDADE EM CASCATA */}
+                  <Select value={dashConsultor} onValueChange={setDashConsultor}>
+                    <SelectTrigger className="w-40 h-9"><SelectValue placeholder="Equipe..." /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todos">Toda a Equipe</SelectItem>
+                      {consultoresDashDisponiveis.map(c => <SelectItem key={c.id} value={c.id}>{c.nome}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={dashAtividade} onValueChange={setDashAtividade}>
+                    <SelectTrigger className="w-48 h-9"><SelectValue placeholder="Atividades..." /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Geral (Todas)</SelectItem>
+                      {atividadesDashDisponiveis.map((a, i) => <SelectItem key={i} value={a as string}>{a}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="pt-6">
               {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div> : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
                   <div className="space-y-4">
-                    {['horas', 'continuado_com_os', 'continuado_limite_mensal', 'overhead'].includes(dashVisaoTipo) ? (
+                    {!dashData.isFechadoMode ? (
                       <>
                         <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Budget Total Alocado</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.orcadoGlobal}h</p></div>
                         <div className="border p-4 rounded-xl bg-red-500/5 border-red-500/10"><p className="text-[10px] font-bold text-red-600 uppercase">Horas Consumidas</p><p className="text-3xl font-bold font-mono text-red-600 mt-0.5">{dashData.gastoGlobal.toFixed(1)}h</p></div>
@@ -1181,25 +1308,31 @@ if (loading) return <div className="h-screen flex items-center justify-center"><
                       </>
                     ) : (
                       <>
-                        <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Rateio Distribuído Equipe</p><p className="text-3xl font-bold text-primary mt-0.5">{dashVisaoTipo === 'fechado' ? `${dashData.percentualGlobal}%` : '---'}</p></div>
-                        <div className="border p-4 rounded-xl bg-primary/5 border-primary/10"><p className="text-[10px] font-bold text-primary uppercase">{dashVisaoTipo === 'fechado' ? 'Avanço Físico Medido' : 'Tempo de Apoio Investido'}</p><p className="text-3xl font-bold text-primary mt-0.5">{dashVisaoTipo === 'fechado' ? `${dashData.medidoGlobal}%` : `${dashData.gastoGlobal.toFixed(1)}h`}</p></div>
+                        <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Rateio Distribuído Equipe</p><p className="text-3xl font-bold text-primary mt-0.5">{dashData.percentualGlobal}%</p></div>
+                        <div className="border p-4 rounded-xl bg-primary/5 border-primary/10"><p className="text-[10px] font-bold text-primary uppercase">Avanço Físico Medido</p><p className="text-3xl font-bold text-primary mt-0.5">{dashData.medidoGlobal}%</p></div>
                       </>
                     )}
                   </div>
-                  {/* 🍕 GRÁFICO DE PIZZA IMORTAL (CORRIGIDO) */}
+                  {/* 🍕 GRÁFICO DE PIZZA (AJUSTADO PARA OVERHEAD E MULTIPLOS TIPOS) */}
                   <div className="h-[280px] w-full flex flex-col items-center justify-center relative">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
-                        <Pie data={dashData.pieData.length > 0 ? dashData.pieData : [{name: 'Sem registros', value: 1}]} innerRadius={75} outerRadius={105} paddingAngle={4} dataKey="value" stroke="none">
-                          <Cell fill={dashVisaoTipo === 'fechado' ? "#f59e0b" : "#ef4444"} /> 
+                        <Pie data={dashData.pieData} innerRadius={75} outerRadius={105} paddingAngle={4} dataKey="value" stroke="none">
+                          <Cell fill={dashData.isFechadoMode ? "#f59e0b" : "#ef4444"} /> 
                           <Cell fill={dashData.pieData.length > 1 ? "#22c55e" : "#88888822"} />
                         </Pie>
-                        <RechartsTooltip formatter={(v: number) => [dashVisaoTipo === 'fechado' ? `${v}%` : `${v.toFixed(1)}h`, '']} />
+                        <RechartsTooltip formatter={(v: number) => [dashData.isFechadoMode ? `${v}%` : `${v.toFixed(1)}h`, '']} />
                       </PieChart>
                     </ResponsiveContainer>
                     <div className="absolute text-center pointer-events-none">
-                      <p className="text-[10px] font-bold text-muted-foreground uppercase">{dashVisaoTipo === 'fechado' ? 'Avanço Físico' : 'Consumo'}</p>
-                      <p className="text-2xl font-black text-primary mt-0.5">{dashVisaoTipo === 'fechado' ? `${dashData.medidoGlobal}%` : dashVisaoTipo === 'continuado_sem_os' ? '---' : `${dashData.percentualGlobal}%`}</p>
+                      <p className="text-[10px] font-bold text-muted-foreground uppercase">{dashData.isFechadoMode ? 'Avanço Físico' : 'Consumo'}</p>
+                      <p className="text-2xl font-black text-primary mt-0.5">
+                        {dashData.isFechadoMode 
+                          ? `${dashData.medidoGlobal}%` 
+                          : (dashVisaoTipos.includes('continuado_sem_os') && !dashVisaoTipos.includes('horas') && !dashVisaoTipos.includes('continuado_limite_mensal') && !dashVisaoTipos.includes('overhead')) 
+                            ? '---' 
+                            : `${dashData.percentualGlobal}%`}
+                      </p>
                     </div>
                   </div>
                 </div>
