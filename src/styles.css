@@ -90,7 +90,9 @@
 
 @layer base {
   * { border-color: var(--color-border); }
-  body {
+  html, body {
+    overflow-x: hidden; /* MATA A ROLAGEM LATERAL FANTASMA DO SITE INTEIRO */
+    max-width: 100vw;
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-feature-settings: "cv11", "ss01";

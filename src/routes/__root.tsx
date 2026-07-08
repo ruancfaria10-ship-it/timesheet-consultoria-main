@@ -134,7 +134,7 @@ function RootComponent() {
         </main>
       ) : (
         /* A MÁGICA AQUI: h-screen e overflow-hidden travam o layout geral */
-        <div className="flex h-screen overflow-hidden bg-background">
+        <div className="flex h-screen w-full overflow-hidden bg-background">
           
           {/* MENU LATERAL - Fica fixo à esquerda */}
           <aside className="w-64 border-r bg-card p-4 flex flex-col gap-4 shrink-0 overflow-y-auto">
@@ -156,8 +156,8 @@ function RootComponent() {
             )}
           </aside>
 
-          {/* ÁREA PRINCIPAL - Apenas essa parte rola (scroll) */}
-          <main className="flex-1 overflow-y-auto pb-10">
+          {/* ÁREA PRINCIPAL - Mata o scroll fantasma removendo o pb-10 e usando flex-col */}
+          <main className="flex-1 flex flex-col overflow-y-auto overflow-x-hidden bg-background">
             <Outlet />
           </main>
 

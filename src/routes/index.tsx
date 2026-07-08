@@ -434,10 +434,11 @@ function TimesheetPage() {
   if (!user) return <Login onLoginSuccess={() => {}} />;
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 flex flex-col h-full bg-background text-foreground w-full">
       <Toaster position="top-right" richColors />
-      <header className="border-b">
-        <div className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">
+      <header className="border-b w-full shrink-0">
+        {/* CABEÇALHO AGORA ACOMPANHA O FULL SCREEN (w-full max-w-none px-4 md:px-8) */}
+        <div className="mx-auto w-full max-w-none px-4 md:px-8 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
               <Timer className="h-5 w-5" />
@@ -460,7 +461,7 @@ function TimesheetPage() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-6 grid gap-6 lg:grid-cols-[1.2fr_1fr]">
+      <main className="w-full max-w-none px-4 md:px-8 py-6 grid gap-6 lg:grid-cols-[1.2fr_1fr] overflow-x-hidden">
         <section className="space-y-6">
           <div className="rounded-2xl border bg-card p-6 space-y-6">
             <TaskSelector
