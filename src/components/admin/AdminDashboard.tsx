@@ -535,28 +535,14 @@ export function AdminDashboard() {
 
   const radarAlertas = useMemo(() => {
     const ociosos: any[] = []; const estourados: any[] = [];
-    const now = new Date(); const currentDay = now.getDate(); const currentMonth = now.getMonth(); const currentYear = now.getFullYear();
-    let startDt, endDt;
-    
-    const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
 
-    if (25 > 24) { 
-      if (currentDay >= 25) { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, 24, 23, 59, 59); } 
-      else { startDt = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
-    } else { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
-
-    const meioDoCicloMs = startDt.getTime() + (endDt.getTime() - startDt.getTime()) / 2;
-    const jaPassouDaMetade = Date.now() >= meioDoCicloMs;
-
-    // Determinar o mês/ano de referência dinâmico e cravado
-    const refMonth = currentDay >= 25 ? (currentMonth === 11 ? 0 : currentMonth + 1) : currentMonth;
-    const refYear = currentDay >= 25 && currentMonth === 11 ? currentYear + 1 : currentYear;
-
+    // O Radar agora obedece aos filtros dinâmicos de Mês e Ano do Dashboard
     consultores.forEach(c => {
       if (c.horas_minimas_mes > 0) {
-        const horasTrabalhadas = allTimesheets.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, refMonth.toString(), refYear.toString(), 25, 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
+        const horasTrabalhadas = allTimesheets.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, 25, 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
         const percentual = (horasTrabalhadas / c.horas_minimas_mes) * 100;
-        if (percentual < 30 && jaPassouDaMetade) ociosos.push({ id: c.id, nome: c.nome, trabalhadas: horasTrabalhadas.toFixed(1), meta: c.horas_minimas_mes, percentual: percentual.toFixed(1) })
+        // Removida a trava temporal para você auditar qualquer mês livremente
+        if (percentual < 30) ociosos.push({ id: c.id, nome: c.nome, trabalhadas: horasTrabalhadas.toFixed(1), meta: c.horas_minimas_mes, percentual: percentual.toFixed(1) })
       }
     });
 
@@ -564,7 +550,7 @@ export function AdminDashboard() {
       const orcado = allAlocacoes.filter(a => a.contract_id === cont.id).reduce((sum, a) => sum + a.horas_disponiveis, 0);
       let consumido = 0;
       if (cont.tipo === 'continuado_limite_mensal' || cont.tipo === 'overhead') {
-        consumido = allTimesheets.filter(t => t.contract_id === cont.id && isWithinCycle(t.start_at, refMonth.toString(), refYear.toString(), cont.ciclo_inicio, cont.ciclo_fim)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+        consumido = allTimesheets.filter(t => t.contract_id === cont.id && isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
       } else {
         consumido = allTimesheets.filter(t => t.contract_id === cont.id).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
       }
@@ -574,9 +560,8 @@ export function AdminDashboard() {
       }
     });
     
-    // Passando o status "jaPassouDaMetade" para o visual da tela
-    return { ociosos, estourados, jaPassouDaMetade };
-  }, [consultores, contratos, allTimesheets, allAlocacoes]); // Independente do filtro dropdown da interface!
+    return { ociosos, estourados };
+  }, [consultores, contratos, allTimesheets, allAlocacoes, dashMes, dashAno]);
 
   // Função para Gestão de Apontamentos 
   const gestaoAtividadesDisponiveis = useMemo(() => {
@@ -1531,7 +1516,50 @@ export function AdminDashboard() {
             </CardContent>
           </Card>
         )}
+        {/* VIEW: RADAR DE ALERTAS */}
+        {menuAtivo === 'alertas' && (
+          <div className="space-y-6 w-full">
+            {/* NOVO: Barra de Filtro de Mês/Ano exclusiva para o Radar */}
+            <div className="flex gap-3 p-3 bg-background border rounded-lg shadow-sm w-fit">
+              <Select value={dashMes} onValueChange={setDashMes}>
+                <SelectTrigger className="w-32 h-8 text-xs font-semibold"><SelectValue /></SelectTrigger>
+                <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+              </Select>
+              <Select value={dashAno} onValueChange={setDashAno}>
+                <SelectTrigger className="w-24 h-8 text-xs font-semibold"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+              </Select>
+            </div>
 
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <Card className="border-red-500 bg-red-500/5">
+                <CardHeader><CardTitle className="text-red-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Ociosidade Crítica (&lt; 30% da Carga Mínima)</CardTitle></CardHeader>
+                <CardContent className="space-y-3">
+                  {radarAlertas.ociosos.length === 0 ? (
+                    <p className="text-muted-foreground text-xs p-2">Toda a equipe está engajada no ciclo selecionado!</p> 
+                  ) : radarAlertas.ociosos.map((o, i) => (
+                    <div key={i} className="bg-background p-4 rounded-xl border border-red-200 flex justify-between items-center shadow-sm">
+                      <div><p className="font-bold text-sm">{o.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Mínimo: {o.meta}h | Apontou: {o.trabalhadas}h</p></div>
+                      <Badge variant="destructive" className="font-mono text-sm">{o.percentual}%</Badge>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+
+              <Card className="border-amber-500 bg-amber-500/5">
+                <CardHeader><CardTitle className="text-amber-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Atenção para Aditivos (&gt; 70% Consumido)</CardTitle></CardHeader>
+                <CardContent className="space-y-3">
+                  {radarAlertas.estourados.length === 0 ? <p className="text-muted-foreground text-xs p-2">Nenhum contrato atingiu o limite crítico de consumo.</p> : radarAlertas.estourados.map((e, i) => (
+                    <div key={i} className="bg-background p-4 rounded-xl border border-amber-200 flex justify-between items-center shadow-sm">
+                      <div className="max-w-[70%]"><p className="font-bold text-sm truncate">{e.contrato}</p><p className="text-[10px] text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded w-fit mt-1">{e.tipo.replace(/_/g, ' ').toUpperCase()}</p></div>
+                      <Badge className="bg-amber-500 text-white font-mono text-sm">{e.perc}%</Badge>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
