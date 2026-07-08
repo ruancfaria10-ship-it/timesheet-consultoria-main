@@ -76,6 +76,7 @@ export function AdminDashboard() {
   const [editOsCodigo, setEditOsCodigo] = useState('')
   const [editOsDescricao, setEditOsDescricao] = useState('')
   const [editOsHoras, setEditOsHoras] = useState<number>(0)
+  const [editOsStatus, setEditOsStatus] = useState<boolean>(true) // 🌟 NOVO: ESTADO STATUS DA OS NA EDIÇÃO
 
   // Estados Alocações
   const [contratoAtivo, setContratoAtivo] = useState<string>('')
@@ -110,6 +111,7 @@ export function AdminDashboard() {
   const [fatMes, setFatMes] = useState<string>(new Date().getMonth().toString())
   const [fatAno, setFatAno] = useState<string>(new Date().getFullYear().toString())
   const [fatContratosSelecionados, setFatContratosSelecionados] = useState<string[]>([]) 
+  const [fatOs, setFatOs] = useState<string>('todas') // 🌟 NOVO: ESTADO OS NO FATURAMENTO
   const [fatFonte, setFatFonte] = useState<string>('todas')
 
   const [allTimesheets, setAllTimesheets] = useState<TimesheetLog[]>([])
@@ -120,6 +122,7 @@ export function AdminDashboard() {
   // Estados Gestão Retroativa
   const [gestaoConsultor, setGestaoConsultor] = useState<string>('')
   const [gestaoContrato, setGestaoContrato] = useState<string>('')
+  const [gestaoOs, setGestaoOs] = useState<string>('')
   const [gestaoAtividade, setGestaoAtividade] = useState<string>('')
   const [gestaoData, setGestaoData] = useState<string>(new Date().toISOString().split('T')[0])
   const [gestaoInicio, setGestaoInicio] = useState<string>('08:00')
@@ -187,7 +190,7 @@ export function AdminDashboard() {
   }
 
   // ==========================================
-  // FUNÇÕES DE ORDEM DE SERVIÇO (COM TETO GLOBAL)
+  // FUNÇÕES DE ORDEM DE SERVIÇO (COM TETO GLOBAL E STATUS)
   // ==========================================
   async function criarOS() {
     if (!osContratoId || !osCodigo) return alert("Selecione o Contrato e digite o Código da OS.");
@@ -201,18 +204,20 @@ export function AdminDashboard() {
     }
 
     await supabase.from('ordens_servico').insert([{
-      contract_id: osContratoId, codigo: osCodigo.toUpperCase().trim(), descricao: osDescricao.trim(), horas_previstas: osHoras, status_ativa: true
+      contract_id: osContratoId, codigo: osCodigo.toUpperCase().trim(), descricao: osDescricao.trim(), horas_previstas: osHoras, status_ativa: true // 🌟 NOVO: STATUS ATIVA
     }]);
     setOsCodigo(''); setOsDescricao(''); setOsHoras(0); carregarDadosDoBanco(); alert("OS criada com sucesso!");
   }
 
   function iniciarEdicaoOS(os: OrdemServico) {
     setOsEditandoId(os.id); setEditOsCodigo(os.codigo); setEditOsDescricao(os.descricao); setEditOsHoras(os.horas_previstas);
+    setEditOsStatus(os.status_ativa !== false); // 🌟 NOVO: PEGA O STATUS ATUAL (Cuidado com null)
   }
 
   async function salvarEdicaoOS(id: string) {
     await supabase.from('ordens_servico').update({
-      codigo: editOsCodigo.toUpperCase().trim(), descricao: editOsDescricao.trim(), horas_previstas: editOsHoras
+      codigo: editOsCodigo.toUpperCase().trim(), descricao: editOsDescricao.trim(), horas_previstas: editOsHoras,
+      status_ativa: editOsStatus // 🌟 NOVO: GRAVA O STATUS NA EDIÇÃO
     }).eq('id', id);
     setOsEditandoId(null); carregarDadosDoBanco();
   }
@@ -244,7 +249,7 @@ export function AdminDashboard() {
     if (contratoAtivo && menuAtivo === 'alocacoes') {
       const c = contratos.find(x => x.id === contratoAtivo);
       if (c?.tipo === 'continuado_com_os') {
-        const primeiraOs = osList.filter(o => o.contract_id === contratoAtivo)[0];
+        const primeiraOs = osList.filter(o => o.contract_id === contratoAtivo && o.status_ativa)[0]; // 🌟 NOVO: SÓ PEGA OS ATIVA PARA ALOCAR
         setAlocacaoOsId(primeiraOs ? primeiraOs.id : '');
         if(primeiraOs) carregarAlocacoesDoContrato(contratoAtivo, primeiraOs.id);
         else setAlocacoes({});
@@ -512,6 +517,7 @@ export function AdminDashboard() {
   const fatData = useMemo(() => {
     let fTimes = allTimesheets.filter(t => fatContratosVisao.some(cv => cv.id === t.contract_id))
     if (fatContratosSelecionados.length > 0) fTimes = fTimes.filter(t => fatContratosSelecionados.includes(t.contract_id))
+    if (fatOs !== 'todas') fTimes = fTimes.filter(t => t.os_id === fatOs) // 🌟 NOVO: APLICA FILTRO DE OS NO FATURAMENTO
     
     const isFechadoMode = fatVisaoTipos.includes('fechado') && fatVisaoTipos.length === 1;
 
@@ -525,7 +531,7 @@ export function AdminDashboard() {
     }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
 
     return { consultoresPagamento, isFechadoMode }
-  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, consultores, fatVisaoTipos, fatContratosVisao, contratos])
+  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, fatOs, consultores, fatVisaoTipos, fatContratosVisao, contratos])
 
   const radarAlertas = useMemo(() => {
     const ociosos: any[] = []; const estourados: any[] = [];
@@ -572,13 +578,18 @@ export function AdminDashboard() {
     return { ociosos, estourados, jaPassouDaMetade };
   }, [consultores, contratos, allTimesheets, allAlocacoes]); // Independente do filtro dropdown da interface!
 
-  // Função para Gestão de Apontamentos
+  // Função para Gestão de Apontamentos 
   const gestaoAtividadesDisponiveis = useMemo(() => {
     if (!gestaoContrato) return ['Sem atividade específica'];
-    const alocs = allAlocacoes.filter(a => a.contract_id === gestaoContrato && (gestaoConsultor ? a.user_id === gestaoConsultor : true));
+    const isComOsType = contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os';
+    const alocs = allAlocacoes.filter(a => 
+      a.contract_id === gestaoContrato && 
+      (gestaoConsultor ? a.user_id === gestaoConsultor : true) &&
+      (!isComOsType || !gestaoOs || a.os_id === gestaoOs) // 🌟 NOVO: FILTRA DISCIPLINAS DA OS SELECIONADA
+    );
     const acts = Array.from(new Set(alocs.map(a => a.atividade)));
     return acts.length > 0 ? acts as string[] : ['Sem atividade específica'];
-  }, [gestaoContrato, gestaoConsultor, allAlocacoes])
+  }, [gestaoContrato, gestaoConsultor, gestaoOs, allAlocacoes, contratos])
 
   useEffect(() => {
     if (gestaoAtividadesDisponiveis.length > 0 && !gestaoAtividadesDisponiveis.includes(gestaoAtividade)) setGestaoAtividade(gestaoAtividadesDisponiveis[0]);
@@ -666,9 +677,71 @@ export function AdminDashboard() {
     if(endMs <= startMs) return alert("A hora de fim deve ser posterior à hora de início.");
 
     const contObj = contratos.find(c => c.id === gestaoContrato);
+    
+    // 🌟 NOVA TRAVA: EXIGE OS EM CONTRATOS TIPO 4
+    if (contObj?.tipo === 'continuado_com_os' && !gestaoOs) {
+      return alert("Selecione uma Ordem de Serviço (OS) para este contrato.");
+    }
+    
+    // 🌟 NOVA TRAVA: VALIDA LIMITES NO AJUSTE RETROATIVO (Igual ao App do Consultor)
+    const durationMs = endMs - startMs;
+    const isMensal = ['overhead', 'continuado_limite_mensal'].includes(contObj?.tipo || '');
+    const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contObj?.tipo || '');
+    const isComOs = contObj?.tipo === 'continuado_com_os';
+    
+    // Puxa as horas já consumidas
+    let cUsed = 0; let aUsed = 0; let oUsed = 0;
+    if (isMensal) {
+      // Como é apenas uma verificação rasa no admin, somamos tudo do mês corrente para o bloqueio de segurança
+      const refMonth = new Date(startMs).getMonth();
+      cUsed = allTimesheets.filter(t => t.contract_id === gestaoContrato && t.user_id === gestaoConsultor && new Date(t.start_at).getMonth() === refMonth).reduce((s, t) => s + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+      aUsed = allTimesheets.filter(t => t.contract_id === gestaoContrato && t.user_id === gestaoConsultor && t.activity === gestaoAtividade && new Date(t.start_at).getMonth() === refMonth).reduce((s, t) => s + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+    } else {
+      cUsed = allTimesheets.filter(t => t.contract_id === gestaoContrato && t.user_id === gestaoConsultor).reduce((s, t) => s + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+      aUsed = allTimesheets.filter(t => t.contract_id === gestaoContrato && t.user_id === gestaoConsultor && t.activity === gestaoAtividade && (!isComOs || t.os_id === gestaoOs)).reduce((s, t) => s + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+    }
+    if (isComOs && gestaoOs) {
+      oUsed = allTimesheets.filter(t => t.os_id === gestaoOs).reduce((s, t) => s + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+    }
+    
+    // Subtrai o tempo antigo se estiver editando
+    if (gestaoEditandoId) {
+      const oldEntry = allTimesheets.find(t => t.id === gestaoEditandoId);
+      if (oldEntry) {
+        const oldDur = new Date(oldEntry.end_at!).getTime() - new Date(oldEntry.start_at).getTime();
+        cUsed -= oldDur; aUsed -= oldDur; oUsed -= oldDur;
+      }
+    }
+
+    if (!isIlimitado) {
+      // Puxa as metas alocadas
+      const aAlloc = allAlocacoes.find(a => a.contract_id === gestaoContrato && a.user_id === gestaoConsultor && a.atividade === gestaoAtividade && (!isComOs || a.os_id === gestaoOs));
+      const aBudget = aAlloc ? aAlloc.horas_disponiveis * 3600 * 1000 : 0;
+      const cBudget = isComOs 
+        ? allAlocacoes.filter(a => a.contract_id === gestaoContrato && a.user_id === gestaoConsultor && a.os_id === gestaoOs).reduce((s, a) => s + (a.horas_disponiveis * 3600 * 1000), 0)
+        : allAlocacoes.filter(a => a.contract_id === gestaoContrato && a.user_id === gestaoConsultor).reduce((s, a) => s + (a.horas_disponiveis * 3600 * 1000), 0);
+
+      if (aBudget > 0 && (aUsed + durationMs > aBudget)) {
+        const remaining = Math.max(0, aBudget - aUsed);
+        return alert(`⚠️ BLOQUEIO:\nSaldo insuficiente na disciplina! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
+      }
+      if (cBudget > 0 && (cUsed + durationMs > cBudget)) {
+        const remaining = Math.max(0, cBudget - cUsed);
+        return alert(`⚠️ BLOQUEIO:\nSaldo global insuficiente! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
+      }
+      if (isComOs && gestaoOs) {
+        const currentOsObj = osList.find(o => o.id === gestaoOs);
+        if (currentOsObj && currentOsObj.horas_previstas > 0 && (oUsed + durationMs > currentOsObj.horas_previstas * 3600 * 1000)) {
+          const rem = Math.max(0, (currentOsObj.horas_previstas * 3600 * 1000) - oUsed);
+          return alert(`⚠️ BLOQUEIO:\nO limite macro da OS estourou! Restam apenas ${(rem / 3600000).toFixed(1)}h para esta OS.`);
+        }
+      }
+    }
+
     const payload = {
       user_id: gestaoConsultor, contract_id: gestaoContrato, contract_name: `${contObj?.codigo} — ${contObj?.nome}`, 
-      activity: gestaoAtividade, notes: gestaoNotes, start_at: new Date(startMs).toISOString(), end_at: new Date(endMs).toISOString(), edited: true
+      activity: gestaoAtividade, notes: gestaoNotes, start_at: new Date(startMs).toISOString(), end_at: new Date(endMs).toISOString(), edited: true,
+      os_id: contObj?.tipo === 'continuado_com_os' ? gestaoOs : null // 🌟 ANEXA A OS NO BANCO
     };
     setSalvando(true);
     try {
@@ -679,7 +752,7 @@ export function AdminDashboard() {
         await supabase.from('timesheets').insert([{ ...payload, id: crypto.randomUUID() }]);
         alert("Criado com sucesso!");
       }
-      setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); await carregarTudoParaDash();
+      setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); setGestaoOs(''); await carregarTudoParaDash();
     } catch (e) { alert("Erro ao processar."); } finally { setSalvando(false); }
   }
 
@@ -691,11 +764,18 @@ export function AdminDashboard() {
   function iniciarEdicaoApontamento(t: TimesheetLog) {
     setGestaoEditandoId(t.id); setGestaoConsultor(t.user_id); setGestaoContrato(t.contract_id);
     setGestaoAtividade(t.activity); setGestaoNotes(t.notes || '');
+    setGestaoOs(t.os_id || ''); // 🌟 RECUPERA A OS CADASTRADA AO EDITAR
     const startDate = new Date(t.start_at); const endDate = t.end_at ? new Date(t.end_at) : new Date();
     setGestaoData(startDate.toISOString().split('T')[0]);
     setGestaoInicio(`${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}`);
     setGestaoFim(`${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}`);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // 🌟 NOVO: CANCELAR A EDIÇÃO DO HISTÓRICO MANUALMENTE
+  function cancelarEdicaoApontamento() {
+    setGestaoEditandoId(null); setGestaoConsultor(''); setGestaoContrato(''); setGestaoOs(''); setGestaoAtividade(''); setGestaoNotes('');
+    setGestaoInicio('08:00'); setGestaoFim('12:00');
   }
 
   const gestaoLogsFiltrados = useMemo(() => {
@@ -713,8 +793,10 @@ export function AdminDashboard() {
     
     if (isFaturamento) {
       if (fatContratosSelecionados.length > 0) registros = registros.filter(t => fatContratosSelecionados.includes(t.contract_id))
+      if (fatOs !== 'todas') registros = registros.filter(t => t.os_id === fatOs) // 🌟 NOVO: APLICA FILTRO NO CSV DE FATURAMENTO
     } else {
       if (dashContratosSelecionados.length > 0) registros = registros.filter(t => dashContratosSelecionados.includes(t.contract_id))
+      if (dashOs !== 'todas') registros = registros.filter(t => t.os_id === dashOs) // 🌟 NOVO: APLICA FILTRO DE OS NO CSV
       if (dashConsultor !== 'todos') registros = registros.filter(t => t.user_id === dashConsultor)
       if (dashAtividade !== 'todas') registros = registros.filter(t => t.activity === dashAtividade)
     }
@@ -831,14 +913,13 @@ export function AdminDashboard() {
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('dash-mensal')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-mensal' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><CalendarDays className="w-4 h-4"/> Folha (Mensal)</button>
               <button onClick={() => setMenuAtivo('dash-global')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Layers className="w-4 h-4"/> Saúde (Global)</button>
-              {/* Radar movido para cá como última aba do BI */}
-              <button onClick={() => setMenuAtivo('alertas')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors bg-red-500/5 ${menuAtivo === 'alertas' ? 'bg-red-500! text-white' : 'text-red-600 hover:bg-red-500/10'}`}><AlertTriangle className="w-4 h-4"/> Radar de Alertas</button>
             </div>
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Faturamento & Recebíveis</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Faturamento & Alertas</p>
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('faturamento-cliente')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'faturamento-cliente' ? 'bg-amber-600 text-white' : 'text-amber-700 hover:bg-amber-600/10'}`}><Receipt className="w-4 h-4"/> Extração p/ Clientes</button>
+              <button onClick={() => setMenuAtivo('alertas')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors bg-red-500/5 ${menuAtivo === 'alertas' ? 'bg-red-500! text-white' : 'text-red-600 hover:bg-red-500/10'}`}><AlertTriangle className="w-4 h-4"/> Radar de Alertas</button>
             </div>
           </div>
         </nav>
@@ -863,7 +944,7 @@ export function AdminDashboard() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 items-end bg-muted/30 p-5 rounded-xl border">
                 <div className="space-y-2"><Label>Código</Label><Input placeholder="CT-001" className="uppercase" value={novoCodigo} onChange={(e) => setNovoCodigo(e.target.value)} /></div>
-                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Tractebel - Angra" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
+                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Hospital Mater Dei" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
                 <div className="space-y-2"><Label>Tipo Comercial</Label>
                   <Select value={novoTipo} onValueChange={setNovoTipo}>
                     <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
@@ -964,7 +1045,7 @@ export function AdminDashboard() {
         {/* VIEW: ORDENS DE SERVIÇO */}
         {menuAtivo === 'os' && (
           <Card className="border-t-4 border-t-amber-500 w-full">
-            <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas dos Contratos Sob Demanda.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas das obras Sob Demanda.</CardDescription></CardHeader>
             <CardContent className="space-y-6">
               <div className="flex flex-wrap gap-4 items-end bg-amber-500/5 p-4 rounded-xl border border-amber-500/10">
                 <div className="space-y-2 flex-1 min-w-62.5"><Label>Contrato Mestre (Sob Demanda)</Label>
@@ -989,6 +1070,7 @@ export function AdminDashboard() {
                         <Input value={editOsCodigo} onChange={e => setEditOsCodigo(e.target.value)} className="w-24 uppercase font-bold" />
                         <Input value={editOsDescricao} onChange={e => setEditOsDescricao(e.target.value)} className="flex-1" />
                         <div className="relative w-32"><Input type="number" value={editOsHoras} onChange={e => setEditOsHoras(Number(e.target.value))} className="pr-8" /><span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">h</span></div>
+                        <div className="flex gap-2 border p-2 rounded-md bg-background h-9 items-center"><Switch id={`stos-${os.id}`} checked={editOsStatus} onCheckedChange={setEditOsStatus} /><Label htmlFor={`stos-${os.id}`}>{editOsStatus ? 'Ativa' : 'Inativa'}</Label></div>
                         <Button size="icon" variant="ghost" className="text-green-500" onClick={() => salvarEdicaoOS(os.id)}><Check className="w-4 h-4" /></Button>
                         <Button size="icon" variant="ghost" onClick={() => setOsEditandoId(null)}><X className="w-4 h-4" /></Button>
                       </div>
@@ -997,6 +1079,7 @@ export function AdminDashboard() {
                         <div className="flex items-center gap-4">
                           <div><p className="font-bold text-amber-600 text-sm">{os.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">{os.descricao || 'Sem descrição cadastrada'}</p></div>
                           <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-none ml-4 font-mono">{os.horas_previstas}h orçadas</Badge>
+                          {!os.status_ativa && <Badge variant="outline" className="text-red-500 border-red-500/20 bg-red-500/5 ml-2">Inativa</Badge>}
                         </div>
                         <div className="flex gap-1">
                           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => iniciarEdicaoOS(os)}><Pencil className="w-3.5 h-3.5" /></Button>
@@ -1066,7 +1149,7 @@ export function AdminDashboard() {
                 <Card>
                   <CardHeader className="pb-3"><CardTitle className="text-sm">1. Projeto Mestre</CardTitle></CardHeader>
                   <CardContent>
-                    <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); }}>
+                    <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacaoOsId(''); setAlocacoes({}); }}>
                       <SelectTrigger className="w-full"><SelectValue placeholder="Escolha o contrato..." /></SelectTrigger>
                       <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
                     </Select>
@@ -1074,13 +1157,13 @@ export function AdminDashboard() {
                     {contratoSelecionadoObj?.tipo === 'continuado_com_os' && (
                       <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
                         <Label className="text-xs font-bold text-amber-700 mb-2 block">Ordem de Serviço (Subnível)</Label>
-                        {osList.filter(o => o.contract_id === contratoAtivo).length === 0 ? (
+                        {osList.filter(o => o.contract_id === contratoAtivo && o.status_ativa).length === 0 ? (
                            <p className="text-[10px] text-amber-800 font-bold bg-amber-500/20 p-2 rounded">Nenhuma OS cadastrada. Vá na aba de OS e crie uma antes de alocar a equipe.</p>
                         ) : (
                           <Select value={alocacaoOsId} onValueChange={setAlocacaoOsId}>
                             <SelectTrigger className="bg-background border-amber-500/30 text-xs"><SelectValue placeholder="Selecione a OS..."/></SelectTrigger>
                             <SelectContent>
-                              {osList.filter(o => o.contract_id === contratoAtivo).map(o => (
+                              {osList.filter(o => o.contract_id === contratoAtivo && o.status_ativa).map(o => (
                                 <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
                               ))}
                             </SelectContent>
@@ -1143,7 +1226,7 @@ export function AdminDashboard() {
                             </div>
                           </div>
                           
-                          {!isSemOsType && !isGlobalType4 && (
+                          {!isSemOsType && (
                             <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
                               <div className="flex justify-between items-center text-xs"><span className="font-medium text-muted-foreground">Disciplinas / Escopos Específicos</span><Button variant="outline" size="sm" className="h-7 text-[10px]" onClick={() => addAtiv(aloc.consultorId)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar</Button></div>
                               {aloc.atividades.map(a => (
@@ -1174,7 +1257,6 @@ export function AdminDashboard() {
                 <Select value={medMes} onValueChange={setMedMes}><SelectTrigger className="w-32 h-9"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
                 <Select value={medAno} onValueChange={setMedAno}><SelectTrigger className="w-24 h-9"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
                 <Select value={medFonte} onValueChange={setMedFonte}><SelectTrigger className="w-36 h-9 border-primary/50"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">Todas (EC + ET)</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
-                {/* 🌟 CÓDIGO + NOME CONSOLIDADO NO SELECT */}
                 <Select value={medContrato} onValueChange={setMedContrato}><SelectTrigger className="w-80 h-9 border-primary"><SelectValue placeholder="Selecione o Contrato..." /></SelectTrigger><SelectContent>{contratos.filter(c => c.status_ativo && c.tipo === 'fechado' && (medFonte === 'todas' ? true : c.fonte_pagamento === medFonte)).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent></Select>
               </div>
             </CardHeader>
@@ -1209,12 +1291,36 @@ export function AdminDashboard() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3 pt-4 text-xs">
-                  <div className="space-y-1"><Label>Engenheiro</Label><Select value={gestaoConsultor} onValueChange={setGestaoConsultor}><SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent>{consultores.map(c => <SelectItem key={c.id} value={c.id}>{c.nome}</SelectItem>)}</SelectContent></Select></div>
-                  <div className="space-y-1"><Label>Contrato</Label><Select value={gestaoContrato} onValueChange={setGestaoContrato}><SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent></Select></div>
+                  <div className="space-y-1"><Label>Engenheiro</Label><Select value={gestaoConsultor} onValueChange={setGestaoConsultor} disabled={!!gestaoEditandoId}><SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent>{consultores.map(c => <SelectItem key={c.id} value={c.id}>{c.nome}</SelectItem>)}</SelectContent></Select></div>
+                  <div className="space-y-1">
+                    <Label>Contrato</Label>
+                    <Select value={gestaoContrato} onValueChange={(val) => { setGestaoContrato(val); setGestaoOs(''); }} disabled={!!gestaoEditandoId}>
+                      <SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger>
+                      <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* 🌟 CAMPOS DE ORDENS DE SERVIÇO VINCULADAS */}
+                  {contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os' && (
+                    <div className="space-y-1">
+                      <Label>Ordem de Serviço (OS)</Label>
+                      <Select value={gestaoOs} onValueChange={setGestaoOs} disabled={!!gestaoEditandoId}>
+                        <SelectTrigger className="h-9 border-amber-500/30"><SelectValue placeholder="Selecione a OS..." /></SelectTrigger>
+                        <SelectContent>
+                          {osList.filter(o => o.contract_id === gestaoContrato).map(o => (
+                            <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                   <div className="space-y-1"><Label>Disciplina / Escopo</Label><Select value={gestaoAtividade} onValueChange={setGestaoAtividade} disabled={!gestaoContrato}><SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent>{gestaoAtividadesDisponiveis.map((a: string) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent></Select></div>
                   <div className="grid grid-cols-2 gap-3"><div className="space-y-1"><Label>Data</Label><Input type="date" value={gestaoData} onChange={e => setGestaoData(e.target.value)} className="h-9" /></div><div className="grid grid-cols-2 gap-1"><div className="space-y-1"><Label>Início</Label><Input type="time" value={gestaoInicio} onChange={e => setGestaoInicio(e.target.value)} className="h-9 px-1" /></div><div className="space-y-1"><Label>Fim</Label><Input type="time" value={gestaoFim} onChange={e => setGestaoFim(e.target.value)} className="h-9 px-1" /></div></div></div>
                   <div className="space-y-1"><Label>Observação Interna</Label><Input placeholder="Descreva o escopo realizado..." value={gestaoNotes} onChange={e => setGestaoNotes(e.target.value)} className="h-9" /></div>
-                  <Button onClick={salvarApontamentoAdmin} disabled={salvando} className="w-full h-9 bg-purple-600 hover:bg-purple-700 mt-2 text-xs">{salvando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />} {gestaoEditandoId ? 'Atualizar Histórico' : 'Gravar Horas'}</Button>
+                  <div className="flex gap-2 pt-2">
+                    {gestaoEditandoId && <Button variant="outline" onClick={cancelarEdicaoApontamento} className="h-9 text-xs">Cancelar Edição</Button>}
+                    <Button onClick={salvarApontamentoAdmin} disabled={salvando} className="flex-1 h-9 bg-purple-600 hover:bg-purple-700 text-xs">{salvando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />} {gestaoEditandoId ? 'Atualizar Histórico' : 'Gravar Horas'}</Button>
+                  </div>
                 </CardContent>
               </Card>
             </div>
@@ -1228,7 +1334,7 @@ export function AdminDashboard() {
                       <div key={t.id} className="p-3 hover:bg-muted/40 flex justify-between items-center w-full">
                         <div>
                           <p className="font-bold text-foreground text-xs">{consultores.find(c => c.id === t.user_id)?.nome}</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">{contratos.find(c => c.id === t.contract_id)?.codigo} • {t.activity} • {s.toLocaleDateString('pt-BR')}</p>
+                          <p className="text-[10px] text-muted-foreground mt-0.5">{contratos.find(c => c.id === t.contract_id)?.codigo}{t.os_id ? ` • ${osList.find(o => o.id === t.os_id)?.codigo}` : ''} • {t.activity} • {s.toLocaleDateString('pt-BR')}</p>
                           {t.notes && <p className="text-[10px] italic text-primary font-medium mt-1 truncate max-w-70">"{t.notes}"</p>}
                         </div>
                         <div className="flex items-center gap-1">
@@ -1257,6 +1363,18 @@ export function AdminDashboard() {
                 {renderFiltroTiposContratoMultiplos()}
                 <Select value={dashFonte} onValueChange={setDashFonte}><SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
                 <div className="w-44">{renderFiltroContratosMultiplos()}</div>
+                
+                {/* 🌟 FILTRO OS NO DASH MENSAL */}
+                {dashVisaoTipos.includes('continuado_com_os') && (
+                  <Select value={dashOs} onValueChange={setDashOs}>
+                    <SelectTrigger className="w-48 h-8 text-xs border-amber-500/50"><SelectValue placeholder="Todas as OS" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Todas as OS</SelectItem>
+                      {osDashDisponiveis.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                )}
+
                 <Select value={dashMes} onValueChange={setDashMes}><SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
                 <Select value={dashAno} onValueChange={setDashAno}><SelectTrigger className="w-20 h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
               </div>
@@ -1297,10 +1415,10 @@ export function AdminDashboard() {
                   
                   {dashVisaoTipos.includes('continuado_com_os') && (
                     <Select value={dashOs} onValueChange={setDashOs}>
-                      <SelectTrigger className="w-44 h-9"><SelectValue placeholder="Todas as OS" /></SelectTrigger>
+                      <SelectTrigger className="w-48 h-9 border-amber-500/50"><SelectValue placeholder="Todas as OS" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="todas">Todas as OS</SelectItem>
-                        {osDashDisponiveis.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo}</SelectItem>)}
+                        {osDashDisponiveis.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   )}
@@ -1366,44 +1484,6 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* VIEW: RADAR DE ALERTAS */}
-        {menuAtivo === 'alertas' && (
-          <div className="space-y-6 w-full">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <Card className="border-red-500 bg-red-500/5">
-                <CardHeader><CardTitle className="text-red-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Ociosidade Crítica (&lt; 30% da Carga Mínima)</CardTitle></CardHeader>
-                <CardContent className="space-y-3">
-                  {!radarAlertas.jaPassouDaMetade ? (
-                    <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-center shadow-sm">
-                      <p className="text-amber-700 font-bold text-sm">Primeira Quinzena do Ciclo</p>
-                      <p className="text-xs text-amber-700/80 mt-1">O radar de ociosidade da equipe despertará automaticamente na metade do ciclo padrão (após o dia 10 de cada mês).</p>
-                    </div>
-                  ) : radarAlertas.ociosos.length === 0 ? (
-                    <p className="text-muted-foreground text-xs p-2">Toda a equipe está engajada no ciclo atual!</p> 
-                  ) : radarAlertas.ociosos.map((o, i) => (
-                    <div key={i} className="bg-background p-4 rounded-xl border border-red-200 flex justify-between items-center shadow-sm">
-                      <div><p className="font-bold text-sm">{o.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Mínimo: {o.meta}h | Apontou: {o.trabalhadas}h</p></div>
-                      <Badge variant="destructive" className="font-mono text-sm">{o.percentual}%</Badge>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-
-              <Card className="border-amber-500 bg-amber-500/5">
-                <CardHeader><CardTitle className="text-amber-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Atenção para Aditivos (&gt; 70% Consumido)</CardTitle></CardHeader>
-                <CardContent className="space-y-3">
-                  {radarAlertas.estourados.length === 0 ? <p className="text-muted-foreground text-xs p-2">Nenhum contrato atingiu o limite crítico de consumo.</p> : radarAlertas.estourados.map((e, i) => (
-                    <div key={i} className="bg-background p-4 rounded-xl border border-amber-200 flex justify-between items-center shadow-sm">
-                      <div className="max-w-[70%]"><p className="font-bold text-sm truncate">{e.contrato}</p><p className="text-[10px] text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded w-fit mt-1">{e.tipo.replace(/_/g, ' ').toUpperCase()}</p></div>
-                      <Badge className="bg-amber-500 text-white font-mono text-sm">{e.perc}%</Badge>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-        )}
-
         {/* VIEW: DASHBOARD DE FATURAMENTO - CLIENTES */}
         {menuAtivo === 'faturamento-cliente' && (
           <Card className="border-t-4 border-t-amber-600 shadow-sm min-h-125 w-full">
@@ -1416,6 +1496,18 @@ export function AdminDashboard() {
                 {renderFiltroTiposContratoMultiplos(true)}
                 <Select value={fatFonte} onValueChange={setFatFonte}><SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
                 <div className="w-44">{renderFiltroContratosMultiplos(true)}</div>
+                
+                {/* 🌟 FILTRO OS NO FATURAMENTO */}
+                {fatVisaoTipos.includes('continuado_com_os') && (
+                  <Select value={fatOs} onValueChange={setFatOs}>
+                    <SelectTrigger className="w-48 h-8 text-xs border-amber-500/50"><SelectValue placeholder="Todas as OS" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Todas as OS</SelectItem>
+                      {osDashDisponiveis.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                )}
+
                 <Select value={fatMes} onValueChange={setFatMes}><SelectTrigger className="w-28 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
                 <Select value={fatAno} onValueChange={setFatAno}><SelectTrigger className="w-20 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
               </div>
@@ -1428,7 +1520,7 @@ export function AdminDashboard() {
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
                       <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
                       <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => fatData.isFechadoMode ? `${v}%` : `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} formatter={(v: number, name: string, props: any) => [fatData.isFechadoMode ? `${v}%` : `${v} horas faturáveis`, fatData.isFechadoMode ? 'Físico Medido' : 'Para Cliente']} />
+                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} formatter={(v: number) => [fatData.isFechadoMode ? `${v}%` : `${v} horas faturáveis`, fatData.isFechadoMode ? 'Físico Medido' : 'Para Cliente']} />
                       <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55}>
                         {fatData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={fatData.isFechadoMode ? '#f59e0b' : '#d97706'} />)}
                       </Bar>
