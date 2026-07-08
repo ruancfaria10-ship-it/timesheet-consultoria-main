@@ -33,6 +33,7 @@ interface AllocationRow {
   id: string;
   user_id: string;
   contract_id: string;
+  os_id?: string; // ← RESOLVE O ERRO DE TIPAGEM AQUI!
   atividade: string;
   horas_disponiveis: number;
   contratos: {
@@ -53,10 +54,10 @@ function TimesheetPage() {
 
   const [entries, setEntries] = useState<TimeEntry[]>([]);
   const [allocations, setAllocations] = useState<AllocationRow[]>([]);
-  const [osList, setOsList] = useState<any[]>([]); // Estado para lista de OS
+  const [osList, setOsList] = useState<any[]>([]); 
   
   const [contractId, setContractId] = useState<string>("");
-  const [osId, setOsId] = useState<string>(""); // Estado para OS selecionada
+  const [osId, setOsId] = useState<string>(""); 
   const [activity, setActivity] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   
@@ -86,7 +87,7 @@ function TimesheetPage() {
       if (session?.user) {
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
-        fetchOs(); // Busca as OS ao iniciar
+        fetchOs(); 
       }
       setAuthLoading(false);
     });
@@ -96,7 +97,7 @@ function TimesheetPage() {
       if (session?.user) {
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
-        fetchOs(); // Busca as OS ao mudar de usuário
+        fetchOs(); 
       }
     });
 
@@ -107,9 +108,9 @@ function TimesheetPage() {
     const { data, error } = await supabase
       .from('alocacoes')
       .select(`
-        id, user_id, contract_id, atividade, horas_disponiveis,
+        id, user_id, contract_id, os_id, atividade, horas_disponiveis,
         contratos ( codigo, nome, status_ativo, tipo, ciclo_inicio, ciclo_fim )
-      `)
+      `) // ← AQUI FOI ADICIONADO O os_id NA BUSCA DO BANCO
       .eq('user_id', userId);
 
     if (error) {
@@ -204,39 +205,35 @@ function TimesheetPage() {
   // =====================================
   const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
   const currentContractType = currentContractObjFull?.tipo || 'horas';
+  const isComOs = currentContractType === 'continuado_com_os';
   const cInicio = currentContractObjFull?.ciclo_inicio || 25;
   const cFim = currentContractObjFull?.ciclo_fim || 24;
 
-  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity);
+  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId));
   const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
-  const contractBudgetMs = allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+  
+  // A MÁGICA AQUI: O Saldo "Global" vira o Saldo da OS!
+  const contractBudgetMs = isComOs 
+    ? allocations.filter(a => a.contract_id === contractId && a.os_id === osId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0)
+    : allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+  
   const currentOsObj = osList.find(o => o.id === osId);
   const osBudgetMs = currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0;
 
-  // Calcula o início e fim do ciclo atual do contrato selecionado
+  // Calcula o início e fim do ciclo atual
   const cycleBounds = useMemo(() => {
     const now = new Date(); 
     const currentDay = now.getDate(); 
     const currentMonth = now.getMonth(); 
     const currentYear = now.getFullYear();
     let start, end;
-
     if (cInicio > cFim) {
-      if (currentDay >= cInicio) { 
-        start = new Date(currentYear, currentMonth, cInicio, 0,0,0); 
-        end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59); 
-      } else { 
-        start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cInicio, 0,0,0); 
-        end = new Date(currentYear, currentMonth, cFim, 23,59,59); 
-      }
-    } else {
-      start = new Date(currentYear, currentMonth, cInicio, 0,0,0); 
-      end = new Date(currentYear, currentMonth, cFim, 23,59,59);
-    }
+      if (currentDay >= cInicio) { start = new Date(currentYear, currentMonth, cInicio, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59); } 
+      else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cInicio, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59); }
+    } else { start = new Date(currentYear, currentMonth, cInicio, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59); }
     return { start: start.getTime(), end: end.getTime() };
   }, [cInicio, cFim, daySelection, startTime]);
 
-  // Filtra as horas usadas dependendo se a regra é global ou mensal
   const isMensal = ['overhead', 'continuado_limite_mensal'].includes(currentContractType);
   const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType);
 
@@ -244,13 +241,15 @@ function TimesheetPage() {
   let activityUsedMs = 0;
 
   if (isMensal) {
-    // Busca só as horas gastas DENTRO deste ciclo (Zera todo mês)
     contractUsedMs = entries.filter(e => e.contractId === contractId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
     activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
   } else {
-    // Global Histórico
-    contractUsedMs = entries.filter(e => e.contractId === contractId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-    activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+    // Se for OS, soma apenas as horas trabalhadas NAQUELA OS.
+    contractUsedMs = isComOs 
+      ? entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0)
+      : entries.filter(e => e.contractId === contractId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+    
+    activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && (!isComOs || e.os_id === osId)).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
   }
   const osUsedMs = entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 

@@ -1,3 +1,4 @@
+// src/components/timesheet/TaskSelector.tsx
 import {
   Select,
   SelectContent,
@@ -52,19 +53,24 @@ export function TaskSelector({
 }) {
   const notesMissing = notes.trim().length === 0;
 
-  // Lógica dos Tipos de Contrato
+  // Identificação das modalidades de contrato
   const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contractType);
   const isMensal = ['overhead', 'continuado_limite_mensal'].includes(contractType);
   const isComOS = contractType === 'continuado_com_os';
   
-  const saldoTexto = isMensal ? "Saldo Mensal" : "Saldo Global";
-
-  const contractPercent = contractBudgetMs > 0 ? Math.min(100, (contractUsedMs / contractBudgetMs) * 100) : 0;
+  // 🌟 DEFINIÇÃO DO SALDO SUPERIOR:
+  // Se for contrato com OS, exibe o saldo do consultor naquela Demanda (OS).
+  // Se for contrato comum por horas, exibe o Saldo Global acumulado de todas as disciplinas.
+  const topLabel = isComOS ? "Saldo da Demanda (OS)" : (isMensal ? "Saldo Mensal" : "Saldo Global");
+  const topUsedMs = contractUsedMs;
+  const topBudgetMs = contractBudgetMs;
+  const topPercent = topBudgetMs > 0 ? Math.min(100, (topUsedMs / topBudgetMs) * 100) : 0;
   
-  // Define o que mostrar na barra inferior (OS ou Disciplina)
-  const subLabel = isComOS ? "Saldo da OS" : "Saldo da Disciplina";
-  const displayUsedMs = isComOS ? (osUsedMs || 0) : activityUsedMs;
-  const displayBudgetMs = isComOS ? (osBudgetMs || 0) : activityBudgetMs;
+  // 🌟 DEFINIÇÃO DO SALDO INFERIOR:
+  // Exibe o saldo individual alocado especificamente para a disciplina/escopo selecionado.
+  const subLabel = "Saldo da Disciplina";
+  const displayUsedMs = activityUsedMs;
+  const displayBudgetMs = activityBudgetMs;
   const subPercent = displayBudgetMs > 0 ? Math.min(100, (displayUsedMs / displayBudgetMs) * 100) : 0;
 
   const formatHoursDisplay = (ms: number) => {
@@ -99,7 +105,7 @@ export function TaskSelector({
           </Select>
         </div>
 
-        {/* CAMPO DE OS SÓ APARECE SE O CONTRATO FOR TIPO 4 */}
+        {/* CAMPO DE OS SÓ APARECE SE O CONTRATO FOR SOB DEMANDA (TIPO 4) */}
         {isComOS ? (
           <div className="space-y-2">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Ordem de Serviço (OS)</Label>
@@ -133,7 +139,7 @@ export function TaskSelector({
         )}
       </div>
 
-      {/* SE FOR COM OS, A ATIVIDADE CAI PRA LINHA DE BAIXO */}
+      {/* SE FOR COM OS, A DISCIPLINA ADQUIRE SEU PRÓPRIO CAMPO LOGO ABAIXO */}
       {isComOS && (
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Disciplina / Escopo</Label>
@@ -150,22 +156,22 @@ export function TaskSelector({
         </div>
       )}
 
-      {/* PAINEL DE SALDO DE HORAS REAL E DINÂMICO */}
+      {/* PAINEL DE PROGRESSÃO DE HORAS ATUALIZADO */}
       <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
-            <span>{saldoTexto} do Contrato</span>
+            <span>{topLabel}</span>
             {isIlimitado ? (
               <span className="font-semibold text-primary flex items-center gap-1">
                 <Infinity className="w-3 h-3" /> Horas Ilimitadas
               </span>
             ) : (
               <span className="font-mono">
-                {formatDuration(contractUsedMs)} / {formatHoursDisplay(contractBudgetMs)}
+                {formatDuration(topUsedMs)} / {formatHoursDisplay(topBudgetMs)}
               </span>
             )}
           </div>
-          {!isIlimitado && <Progress value={contractPercent} className="h-1.5" />}
+          {!isIlimitado && <Progress value={topPercent} className="h-1.5" />}
         </div>
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">

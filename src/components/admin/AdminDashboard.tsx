@@ -289,7 +289,29 @@ export function AdminDashboard() {
     const cObj = contratos.find(c => c.id === contratoAtivo);
     const isHora = cObj?.tipo === 'horas';
     const isSemOs = cObj?.tipo === 'continuado_sem_os';
+    const isComOs = cObj?.tipo === 'continuado_com_os';
     const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+
+    // 🌟 NOVA TRAVA: Verifica se a soma da equipe não fura o teto da OS
+    if (isComOs && targetOsId) {
+      const currentOs = osList.find(o => o.id === targetOsId);
+      if (currentOs && currentOs.horas_previstas > 0) {
+        let totalAlocadoOS = 0;
+        Object.values(alocacoes).forEach(aloc => {
+          if (aloc.atividades.length > 0) {
+            totalAlocadoOS += aloc.atividades.reduce((sum, a) => sum + (Number(a.horas) || 0), 0);
+          } else {
+            totalAlocadoOS += Number(aloc.horasTotais) || 0;
+          }
+        });
+        
+        if (totalAlocadoOS > currentOs.horas_previstas) {
+          alert(`❌ LIMITE DA OS EXCEDIDO!\n\nA OS '${currentOs.codigo}' possui um limite global de ${currentOs.horas_previstas}h.\nA soma do que você distribuiu para a equipe dá ${totalAlocadoOS}h.\nReduza as horas antes de salvar.`);
+          setSalvando(false);
+          return;
+        }
+      }
+    }
 
     const upserts: any[] = []; const inserts: any[] = []; const deletes: string[] = [];
     let bloqueio = false;
@@ -354,7 +376,7 @@ export function AdminDashboard() {
   const contratoSelecionadoObj = contratos.find(c => c.id === contratoAtivo)
   const isSemOsType = contratoSelecionadoObj?.tipo === 'continuado_sem_os';
   const isComOsType = contratoSelecionadoObj?.tipo === 'continuado_com_os';
-  const isGlobalType4 = isComOsType && alocacaoOsId === 'global';
+  const isGlobalType4 = false;
 
   // ==========================================
   // MEDIÇÕES MENSAIS
@@ -731,7 +753,7 @@ export function AdminDashboard() {
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-64 p-2 bg-card border shadow-md" align="start">
-          <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-65 overflow-y-auto pr-1">
             {Object.entries(MAPEAMENTO_TIPOS).map(([key, label]) => (
               <div key={key} className="flex items-center space-x-2 py-1">
                 <Checkbox id={`chk-${isFat?'fat':'dash'}-${key}`} checked={values.includes(key)} onCheckedChange={(checked) => { 
@@ -759,7 +781,7 @@ export function AdminDashboard() {
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-72 p-2 bg-card border shadow-md" align="start">
-          <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
+          <div className="space-y-3 max-h-75 overflow-y-auto pr-1">
             <div className="flex items-center space-x-2 pb-3 border-b"><Checkbox id={`chk-tds-${isFat}`} checked={values.length === 0} onCheckedChange={(c) => { if (c) setter([]) }} /><Label htmlFor={`chk-tds-${isFat}`} className="font-bold cursor-pointer text-sm">Selecionar Todos</Label></div>
             {visao.map(c => (
               <div key={c.id} className="flex items-center space-x-2 py-1">
@@ -841,7 +863,7 @@ export function AdminDashboard() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 items-end bg-muted/30 p-5 rounded-xl border">
                 <div className="space-y-2"><Label>Código</Label><Input placeholder="CT-001" className="uppercase" value={novoCodigo} onChange={(e) => setNovoCodigo(e.target.value)} /></div>
-                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Hospital Mater Dei" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
+                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Tractebel - Angra" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
                 <div className="space-y-2"><Label>Tipo Comercial</Label>
                   <Select value={novoTipo} onValueChange={setNovoTipo}>
                     <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
@@ -881,7 +903,7 @@ export function AdminDashboard() {
                 </div>
               </div>
 
-              <div className="border rounded-xl divide-y max-h-[500px] overflow-y-auto bg-card shadow-sm w-full">
+              <div className="border rounded-xl divide-y max-h-125 overflow-y-auto bg-card shadow-sm w-full">
                 {contratos.filter(c => c.tipo !== 'overhead').map(c => (
                   <div key={c.id} className="p-4 flex flex-wrap gap-4 justify-between items-center hover:bg-muted/20">
                     {editandoId === c.id ? (
@@ -945,7 +967,7 @@ export function AdminDashboard() {
             <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas dos Contratos Sob Demanda.</CardDescription></CardHeader>
             <CardContent className="space-y-6">
               <div className="flex flex-wrap gap-4 items-end bg-amber-500/5 p-4 rounded-xl border border-amber-500/10">
-                <div className="space-y-2 flex-1 min-w-[250px]"><Label>Contrato Mestre (Sob Demanda)</Label>
+                <div className="space-y-2 flex-1 min-w-62.5"><Label>Contrato Mestre (Sob Demanda)</Label>
                   <Select value={osContratoId} onValueChange={setOsContratoId}>
                     <SelectTrigger className="bg-background border-amber-500/30"><SelectValue placeholder="Selecione..." /></SelectTrigger>
                     <SelectContent>{contratos.filter(c => c.tipo === 'continuado_com_os' && c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
@@ -1022,7 +1044,7 @@ export function AdminDashboard() {
         {menuAtivo === 'alocacoes' && (
           <div className="space-y-6 w-full">
             {/* CABEÇALHO EXPANDIDO */}
-            <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm w-full">
+            <div className="bg-linear-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm w-full">
               <div>
                 <h2 className="text-2xl font-black text-primary tracking-tight flex items-center gap-2">
                   <Clock className="w-6 h-6" /> Alocação de Consultores
@@ -1058,7 +1080,6 @@ export function AdminDashboard() {
                           <Select value={alocacaoOsId} onValueChange={setAlocacaoOsId}>
                             <SelectTrigger className="bg-background border-amber-500/30 text-xs"><SelectValue placeholder="Selecione a OS..."/></SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="global" className="font-bold">Alocação Global do Contrato</SelectItem>
                               {osList.filter(o => o.contract_id === contratoAtivo).map(o => (
                                 <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
                               ))}
@@ -1079,7 +1100,7 @@ export function AdminDashboard() {
                 
                 <Card className={(!contratoAtivo || (isComOsType && !alocacaoOsId)) ? 'opacity-40 pointer-events-none' : ''}>
                   <CardHeader className="pb-3"><CardTitle className="text-sm">2. Selecionar Engenheiro</CardTitle></CardHeader>
-                  <CardContent className="space-y-1.5 max-h-[350px] overflow-y-auto p-3">
+                  <CardContent className="space-y-1.5 max-h-87.5 overflow-y-auto p-3">
                     {consultores.map(user => {
                       const jaAlocado = !!alocacoes[user.id]
                       return (
@@ -1093,7 +1114,7 @@ export function AdminDashboard() {
               </div>
               
               <div className="md:col-span-8 w-full">
-                <Card className="h-full min-h-[450px] flex flex-col w-full">
+                <Card className="h-full min-h-112.5 flex flex-col w-full">
                   <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
                     <div>
                       <CardTitle className="text-base">3. Distribuição de Metas de Custo</CardTitle>
@@ -1101,7 +1122,7 @@ export function AdminDashboard() {
                     </div>
                     {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm"><Save className="w-4 h-4" /> Gravar Matriz</Button>}
                   </CardHeader>
-                  <CardContent className="p-4 space-y-4 overflow-y-auto max-h-[500px] w-full">
+                  <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
                     {carregandoAlocacoes ? (
                       <div className="flex justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
                     ) : Object.values(alocacoes).length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Selecione o contrato e adicione consultores.</div> : 
@@ -1198,7 +1219,7 @@ export function AdminDashboard() {
               </Card>
             </div>
             <div className="md:col-span-7">
-              <Card className="h-full max-h-[500px] flex flex-col shadow-sm w-full">
+              <Card className="h-full max-h-125 flex flex-col shadow-sm w-full">
                 <CardHeader className="border-b py-3"><CardTitle className="text-xs font-bold text-muted-foreground">Últimos Lançamentos Efetuados</CardTitle></CardHeader>
                 <CardContent className="p-0 overflow-y-auto flex-1 divide-y text-xs w-full">
                   {gestaoLogsFiltrados.map(t => {
@@ -1208,7 +1229,7 @@ export function AdminDashboard() {
                         <div>
                           <p className="font-bold text-foreground text-xs">{consultores.find(c => c.id === t.user_id)?.nome}</p>
                           <p className="text-[10px] text-muted-foreground mt-0.5">{contratos.find(c => c.id === t.contract_id)?.codigo} • {t.activity} • {s.toLocaleDateString('pt-BR')}</p>
-                          {t.notes && <p className="text-[10px] italic text-primary font-medium mt-1 truncate max-w-[280px]">"{t.notes}"</p>}
+                          {t.notes && <p className="text-[10px] italic text-primary font-medium mt-1 truncate max-w-70">"{t.notes}"</p>}
                         </div>
                         <div className="flex items-center gap-1">
                           <Badge variant="secondary" className="font-mono bg-primary/10 text-primary border-none h-6 px-1.5">{((e.getTime() - s.getTime()) / 3600000).toFixed(1)}h</Badge>
@@ -1226,7 +1247,7 @@ export function AdminDashboard() {
 
         {/* VIEW: DASHBOARD MENSAL (PAGAMENTO CONSULTOR) */}
         {menuAtivo === 'dash-mensal' && (
-          <Card className="border-t-4 border-t-blue-500 shadow-sm min-h-[500px] w-full">
+          <Card className="border-t-4 border-t-blue-500 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-muted/10 border-b pb-4">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
                 <div><CardTitle className="text-lg">Folha de Pagamento (Equipe)</CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por monitor.</CardDescription></div>
@@ -1242,7 +1263,7 @@ export function AdminDashboard() {
             </CardHeader>
             <CardContent className="pt-6 w-full">
               {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div> : dashData.consultoresPagamento.length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro encontrado no ciclo para esse filtro.</div> : (
-                <div className="w-full h-[380px]">
+                <div className="w-full h-95">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={dashData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
@@ -1262,7 +1283,7 @@ export function AdminDashboard() {
 
         {/* VIEW: DASHBOARD GLOBAL (SAÚDE FINANCEIRA) */}
         {menuAtivo === 'dash-global' && (
-          <Card className="border-t-4 border-t-amber-500 shadow-sm min-h-[500px] w-full">
+          <Card className="border-t-4 border-t-amber-500 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-muted/10 border-b pb-4">
               <div><CardTitle className="text-lg">Saúde Financeira Consolidada</CardTitle><CardDescription>Visão geral de engenharia e lucratividade de custos.</CardDescription></div>
               <div className="flex flex-col gap-4 mt-6 w-full">
@@ -1318,7 +1339,7 @@ export function AdminDashboard() {
                       </>
                     )}
                   </div>
-                  <div className="h-[320px] w-full flex flex-col items-center justify-center relative">
+                  <div className="h-80 w-full flex flex-col items-center justify-center relative">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie data={dashData.pieData} innerRadius={85} outerRadius={115} paddingAngle={4} dataKey="value" stroke="none">
@@ -1385,7 +1406,7 @@ export function AdminDashboard() {
 
         {/* VIEW: DASHBOARD DE FATURAMENTO - CLIENTES */}
         {menuAtivo === 'faturamento-cliente' && (
-          <Card className="border-t-4 border-t-amber-600 shadow-sm min-h-[500px] w-full">
+          <Card className="border-t-4 border-t-amber-600 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-amber-600/5 border-b pb-4">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
                 <div><CardTitle className="text-lg text-amber-700 flex items-center gap-2"><Receipt className="w-5 h-5"/> Extração de Horas (Cliente)</CardTitle><CardDescription>Volume comercial consolidado com base no calendário de faturamento acordado.</CardDescription></div>
@@ -1401,7 +1422,7 @@ export function AdminDashboard() {
             </CardHeader>
             <CardContent className="pt-6 w-full">
               {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-amber-600" /></div> : fatData.consultoresPagamento.length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro faturável neste ciclo.</div> : (
-                <div className="w-full h-[380px]">
+                <div className="w-full h-95">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={fatData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
