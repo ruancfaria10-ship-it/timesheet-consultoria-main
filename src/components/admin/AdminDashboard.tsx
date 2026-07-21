@@ -494,7 +494,10 @@ export function AdminDashboard() {
       return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)), tooltipExtra }
     }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
 
-    const orcadoGlobal = fAlocs.reduce((acc, curr) => acc + curr.horas_disponiveis, 0)
+    const orcadoGlobal = fAlocs.reduce((acc, curr) => {
+      const isIlimitado = contratos.find(c => c.id === curr.contract_id)?.tipo === 'continuado_sem_os';
+      return isIlimitado ? acc : acc + curr.horas_disponiveis;
+    }, 0)
     const gastoGlobal = fTimes.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
     const medidoGlobal = fMeds.reduce((acc, curr) => acc + curr.percentual, 0)
     
@@ -928,8 +931,8 @@ export function AdminDashboard() {
             <CardHeader><CardTitle>Gestão Estratégica de Contratos</CardTitle><CardDescription>Classifique os contratos e configure os ciclos de faturamento do cliente e pagamento do consultor.</CardDescription></CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 items-end bg-muted/30 p-5 rounded-xl border">
-                <div className="space-y-2"><Label>Código</Label><Input placeholder="CT-001" className="uppercase" value={novoCodigo} onChange={(e) => setNovoCodigo(e.target.value)} /></div>
-                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Hospital Mater Dei" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
+                <div className="space-y-2"><Label>Código</Label><Input placeholder="CT001.23" className="uppercase" value={novoCodigo} onChange={(e) => setNovoCodigo(e.target.value)} /></div>
+                <div className="space-y-2 md:col-span-2"><Label>Nome do Cliente / Contrato</Label><Input placeholder="Ex: Tractebel - Angra" value={novoNomeContrato} onChange={(e) => setNovoNomeContrato(e.target.value)} /></div>
                 <div className="space-y-2"><Label>Tipo Comercial</Label>
                   <Select value={novoTipo} onValueChange={setNovoTipo}>
                     <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
