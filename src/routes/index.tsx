@@ -56,12 +56,18 @@ function TimesheetPage() {
   const [allocations, setAllocations] = useState<AllocationRow[]>([]);
   const [osList, setOsList] = useState<any[]>([]); 
   
-  const [contractId, setContractId] = useState<string>("");
-  const [osId, setOsId] = useState<string>(""); 
-  const [activity, setActivity] = useState<string>("");
+  // FASE 1: MEMÓRIA DE ESTADO COM LOCALSTORAGE
+  const [contractId, setContractId] = useState<string>(() => localStorage.getItem("engeprice_contractId") || "");
+  const [osId, setOsId] = useState<string>(() => localStorage.getItem("engeprice_osId") || ""); 
+  const [activity, setActivity] = useState<string>(() => localStorage.getItem("engeprice_activity") || "");
   const [notes, setNotes] = useState<string>("");
   
   const [daySelection, setDaySelection] = useState<"hoje" | "ontem">("hoje");
+
+  // Salvando as seleções na memória sempre que mudam
+  useEffect(() => { localStorage.setItem("engeprice_contractId", contractId); }, [contractId]);
+  useEffect(() => { localStorage.setItem("engeprice_osId", osId); }, [osId]);
+  useEffect(() => { localStorage.setItem("engeprice_activity", activity); }, [activity]);
   
   const getInitialTimeStr = () => {
     const d = new Date();
@@ -124,8 +130,12 @@ function TimesheetPage() {
       
       const activeAllocations = typedData.filter(a => a.contratos?.status_ativo);
       if (activeAllocations.length > 0) {
-        setContractId(activeAllocations[0].contract_id);
-        setActivity(activeAllocations[0].atividade);
+        // FASE 1: Verifica se o contrato da memória ainda é válido para esse usuário
+        const savedContract = localStorage.getItem("engeprice_contractId");
+        const isValidSaved = activeAllocations.some(a => a.contract_id === savedContract);
+        if (!isValidSaved) {
+          setContractId(activeAllocations[0].contract_id);
+        }
       }
     }
   };
@@ -177,15 +187,19 @@ function TimesheetPage() {
     ).values()
   );
 
-  const availableActivities = allocations
-    .filter(a => a.contract_id === contractId)
-    .map(a => a.atividade);
+  // FASE 1: Movido para cima para conseguirmos usar o isComOs no filtro de atividades
+  const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
+  const currentContractType = currentContractObjFull?.tipo || 'horas';
+  const isComOs = currentContractType === 'continuado_com_os';
+
+  // FASE 1: O Array de atividades agora cruza com a OS (se o contrato for do tipo OS)
+  const availableActivities = Array.from(new Set(
+    allocations
+      .filter(a => a.contract_id === contractId && (!isComOs || a.os_id === osId))
+      .map(a => a.atividade)
+  ));
 
   useEffect(() => {
-    if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
-      setActivity(availableActivities[0]);
-    }
-
     // Auto-selecionar a primeira OS caso o contrato mude e seja do Tipo 4 (continuado_com_os)
     const cObj = contractsList.find((x) => x.id === contractId);
     if (cObj?.tipo === 'continuado_com_os') {
@@ -200,12 +214,18 @@ function TimesheetPage() {
     }
   }, [contractId, allocations, osList]);
 
+  // FASE 1: Se a lista de atividades mudou, atualiza a atividade selecionada para não ficar vazia
+  useEffect(() => {
+    if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
+      setActivity(availableActivities[0]);
+    } else if (availableActivities.length === 0 && activity !== "") {
+      setActivity("");
+    }
+  }, [availableActivities, activity]);
+
   // =====================================
   // CALCULADORA DO MOTOR DE CICLOS/HORAS
   // =====================================
-  const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
-  const currentContractType = currentContractObjFull?.tipo || 'horas';
-  const isComOs = currentContractType === 'continuado_com_os';
   const cInicio = currentContractObjFull?.ciclo_inicio || 25;
   const cFim = currentContractObjFull?.ciclo_fim || 24;
 
@@ -235,7 +255,7 @@ function TimesheetPage() {
   }, [cInicio, cFim, daySelection, startTime]);
 
   const isMensal = ['overhead', 'continuado_limite_mensal'].includes(currentContractType);
-  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType);
+  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
 
   let contractUsedMs = 0;
   let activityUsedMs = 0;

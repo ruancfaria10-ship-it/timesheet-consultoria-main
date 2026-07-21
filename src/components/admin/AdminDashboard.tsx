@@ -154,12 +154,30 @@ export function AdminDashboard() {
   // ==========================================
   async function criarNovoContrato() {
     if (!novoCodigo || !novoNomeContrato) return alert("Preencha todos os campos obrigatórios!")
-    await supabase.from('contratos').insert([{ 
+    
+    // Inserimos o contrato e pegamos o ID gerado usando o .select().single()
+    const { data: newContract, error } = await supabase.from('contratos').insert([{ 
       codigo: novoCodigo.toUpperCase().trim(), nome: novoNomeContrato.trim(), 
       status_ativo: true, tipo: novoTipo, fonte_pagamento: novaFonte, 
       teto_global_horas: novoTipo === 'continuado_com_os' ? novoTetoGlobal : 0,
       ciclo_inicio: novoInicio, ciclo_fim: novoFim, ciclo_fat_inicio: novoFatInicio, ciclo_fat_fim: novoFatFim
-    }])
+    }]).select('*').single()
+
+    if (error || !newContract) {
+      return alert("Erro ao criar contrato no banco de dados.");
+    }
+
+    // 🌟 FASE 2: SE FOR ASSESSORIA (COM OS), INJETA A OS GERAL AUTOMATICAMENTE
+    if (novoTipo === 'continuado_com_os') {
+       await supabase.from('ordens_servico').insert([{
+         contract_id: newContract.id,
+         codigo: '🛠️ Pequenos Suportes',
+         descricao: 'Serviços pontuais e assessoria (Saldo Dinâmico)',
+         horas_previstas: 0, // Inicia em 0, e sobe junto com o gasto para nunca ficar negativa
+         status_ativa: true
+       }]);
+    }
+
     setNovoCodigo(''); setNovoNomeContrato(''); setNovoTetoGlobal(0); carregarDadosDoBanco();
   }
 
@@ -293,9 +311,9 @@ export function AdminDashboard() {
     const { data: currentTimesheets } = await supabase.from('timesheets').select('*').eq('contract_id', contratoAtivo);
     const cObj = contratos.find(c => c.id === contratoAtivo);
     const isHora = cObj?.tipo === 'horas';
-    const isSemOs = cObj?.tipo === 'continuado_sem_os';
-    const isComOs = cObj?.tipo === 'continuado_com_os';
     const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+    const isSemOs = targetOsId ? osList.find(o => o.id === targetOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
+    const isComOs = cObj?.tipo === 'continuado_com_os';
 
     // 🌟 NOVA TRAVA: Verifica se a soma da equipe não fura o teto da OS
     if (isComOs && targetOsId) {
@@ -379,7 +397,7 @@ export function AdminDashboard() {
   }
 
   const contratoSelecionadoObj = contratos.find(c => c.id === contratoAtivo)
-  const isSemOsType = contratoSelecionadoObj?.tipo === 'continuado_sem_os';
+  const isSemOsType = alocacaoOsId ? osList.find(o => o.id === alocacaoOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
   const isComOsType = contratoSelecionadoObj?.tipo === 'continuado_com_os';
   const isGlobalType4 = false;
 
@@ -494,13 +512,28 @@ export function AdminDashboard() {
       return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)), tooltipExtra }
     }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
 
-    const orcadoGlobal = fAlocs.reduce((acc, curr) => {
-      const isIlimitado = contratos.find(c => c.id === curr.contract_id)?.tipo === 'continuado_sem_os';
-      return isIlimitado ? acc : acc + curr.horas_disponiveis;
-    }, 0)
-    const gastoGlobal = fTimes.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
-    const medidoGlobal = fMeds.reduce((acc, curr) => acc + curr.percentual, 0)
+    // 🌟 FASE 2: MOTOR DE SALDO DINÂMICO CORRIGIDO
+    let orcadoGlobal = fAlocs.reduce((acc, curr) => {
+      // INTERCEPTA O 9999 FALSO: Se a alocação for da OS de suportes, IGNORA as horas disponíveis (que são 9999)
+      const osRelacionada = osList.find(o => o.id === curr.os_id);
+      if (osRelacionada?.codigo === '🛠️ Pequenos Suportes') return acc;
+      return acc + curr.horas_disponiveis;
+    }, 0);
+
+    const gastoGlobal = fTimes.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
+    const medidoGlobal = fMeds.reduce((acc, curr) => acc + curr.percentual, 0);
     
+    // Descobrimos quanto foi gasto especificamente na OS de Suportes
+    const timesSuportes = fTimes.filter(t => {
+      const osRelacionada = osList.find(o => o.id === t.os_id);
+      return osRelacionada?.codigo === '🛠️ Pequenos Suportes';
+    });
+    const gastoSuportes = timesSuportes.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
+    
+    // MÁGICA REAL: Injetamos no orçado APENAS o que foi realmente gasto.
+    // Se o consultor gastou 10h, o orçamento dela é 10h. O saldo fica ZERO. A saúde não sangra e não aparece 9999!
+    orcadoGlobal += gastoSuportes;
+
     const saldoPositivo = orcadoGlobal - gastoGlobal > 0 ? orcadoGlobal - gastoGlobal : 0;
     const saldoMedido = 100 - medidoGlobal > 0 ? 100 - medidoGlobal : 0;
     
@@ -806,8 +839,8 @@ export function AdminDashboard() {
   }
 
   const MAPEAMENTO_TIPOS: Record<string, string> = {
-    horas: "Escopo Fechado (Horas)", fechado: "Preço Fechado (%)", continuado_com_os: "Sob Demanda (Com OS)",
-    continuado_sem_os: "Assessoria (Ilimitada)", continuado_limite_mensal: "Assessoria (Teto Mensal)", overhead: "Overhead (Custos/Apoio)"
+    horas: "Escopo Fechado (Horas)", fechado: "Preço Fechado (%)", continuado_com_os: "Assessoria / Sob Demanda",
+    overhead: "Overhead (Custos/Apoio)"
   };
 
   const renderFiltroTiposContratoMultiplos = (isFat: boolean = false) => {
@@ -939,16 +972,10 @@ export function AdminDashboard() {
                     <SelectContent>
                       <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
                       <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                      <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
-                      <SelectItem value="continuado_sem_os">Assessoria (Ilimitada)</SelectItem>
-                      <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
+                      <SelectItem value="continuado_com_os">Assessoria / Sob Demanda (Com OS)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                
-                {novoTipo === 'continuado_com_os' && (
-                  <div className="space-y-2"><Label className="text-amber-600">Teto Global (Horas)</Label><Input type="number" placeholder="Ex: 500" value={novoTetoGlobal || ''} onChange={e => setNovoTetoGlobal(Number(e.target.value))} /></div>
-                )}
                 
                 <div className="space-y-2"><Label>Fonte de Faturamento</Label>
                   <Select value={novaFonte} onValueChange={setNovaFonte}>
@@ -985,15 +1012,12 @@ export function AdminDashboard() {
                             <SelectContent>
                               <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
                               <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
-                              <SelectItem value="continuado_com_os">Sob Demanda (Com OS)</SelectItem>
-                              <SelectItem value="continuado_sem_os">Assessoria (Ilimitada)</SelectItem>
-                              <SelectItem value="continuado_limite_mensal">Assessoria (Teto Mensal)</SelectItem>
+                              <SelectItem value="continuado_com_os">Assessoria / Sob Demanda (Com OS)</SelectItem>
                             </SelectContent>
                           </Select>
                           <Select value={editFonte} onValueChange={editFonte => setEditFonte(editFonte)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EC">EC</SelectItem><SelectItem value="ET">ET</SelectItem></SelectContent></Select>
                         </div>
                         <div className="w-full flex flex-wrap gap-4 items-end justify-between">
-                          {editTipo === 'continuado_com_os' && <div className="space-y-1"><Label className="text-[10px] text-amber-600">Teto Global (h)</Label><Input type="number" value={editTetoGlobal} onChange={e => setEditTetoGlobal(Number(e.target.value))} className="w-24" /></div>}
                           <div className="space-y-1"><Label className="text-[10px]">Pgto (Ini/Fim)</Label><div className="flex gap-1"><Input type="number" value={editInicio} onChange={(e) => setEditInicio(Number(e.target.value))} className="w-14" /><Input type="number" value={editFim} onChange={(e) => setEditFim(Number(e.target.value))} className="w-14" /></div></div>
                           <div className="space-y-1"><Label className="text-[10px] text-amber-700">Fat. (Ini/Fim)</Label><div className="flex gap-1"><Input type="number" value={editFatInicio} onChange={(e) => setEditFatInicio(Number(e.target.value))} className="w-14 border-amber-500/30" /><Input type="number" value={editFatFim} onChange={(e) => setEditFatFim(Number(e.target.value))} className="w-14 border-amber-500/30" /></div></div>
                           <div className="flex gap-2 border p-2 rounded-md bg-background h-9 items-center"><Switch id={`st-${c.id}`} checked={editStatus} onCheckedChange={setEditStatus} /><Label htmlFor={`st-${c.id}`}>{editStatus ? 'Ativo' : 'Inativo'}</Label></div>
@@ -1010,7 +1034,6 @@ export function AdminDashboard() {
                               <Badge variant="secondary" className={c.fonte_pagamento === 'EC' ? 'bg-blue-500/10 text-blue-600 border-none' : 'bg-purple-500/10 text-purple-600 border-none'}>{c.fonte_pagamento}</Badge>
                             </p>
                             <p className="text-xs text-muted-foreground mt-0.5">{c.nome} • Modalidade: {c.tipo.replace(/_/g, ' ').toUpperCase()}</p>
-                            {c.tipo === 'continuado_com_os' && <p className="text-[10px] font-bold text-amber-600 mt-1">TETO GLOBAL: {c.teto_global_horas}h</p>}
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-1">
@@ -1066,13 +1089,15 @@ export function AdminDashboard() {
                       <>
                         <div className="flex items-center gap-4">
                           <div><p className="font-bold text-amber-600 text-sm">{os.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">{os.descricao || 'Sem descrição cadastrada'}</p></div>
-                          <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-none ml-4 font-mono">{os.horas_previstas}h orçadas</Badge>
+                          <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-none ml-4 font-mono">  {os.codigo === '🛠️ Pequenos Suportes' ? 'Ilimitado' : `${os.horas_previstas}h orçadas`} </Badge>
                           {!os.status_ativa && <Badge variant="outline" className="text-red-500 border-red-500/20 bg-red-500/5 ml-2">Inativa</Badge>}
                         </div>
-                        <div className="flex gap-1">
-                          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => iniciarEdicaoOS(os)}><Pencil className="w-3.5 h-3.5" /></Button>
-                          <Button variant="ghost" size="icon" className="h-8 w-8 text-red-500 hover:bg-red-500/10" onClick={() => apagarOS(os.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
-                        </div>
+                        {os.codigo !== '🛠️ Pequenos Suportes' && (
+                          <div className="flex gap-1">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => iniciarEdicaoOS(os)}><Pencil className="w-3.5 h-3.5" /></Button>
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-red-500 hover:bg-red-500/10" onClick={() => apagarOS(os.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -1162,7 +1187,7 @@ export function AdminDashboard() {
 
                     {isSemOsType && (
                       <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                        <p className="text-xs font-bold text-blue-700">Contrato de Acesso Ilimitado</p>
+                        <p className="text-xs font-bold text-blue-700">🛠️ OS de Pequenos Suportes (Acesso Ilimitado)</p>
                         <p className="text-[10px] text-blue-700/70 mt-1 leading-tight">Não há limite de horas. Adicione o consultor ao lado para liberar o acesso.</p>
                       </div>
                     )}

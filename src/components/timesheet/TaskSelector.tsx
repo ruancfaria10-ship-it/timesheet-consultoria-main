@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "@/lib/format";
 import { Progress } from "@/components/ui/progress";
-import { Infinity } from "lucide-react";
+import { Briefcase, ChevronRight, CheckCircle2, Clock, Check, ChevronsUpDown, Infinity, Wrench } from "lucide-react";
 
 export function TaskSelector({
   contracts,
@@ -54,7 +54,8 @@ export function TaskSelector({
   const notesMissing = notes.trim().length === 0;
 
   // Identificação das modalidades de contrato
-  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contractType);
+  const currentOs = osList?.find(o => o.id === osId);
+  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contractType) || currentOs?.codigo === '🛠️ Pequenos Suportes';
   const isMensal = ['overhead', 'continuado_limite_mensal'].includes(contractType);
   const isComOS = contractType === 'continuado_com_os';
   
@@ -163,7 +164,7 @@ export function TaskSelector({
             <span>{topLabel}</span>
             {isIlimitado ? (
               <span className="font-semibold text-primary flex items-center gap-1">
-                <Infinity className="w-3 h-3" /> Horas Ilimitadas
+                <Wrench className="w-3 h-3" /> Horas Indefinidas
               </span>
             ) : (
               <span className="font-mono">
@@ -178,7 +179,7 @@ export function TaskSelector({
             <span>{subLabel}</span>
             {isIlimitado ? (
               <span className="font-semibold text-primary flex items-center gap-1">
-                <Infinity className="w-3 h-3" /> Horas Ilimitadas
+                <Wrench className="w-3 h-3" /> Horas Indefinidas
               </span>
             ) : (
               <span className="font-mono">
