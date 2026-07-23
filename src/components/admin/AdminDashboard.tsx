@@ -33,26 +33,22 @@ type Medicao = { id?: string, contract_id: string, user_id: string, mes: string,
 const MESES_NOME = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
 const CORES_GRAFICO = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f43f5e']
 
-// 🌟 FASE FINAL: Função Utilitária para calcular o range do Ciclo Vigente de um Contrato
-const getCycleBounds = (cInicio: number, cFim: number, targetDate = new Date()) => {
-  const currentDay = targetDate.getDate();
-  const currentMonth = targetDate.getMonth();
-  const currentYear = targetDate.getFullYear();
+// 🌟 MOTOR GLOBAL DE CICLO
+const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: string, yearStr: string) => {
+  const month = parseInt(monthStr);
+  const year = parseInt(yearStr);
   let start, end;
   if (cInicio > cFim) {
-    if (currentDay >= cInicio) { 
-      start = new Date(currentYear, currentMonth, cInicio, 0,0,0).getTime(); 
-      end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59,999).getTime(); 
-    } else { 
-      start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cInicio, 0,0,0).getTime(); 
-      end = new Date(currentYear, currentMonth, cFim, 23,59,59,999).getTime(); 
-    }
-  } else { 
-    start = new Date(currentYear, currentMonth, cInicio, 0,0,0).getTime(); 
-    end = new Date(currentYear, currentMonth, cFim, 23,59,59,999).getTime(); 
+    const startMonth = month === 0 ? 11 : month - 1;
+    const startYear = month === 0 ? year - 1 : year;
+    start = new Date(startYear, startMonth, cInicio, 0,0,0).getTime();
+    end = new Date(year, month, cFim, 23,59,59,999).getTime();
+  } else {
+    start = new Date(year, month, cInicio, 0,0,0).getTime();
+    end = new Date(year, month, cFim, 23,59,59,999).getTime();
   }
   return { start, end };
-}
+};
 
 export function AdminDashboard() {
   const { theme, toggle } = useTheme()
@@ -115,7 +111,7 @@ export function AdminDashboard() {
   const [medConsultores, setMedConsultores] = useState<Consultor[]>([])
   const [medLoading, setMedLoading] = useState(false)
 
-  // Estados Dashboards
+  // Estados Dashboards 
   const [dashVisaoTipos, setDashVisaoTipos] = useState<string[]>(['horas', 'continuado_com_os', 'overhead'])
   const [dashMes, setDashMes] = useState<string>(new Date().getMonth().toString())
   const [dashAno, setDashAno] = useState<string>(new Date().getFullYear().toString())
@@ -136,7 +132,7 @@ export function AdminDashboard() {
   const [allMedicoes, setAllMedicoes] = useState<Medicao[]>([])
   const [loadingDash, setLoadingDash] = useState(false)
 
-  // Estados Gestão Retroativa (Admin)
+  // Estados Gestão Retroativa
   const [gestaoConsultor, setGestaoConsultor] = useState<string>('')
   const [gestaoContrato, setGestaoContrato] = useState<string>('')
   const [gestaoOs, setGestaoOs] = useState<string>('')
@@ -147,7 +143,7 @@ export function AdminDashboard() {
   const [gestaoNotes, setGestaoNotes] = useState<string>('')
   const [gestaoEditandoId, setGestaoEditandoId] = useState<string | null>(null)
 
-  // Estados para Liberação Retroativa de Consultores
+  // Estados Liberação
   const [authList, setAuthList] = useState<any[]>([])
   const [liberarConsultor, setLiberarConsultor] = useState<string>('')
   const [liberarData, setLiberarData] = useState<string>(new Date().toISOString().split('T')[0])
@@ -181,7 +177,7 @@ export function AdminDashboard() {
     const { data: newContract, error } = await supabase.from('contratos').insert([{ 
       codigo: novoCodigo.toUpperCase().trim(), nome: novoNomeContrato.trim(), 
       status_ativo: true, tipo: novoTipo, fonte_pagamento: novaFonte, 
-      teto_global_horas: novoTetoGlobal, // 🌟 Teto liberado para salvar em qualquer modalidade
+      teto_global_horas: novoTetoGlobal,
       ciclo_inicio: novoInicio, ciclo_fim: novoFim, ciclo_fat_inicio: novoFatInicio, ciclo_fat_fim: novoFatFim
     }]).select('*').single()
 
@@ -328,7 +324,6 @@ export function AdminDashboard() {
 
     const isSemOs = targetOsId ? osList.find(o => o.id === targetOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
 
-    // 🌟 TRAVA 1: Limite da OS (Se existir)
     if (isComOs && targetOsId && !isSemOs) {
       const currentOs = osList.find(o => o.id === targetOsId);
       if (currentOs && currentOs.horas_previstas > 0) {
@@ -345,9 +340,11 @@ export function AdminDashboard() {
       }
     }
 
-    // 🌟 TRAVA 2: Teto Global Antimistura (Lê consumo passado vs Alocação deste mês)
+    // 🌟 TRAVA 2: Teto Global Antimistura (Lê consumo do passado vs Alocação do mês atual)
     if (cObj && cObj.teto_global_horas > 0) {
-      const cycle = getCycleBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
+      const nowMonth = String(new Date().getMonth());
+      const nowYear = String(new Date().getFullYear());
+      const cycle = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, nowMonth, nowYear);
       
       const pastConsumedMs = (currentTimesheets || [])
           .filter(t => new Date(t.start_at).getTime() < cycle.start)
@@ -361,7 +358,7 @@ export function AdminDashboard() {
       });
 
       if (!isSemOs && (pastConsumedH + currentAllocatedH > cObj.teto_global_horas)) {
-          alert(`❌ TETO GLOBAL EXCEDIDO!\n\nO contrato possui um teto de ${cObj.teto_global_horas}h para sua vida útil.\nNos meses passados já foram consumidas ${pastConsumedH.toFixed(1)}h.\nVocê está tentando alocar ${currentAllocatedH}h para este mês atual.\nO máximo que pode ser alocado agora é ${(cObj.teto_global_horas - pastConsumedH).toFixed(1)}h.`);
+          alert(`❌ TETO GLOBAL EXCEDIDO!\n\nO contrato possui um teto de ${cObj.teto_global_horas}h para sua vida útil.\nNo passado já foram consumidas ${pastConsumedH.toFixed(1)}h.\nVocê está tentando alocar ${currentAllocatedH}h para este mês atual.\nO máximo que pode ser alocado agora é ${(cObj.teto_global_horas - pastConsumedH).toFixed(1)}h.`);
           setSalvando(false); return;
       }
     }
@@ -372,13 +369,12 @@ export function AdminDashboard() {
     Object.values(alocacoes).forEach(aloc => {
       const nomeCons = consultores.find(c => c.id === aloc.consultorId)?.nome;
       const hTotais = isSemOs ? 9999 : aloc.horasTotais;
-      const cycle = getCycleBounds(cObj!.ciclo_inicio, cObj!.ciclo_fim);
+      const cycle = getCycleBoundsForContract(cObj!.ciclo_inicio, cObj!.ciclo_fim, String(new Date().getMonth()), String(new Date().getFullYear()));
 
       if (aloc.atividades.length > 0) {
         aloc.atividades.forEach(ativ => {
           const hAtiv = isSemOs ? 9999 : ativ.horas;
           if (isHora && currentTimesheets) {
-            // A Trava para redução do consultor olha apenas o consumo do ciclo vigente
             const consumedCycleMs = currentTimesheets.filter(t => t.user_id === aloc.consultorId && t.activity === ativ.nome && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end).reduce((acc, t) => acc + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
             const consumedCycleH = consumedCycleMs / 3600000;
             if (hAtiv < consumedCycleH) { alert(`❌ TRAVA:\n${nomeCons} já gastou ${consumedCycleH.toFixed(1)}h neste ciclo na disciplina '${ativ.nome}'. Não pode reduzir o limite mensal para ${hAtiv}h.`); bloqueio = true; }
@@ -576,38 +572,51 @@ export function AdminDashboard() {
       return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)), tooltipExtra }
     }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
 
-    // 🌟 FASE FINAL: MOTOR DE SAÚDE GLOBAL (PREVISTO = EXECUTADO PARA O PASSADO)
+    // 🌟 REESTRUTURAÇÃO COMPLETA: CALCULA SAÚDE GLOBAL SINTONIZADO COM O STATUS DO CICLO SELECIONADO
     let orcadoGlobal = 0;
     let gastoGlobal = 0;
-    const medidoGlobal = fMeds.reduce((acc, curr) => acc + curr.percentual, 0);
+    let medidoGlobal = 0;
 
     contratosVisao.forEach(cont => {
-      const cycle = getCycleBounds(cont.ciclo_inicio, cont.ciclo_fim);
-      const timesContrato = fTimes.filter(t => t.contract_id === cont.id);
+      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
       
-      const gastoTotal = timesContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-      const timesAtual = timesContrato.filter(t => new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
-      const gastoAtual = timesAtual.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+      const timesContrato = fTimes.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
+      const gastoAtual = timesContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
       
-      const pastGasto = gastoTotal - gastoAtual;
-      
+      // Captura o ciclo real-world corrente do relógio
+      const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
+      if (cont.ciclo_inicio > cont.ciclo_fim) {
+        if (currentDay >= cont.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
+      }
+      const dM = parseInt(dashMes); const dA = parseInt(dashAno);
+      const isPast = (dA < y) || (dA === y && dM < m);
+      const isCurrent = (dA === y && dM === m);
+
       let orcadoAtual = 0;
       const alocsContrato = fAlocs.filter(a => a.contract_id === cont.id);
       
       alocsContrato.forEach(a => {
         const os = osList.find(o => o.id === a.os_id);
         if (os?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cont.tipo)) {
-           // Modalidade Infinita/Fechada iguala Previsto=Executado para o mês vigente também
-           const tAtiv = timesAtual.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+           const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
            orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
         } else {
-           // Modalidade Por Hora: a saúde Global incorpora o Budget inteiro atual que a Administração configurou
-           orcadoAtual += a.horas_disponiveis;
+           if (isPast) {
+             const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+             orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+           } else if (isCurrent) {
+             orcadoAtual += a.horas_disponiveis;
+           } else {
+             orcadoAtual += 0;
+           }
         }
       });
 
-      orcadoGlobal += pastGasto + orcadoAtual;
-      gastoGlobal += gastoTotal;
+      const medsContrato = fMeds.filter(m => m.contract_id === cont.id && m.mes === dashMes && m.ano === dashAno);
+      medidoGlobal += medsContrato.reduce((sum, m) => sum + m.percentual, 0);
+
+      orcadoGlobal += orcadoAtual;
+      gastoGlobal += gastoAtual;
     });
 
     const saldoPositivo = orcadoGlobal - gastoGlobal > 0 ? orcadoGlobal - gastoGlobal : 0;
@@ -670,7 +679,7 @@ export function AdminDashboard() {
     });
 
     contratos.filter(c => c.status_ativo && ['horas', 'continuado_limite_mensal', 'continuado_com_os', 'overhead'].includes(c.tipo)).forEach(cont => {
-      const cycle = getCycleBounds(cont.ciclo_inicio, cont.ciclo_fim);
+      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, refMonth.toString(), refYear.toString());
       let orcadoAtual = allAlocacoes.filter(a => a.contract_id === cont.id).reduce((sum, a) => sum + a.horas_disponiveis, 0);
       
       const tsAtual = allTimesheets.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
@@ -683,7 +692,6 @@ export function AdminDashboard() {
 
       if (orcadoAtual > 0) {
         const perc = (consumidoAtual / orcadoAtual) * 100;
-        // O Radar acusa perfeitamente baseado APENAS no orçamento vs consumo do mês atual
         if (perc >= 70) estourados.push({ contrato: cont.nome, consumido: consumidoAtual.toFixed(1), orcado: orcadoAtual, perc: perc.toFixed(1), tipo: cont.tipo })
       }
     });
@@ -691,7 +699,6 @@ export function AdminDashboard() {
     return { ociosos, estourados, jaPassouDaMetade };
   }, [consultores, contratos, allTimesheets, allAlocacoes, osList]);
 
-  // Função para Gestão de Apontamentos
   const gestaoAtividadesDisponiveis = useMemo(() => {
     if (!gestaoContrato) return ['Sem atividade específica'];
     const isComOsType = contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os';
@@ -1498,6 +1505,20 @@ export function AdminDashboard() {
                       {atividadesDashDisponiveis.map((a, i) => <SelectItem key={i} value={a as string}>{a}</SelectItem>)}
                     </SelectContent>
                   </Select>
+
+                  {/* 🌟 FILTROS DE CICLO NA SAÚDE GLOBAL */}
+                  <Select value={dashMes} onValueChange={setDashMes}>
+                    <SelectTrigger className="w-28 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
+                    <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <Select value={dashAno} onValueChange={setDashAno}>
+                    <SelectTrigger className="w-20 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="2025">2025</SelectItem>
+                      <SelectItem value="2026">2026</SelectItem>
+                    </SelectContent>
+                  </Select>
+
                 </div>
               </div>
             </CardHeader>

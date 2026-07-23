@@ -53,10 +53,27 @@ interface AllocationRow {
 
 const MESES_NOME = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 
-// FIX: Garante que a data enviada não sofra com fusos horários do UTC
 const getLocalISODate = (d: Date) => {
-  const tzOffset = d.getTimezoneOffset() * 60000;
-  return new Date(d.getTime() - tzOffset).toISOString().split('T')[0];
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: string, yearStr: string) => {
+  const month = parseInt(monthStr);
+  const year = parseInt(yearStr);
+  let start, end;
+  if (cInicio > cFim) {
+    const startMonth = month === 0 ? 11 : month - 1;
+    const startYear = month === 0 ? year - 1 : year;
+    start = new Date(startYear, startMonth, cInicio, 0,0,0).getTime();
+    end = new Date(year, month, cFim, 23,59,59,999).getTime();
+  } else {
+    start = new Date(year, month, cInicio, 0,0,0).getTime();
+    end = new Date(year, month, cFim, 23,59,59,999).getTime();
+  }
+  return { start, end };
 };
 
 function TimesheetPage() {
@@ -77,7 +94,6 @@ function TimesheetPage() {
 
   const [viewMode, setViewMode] = useState<"timesheet" | "painel">("timesheet");
   
-  // FIX: Ajuste do fuso para não empurrar a data para fora do ciclo
   const getTodayStr = () => getLocalISODate(new Date());
   const getYesterdayStr = () => { const d = new Date(); d.setDate(d.getDate() - 1); return getLocalISODate(d); };
   
@@ -198,7 +214,19 @@ function TimesheetPage() {
     }
   };
 
-  const contractsList = Array.from(new Map(allocations.filter(a => a.contratos?.status_ativo).map(a => [a.contract_id, { id: a.contract_id, code: a.contratos!.codigo, name: a.contratos!.nome, tipo: a.contratos!.tipo }])).values());
+  const contractsList = Array.from(new Map(
+    allocations.filter(a => a.contratos?.status_ativo).map(a => [
+      a.contract_id, 
+      { 
+        id: a.contract_id, 
+        code: a.contratos!.codigo, 
+        name: a.contratos!.nome, 
+        tipo: a.contratos!.tipo,
+        ciclo_inicio: a.contratos!.ciclo_inicio,
+        ciclo_fim: a.contratos!.ciclo_fim
+      }
+    ])
+  ).values());
 
   const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
   const currentContractType = currentContractObjFull?.tipo || 'horas';
@@ -228,33 +256,61 @@ function TimesheetPage() {
     }
   }, [availableActivities, activity]);
 
-  const cInicio = currentContractObjFull?.ciclo_inicio || 25;
-  const cFim = currentContractObjFull?.ciclo_fim || 24;
-
-  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId));
-  const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
-  
-  const contractBudgetMs = isComOs 
-    ? allocations.filter(a => a.contract_id === contractId && a.os_id === osId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0)
-    : allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
-  
-  const currentOsObj = osList.find(o => o.id === osId);
-  const osBudgetMs = currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0;
-
-  const cycleBounds = useMemo(() => {
+  // 🌟 FUNÇÃO MESTRE: Calcula os limites do ciclo VIGENTE (HOJE) do contrato
+  const getContractCycleBounds = (cid: string) => {
+    const c = allocations.find(a => a.contract_id === cid)?.contratos;
+    const cIni = c?.ciclo_inicio || 25;
+    const cF = c?.ciclo_fim || 24;
+    
     const now = new Date(); 
     const currentDay = now.getDate(); 
     const currentMonth = now.getMonth(); 
     const currentYear = now.getFullYear();
     let start, end;
-    if (cInicio > cFim) {
-      if (currentDay >= cInicio) { start = new Date(currentYear, currentMonth, cInicio, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59); } 
-      else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cInicio, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59); }
-    } else { start = new Date(currentYear, currentMonth, cInicio, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59); }
+    
+    if (cIni > cF) {
+      if (currentDay >= cIni) { 
+        start = new Date(currentYear, currentMonth, cIni, 0,0,0); 
+        end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cF, 23,59,59,999); 
+      } else { 
+        start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cIni, 0,0,0); 
+        end = new Date(currentYear, currentMonth, cF, 23,59,59,999); 
+      }
+    } else { 
+      start = new Date(currentYear, currentMonth, cIni, 0,0,0); 
+      end = new Date(currentYear, currentMonth, cF, 23,59,59,999); 
+    }
     return { start: start.getTime(), end: end.getTime() };
-  }, [cInicio, cFim]);
+  };
 
+  // Bounds de quem o usuário quer enxergar (Hoje vs Ontem)
+  const daySelectionDate = useMemo(() => {
+    if (daySelection === 'ontem') {
+      const d = new Date(); d.setDate(d.getDate() - 1); return d;
+    }
+    return new Date();
+  }, [daySelection]);
+
+  const cycleBounds = useMemo(() => {
+    const c = allocations.find(a => a.contract_id === contractId)?.contratos;
+    const cIni = c?.ciclo_inicio || 25;
+    const cF = c?.ciclo_fim || 24;
+    const currentDay = daySelectionDate.getDate(); 
+    const currentMonth = daySelectionDate.getMonth(); 
+    const currentYear = daySelectionDate.getFullYear();
+    let start, end;
+    if (cIni > cF) {
+      if (currentDay >= cIni) { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cF, 23,59,59,999); } 
+      else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cF, 23,59,59,999); }
+    } else { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cF, 23,59,59,999); }
+    return { start: start.getTime(), end: end.getTime() };
+  }, [contractId, allocations, daySelectionDate]);
+
+  const currentOsObj = osList.find(o => o.id === osId);
   const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
+
+  // 🌟 Se o ciclo visualizado na tela já encerrou (ex: olhou pra "ontem" mas o ciclo virou hoje), o orçamento congela e zera saldo
+  const isMainCyclePast = cycleBounds.end < Date.now();
 
   const contractUsedMs = isComOs 
     ? entries.filter(e => e.os_id === osId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0)
@@ -263,8 +319,22 @@ function TimesheetPage() {
   const activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && (!isComOs || e.os_id === osId) && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
   const osUsedMs = entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 
+  // Orçamentos Congelados se o Ciclo fechou
+  const contractBudgetMs = isMainCyclePast 
+    ? contractUsedMs
+    : (isComOs 
+      ? allocations.filter(a => a.contract_id === contractId && a.os_id === osId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0)
+      : allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0));
+
+  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId));
+  const activityBudgetMs = isMainCyclePast 
+    ? activityUsedMs 
+    : (currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0);
+
+  const osBudgetMs = isMainCyclePast ? osUsedMs : (currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0);
+
   // =====================================
-  // MOTOR DO PAINEL DO CONSULTOR (DIA 25 a 24)
+  // MOTOR DO PAINEL DO CONSULTOR
   // =====================================
   const panelCycleBounds = useMemo(() => {
     const month = parseInt(panelMes);
@@ -281,41 +351,62 @@ function TimesheetPage() {
   }, [entries, panelCycleBounds]);
 
   const horasTrabalhadasMesAtual = useMemo(() => {
-    return panelCycleEntries.reduce((acc, e) => acc + (((e.end ?? Date.now()) - e.start) / 3600000), 0);
-  }, [panelCycleEntries]);
+    let sum = 0;
+    entries.forEach(e => {
+       const cObj = contractsList.find(c => c.id === e.contractId);
+       if (cObj) {
+           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+           if (e.start >= cb.start && e.start <= cb.end) sum += ((e.end ?? Date.now()) - e.start) / 3600000;
+       }
+    });
+    return sum;
+  }, [entries, panelMes, panelAno, contractsList]);
 
   const resumoPorTipo = useMemo(() => {
     let fechado = 0; let horas = 0;
-    panelCycleEntries.forEach(e => {
+    entries.forEach(e => {
       const cObj = contractsList.find(c => c.id === e.contractId);
-      const duration = ((e.end ?? Date.now()) - e.start);
-      if (cObj?.tipo === 'fechado') fechado += duration;
-      else horas += duration;
+      if (cObj) {
+        const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+        if (e.start >= cb.start && e.start <= cb.end) {
+          const duration = ((e.end ?? Date.now()) - e.start);
+          if (cObj.tipo === 'fechado') fechado += duration;
+          else horas += duration;
+        }
+      }
     });
     return { fechado: fechado / 3600000, horas: horas / 3600000 };
-  }, [panelCycleEntries, contractsList]);
+  }, [entries, contractsList, panelMes, panelAno]);
 
   const totalOrcadoMes = useMemo(() => {
     let totalOrcadoNesteCiclo = 0;
     let hasIlimitado = false;
 
     allocations.filter(a => a.contratos?.status_ativo).forEach(alloc => {
+       const cb = getCycleBoundsForContract(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim, panelMes, panelAno);
        const isComOsCheck = alloc.contratos!.tipo === 'continuado_com_os';
        const osObjCheck = isComOsCheck && alloc.os_id ? osList.find(o => o.id === alloc.os_id) : null;
        const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(alloc.contratos!.tipo);
        
+       const nowTime = Date.now();
+       const isPast = cb.end < nowTime;
+       const isCurrent = nowTime >= cb.start && nowTime <= cb.end;
+
+       let filterEntries = entries.filter(e => e.contractId === alloc.contract_id && e.activity === alloc.atividade && e.start >= cb.start && e.start <= cb.end);
+       if (isComOsCheck && alloc.os_id) filterEntries = filterEntries.filter(e => e.os_id === alloc.os_id);
+       const gastoCiclo = filterEntries.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
+
        if (isSuportesCheck) {
           hasIlimitado = true;
-          let filterEntries = panelCycleEntries.filter(e => e.contractId === alloc.contract_id && e.activity === alloc.atividade);
-          if (isComOsCheck && alloc.os_id) filterEntries = filterEntries.filter(e => e.os_id === alloc.os_id);
-          const gastoCiclo = filterEntries.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
           totalOrcadoNesteCiclo += gastoCiclo;
        } else {
-          totalOrcadoNesteCiclo += alloc.horas_disponiveis;
+          if (isPast) totalOrcadoNesteCiclo += gastoCiclo;
+          else if (isCurrent) totalOrcadoNesteCiclo += alloc.horas_disponiveis;
+          else totalOrcadoNesteCiclo += 0;
        }
     });
     return { total: totalOrcadoNesteCiclo, hasIlimitado };
-  }, [allocations, osList, panelCycleEntries]);
+  }, [allocations, osList, entries, panelMes, panelAno]);
 
   const saldoHorasMes = Math.max(0, totalOrcadoMes.total - horasTrabalhadasMesAtual);
   const percentualGasto = totalOrcadoMes.total > 0 ? (horasTrabalhadasMesAtual / totalOrcadoMes.total) * 100 : 0;
@@ -339,7 +430,7 @@ function TimesheetPage() {
     return entries.filter(e => e.start >= startDay && e.start <= endDay);
   }, [entries, panelDate]);
 
-  // 🌟 DETALHAMENTO DE ALOCAÇÕES (ACCORDION) TOTALMENTE BASEADO NO CICLO VIGENTE
+  // 🌟 DETALHAMENTO DE ALOCAÇÕES - Ajustado com a trava imbatível do Date.now()
   const detalhamentoAlocacoes = useMemo(() => {
     const map = new Map<string, any>();
     
@@ -347,7 +438,7 @@ function TimesheetPage() {
       if (!map.has(alloc.contract_id)) {
         map.set(alloc.contract_id, {
           id: alloc.contract_id, codigo: alloc.contratos!.codigo, nome: alloc.contratos!.nome,
-          tipo: alloc.contratos!.tipo, osGroups: new Map()
+          tipo: alloc.contratos!.tipo, inicio: alloc.contratos!.ciclo_inicio, fim: alloc.contratos!.ciclo_fim, osGroups: new Map()
         });
       }
       const cData = map.get(alloc.contract_id);
@@ -362,21 +453,31 @@ function TimesheetPage() {
 
     return Array.from(map.values()).map(contract => {
       let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false;
+      const cb = getCycleBoundsForContract(contract.inicio, contract.fim, panelMes, panelAno);
+
+      const nowTime = Date.now();
+      const isCurrent = nowTime >= cb.start && nowTime <= cb.end;
+      const isPast = cb.end < nowTime;
 
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
         const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(contract.tipo);
         if (isSuportes) hasIlimitado = true;
 
         const atividadesProcessadas = osGroup.atividades.map((a: any) => {
-          let filterCycle = panelCycleEntries.filter(e => e.contractId === contract.id && e.activity === a.atividade);
-          
+          let filterCycle = entries.filter(e => e.contractId === contract.id && e.activity === a.atividade && e.start >= cb.start && e.start <= cb.end);
           if (contract.tipo === 'continuado_com_os' && osGroup.id !== 'sem_os') {
              filterCycle = filterCycle.filter(e => e.os_id === osGroup.id);
           }
           
           const gastoCicloH = filterCycle.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
           
-          const orcadoCicloH = isSuportes ? gastoCicloH : a.horas_disponiveis;
+          let orcadoCicloH = 0;
+          if (isSuportes) orcadoCicloH = gastoCicloH;
+          else {
+            if (isPast) orcadoCicloH = gastoCicloH; // O Segredo Mestre: Passado = Executado
+            else if (isCurrent) orcadoCicloH = a.horas_disponiveis;
+            else orcadoCicloH = 0;
+          }
           const saldoH = isSuportes ? 0 : (orcadoCicloH - gastoCicloH);
 
           totalGastoContrato += gastoCicloH;
@@ -392,10 +493,10 @@ function TimesheetPage() {
         totalGasto: totalGastoContrato, totalSaldo: hasIlimitado ? 0 : (totalOrcadoNum - totalGastoContrato)
       };
     });
-  }, [allocations, panelCycleEntries, osList]);
+  }, [allocations, entries, panelMes, panelAno, osList]);
 
   // ==========================================
-  // OPERAÇÕES DE LANÇAMENTO E EXCLUSÃO
+  // OPERAÇÕES DE LANÇAMENTO E EXCLUSÃO (COM O CÃO DE GUARDA)
   // ==========================================
   const executeLaunch = async (dateStr: string) => {
     if (!contractId || contractId === "" || contractId === "none" || !activity) return toast.error("Selecione contrato e atividade válidos.");
@@ -404,6 +505,12 @@ function TimesheetPage() {
 
     const startMs = getTimestampFromTimeFields(startTime, dateStr);
     const endMs = getTimestampFromTimeFields(endTime, dateStr);
+
+    // 🌟 CÃO DE GUARDA: Impede o apontamento se o ciclo correspondente ao contrato já estiver no passado
+    const activeCb = getContractCycleBounds(contractId);
+    if (startMs < activeCb.start) {
+        return toast.error("🚫 Ciclo Fechado! Não é possível registrar horas em um ciclo já encerrado para este contrato.");
+    }
 
     if (endMs <= startMs) return toast.error("A hora de fim deve ser posterior à hora de início.");
 
@@ -460,6 +567,12 @@ function TimesheetPage() {
   const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
     const entryToEdit = entries.find(e => e.id === id);
     if (entryToEdit) {
+       // 🌟 CÃO DE GUARDA (Edição)
+       const activeCb = getContractCycleBounds(entryToEdit.contractId);
+       if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
+           return toast.error("🚫 Ciclo Fechado! Não é possível alterar apontamentos em um ciclo encerrado.");
+       }
+
        const entryDateStr = new Date(entryToEdit.start).toISOString().split('T')[0];
        if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
           return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
@@ -483,6 +596,12 @@ function TimesheetPage() {
   const handleDeleteEntry = async (id: string) => {
     const entryToDel = entries.find(e => e.id === id);
     if (entryToDel) {
+       // 🌟 CÃO DE GUARDA (Exclusão)
+       const activeCb = getContractCycleBounds(entryToDel.contractId);
+       if (entryToDel.start < activeCb.start) {
+           return toast.error("🚫 Ciclo Fechado! Não é possível excluir apontamentos de um ciclo já encerrado.");
+       }
+
        const entryDateStr = new Date(entryToDel.start).toISOString().split('T')[0];
        if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
           return toast.error("Sem autorização para excluir lançamentos passados. Fale com seu gestor.");
@@ -537,9 +656,6 @@ function TimesheetPage() {
 
       <main className="w-full max-w-none px-4 md:px-8 py-6 overflow-x-hidden">
         {viewMode === "timesheet" ? (
-          /* ========================================================================= */
-          /* MODO DE VISÃO 1: LANÇAMENTO DIÁRIO TRADICIONAL                            */
-          /* ========================================================================= */
           <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
             <section className="space-y-6">
               <div className="rounded-2xl border bg-card p-6 space-y-6 shadow-sm">
@@ -616,9 +732,6 @@ function TimesheetPage() {
             </section>
           </div>
         ) : (
-          /* ========================================================================= */
-          /* MODO DE VISÃO 2: 🌟 NOVO PAINEL DO CONSULTOR (COM ACCORDION & PIECHART)    */
-          /* ========================================================================= */
           <div className="space-y-6 animate-in fade-in-50 duration-200 pb-12">
             <div className="flex flex-col md:flex-row md:items-center justify-between border-b pb-4 gap-4">
               <div>
@@ -648,7 +761,6 @@ function TimesheetPage() {
               </div>
             </div>
 
-            {/* 1. SEÇÃO RESUMO GERAL DO CONSULTOR (PIECHART) */}
             <div className="grid gap-4 md:grid-cols-3">
               <Card className="md:col-span-2 shadow-sm">
                 <CardHeader className="pb-3 border-b">
@@ -657,7 +769,6 @@ function TimesheetPage() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pt-4 flex flex-col sm:flex-row items-center gap-8">
-                  {/* Gráfico de Pizza & Marco Amarelo */}
                   <div className="w-32 h-32 relative shrink-0 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
@@ -674,20 +785,17 @@ function TimesheetPage() {
                       </PieChart>
                     </ResponsiveContainer>
                     
-                    {/* Texto Central (%) - FIX Z-INDEX */}
                     <div className="absolute flex flex-col items-center justify-center pointer-events-none z-0">
                        <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
                     </div>
 
-                    {/* MARCO AMARELO DA META MENSAL */}
                     {horasMinimasMes > 0 && totalOrcadoMes.total > 0 && (
                       <div className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ transform: `rotate(${metaDeg}deg)` }}>
-                        <div className="mx-auto w-[3px] h-[25px] bg-amber-400 mt-[4px] rounded-full shadow-sm border border-amber-500/50" />
+                        <div className="mx-auto w-0.75 h-6 bg-amber-400 mt-1 rounded-full shadow-sm border border-amber-500/50" />
                       </div>
                     )}
                   </div>
                   
-                  {/* Legendas e Valores */}
                   <div className="flex-1 w-full space-y-3">
                     <div className="flex justify-between items-center border-b pb-2">
                       <span className="text-xs font-semibold text-muted-foreground">Total Previsto no Ciclo</span>
@@ -752,7 +860,6 @@ function TimesheetPage() {
               </Card>
             </div>
 
-            {/* 🌟 2. SEÇÃO DETALHAMENTO DE ALOCAÇÕES (ACCORDION COM VALORES DINÂMICOS E SEM ROLAGEM) */}
             <div className="space-y-4 pt-4">
               <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
                 <Briefcase className="w-4 h-4" /> Detalhamento de Saldo por Contrato
@@ -761,13 +868,12 @@ function TimesheetPage() {
               <Accordion type="multiple" className="w-full space-y-3">
                 {detalhamentoAlocacoes.map(contract => (
                   <AccordionItem key={contract.id} value={contract.id} className="border rounded-xl bg-card overflow-hidden shadow-sm">
-                    <AccordionTrigger className="px-4 py-3 hover:bg-muted/30 transition-colors [&[data-state=open]]:bg-muted/10 hover:no-underline">
+                    <AccordionTrigger className="px-4 py-3 hover:bg-muted/30 transition-colors data-[state=open]:bg-muted/10 hover:no-underline">
                       <div className="flex flex-col md:flex-row md:items-center justify-between w-full text-left gap-4 pr-4">
                         <div>
                           <p className="text-sm font-bold text-primary">{contract.codigo} - {contract.nome}</p>
                           <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">{contract.tipo.replace(/_/g, ' ')}</p>
                         </div>
-                        {/* Resumo do contrato visível mesmo fechado */}
                         <div className="flex items-center gap-6 text-xs">
                           <div className="text-right">
                             <p className="text-[10px] text-muted-foreground uppercase">Orçado</p>
@@ -799,7 +905,7 @@ function TimesheetPage() {
                             </div>
                           )}
                           <div className="px-4 py-2 overflow-x-auto">
-                            <table className="w-full text-xs text-left min-w-[300px]">
+                            <table className="w-full text-xs text-left min-w-72">
                               <thead>
                                 <tr className="text-muted-foreground/70">
                                   <th className="pb-2 font-medium">Disciplina / Escopo</th>
@@ -831,7 +937,6 @@ function TimesheetPage() {
                 ))}
               </Accordion>
 
-              {/* 🌟 RESUMO POR TIPO DE CONTRATO (BASEADO NO CICLO) */}
               <div className="grid grid-cols-2 gap-4 pt-2">
                 <Card className="shadow-sm bg-muted/10 border-dashed">
                   <CardContent className="p-4 flex items-center justify-between">
@@ -854,7 +959,6 @@ function TimesheetPage() {
               </div>
             </div>
 
-            {/* 3. ÁREA DE SELEÇÃO E LANÇAMENTO RETROATIVO NO PAINEL */}
             <div className="grid gap-6 md:grid-cols-[1.2fr_1fr] items-start pt-6 border-t">
               <div className="space-y-4">
                 <Card className="shadow-sm">
@@ -928,7 +1032,6 @@ function TimesheetPage() {
                 </Card>
               </div>
 
-              {/* 4. ESPELHO DA DATA SELECIONADA NO PAINEL */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between border-b pb-2">
                   <h3 className="text-xs font-bold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5">
@@ -963,7 +1066,6 @@ function TimesheetPage() {
                             </p>
                           )}
                           
-                          {/* Botões de Ação Condicionais baseados na trava do dia */}
                           {isPanelDateUnlocked && (
                             <div className="flex justify-end gap-1.5 pt-1 border-t border-dashed mt-2">
                               <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-red-500 hover:bg-red-500/10" onClick={() => handleDeleteEntry(entry.id)}>
