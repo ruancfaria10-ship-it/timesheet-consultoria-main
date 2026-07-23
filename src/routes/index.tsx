@@ -1,12 +1,11 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo } from "react";
-import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench } from "lucide-react";
+import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
@@ -23,6 +22,8 @@ import { DailyDashboard } from "@/components/timesheet/DailyDashboard";
 import { supabase } from "@/lib/supabase";
 import { Login } from "@/components/Login";
 import type { User } from "@supabase/supabase-js";
+import ExcelJS from 'exceljs';
+import { saveAs } from 'file-saver';
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -41,6 +42,8 @@ interface AllocationRow {
   os_id?: string;
   atividade: string;
   horas_disponiveis: number;
+  mes: string; 
+  ano: string; 
   contratos: {
     codigo: string;
     nome: string;
@@ -76,10 +79,22 @@ const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: stri
   return { start, end };
 };
 
+const getCycleMonthYear = (date: Date, cInicio: number, cFim: number) => {
+  const d = date.getDate();
+  let m = date.getMonth();
+  let y = date.getFullYear();
+  if (cInicio > cFim && d >= cInicio) {
+    m = m === 11 ? 0 : m + 1;
+    if (m === 0) y++;
+  }
+  return { month: String(m), year: String(y) };
+}
+
 function TimesheetPage() {
   const { theme, mounted, toggle } = useTheme();
   
   const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<{nome: string, avatar_url: string | null} | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
   const [entries, setEntries] = useState<TimeEntry[]>([]);
@@ -137,6 +152,7 @@ function TimesheetPage() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) {
+        fetchUserProfile(session.user.id);
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -149,6 +165,7 @@ function TimesheetPage() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
+        fetchUserProfile(session.user.id);
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -159,6 +176,11 @@ function TimesheetPage() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const fetchUserProfile = async (userId: string) => {
+    const { data, error } = await supabase.from('consultores').select('nome, avatar_url').eq('id', userId).single();
+    if (!error && data) setUserProfile(data);
+  };
 
   const fetchConsultorMeta = async (userId: string) => {
     const { data, error } = await supabase.from('consultores').select('horas_minimas_mes').eq('id', userId).single();
@@ -173,7 +195,7 @@ function TimesheetPage() {
   const fetchAllocations = async (userId: string) => {
     const { data, error } = await supabase
       .from('alocacoes')
-      .select(`id, user_id, contract_id, os_id, atividade, horas_disponiveis, contratos ( codigo, nome, status_ativo, tipo, ciclo_inicio, ciclo_fim )`)
+      .select(`id, user_id, contract_id, os_id, atividade, horas_disponiveis, mes, ano, contratos ( codigo, nome, status_ativo, tipo, ciclo_inicio, ciclo_fim )`)
       .eq('user_id', userId);
 
     if (error) return console.error("Erro ao carregar alocações:", error);
@@ -228,12 +250,30 @@ function TimesheetPage() {
     ])
   ).values());
 
-  const currentContractObjFull = allocations.find(a => a.contract_id === contractId)?.contratos;
+  const currentContractObjFull = contractsList.find((x) => x.id === contractId);
   const currentContractType = currentContractObjFull?.tipo || 'horas';
   const isComOs = currentContractType === 'continuado_com_os';
 
+  const daySelectionDate = useMemo(() => {
+    if (daySelection === 'ontem') {
+      const d = new Date(); d.setDate(d.getDate() - 1); return d;
+    }
+    return new Date();
+  }, [daySelection]);
+
+  const activeCycleForInput = useMemo(() => {
+    const cIni = currentContractObjFull?.ciclo_inicio || 25;
+    const cFim = currentContractObjFull?.ciclo_fim || 24;
+    return getCycleMonthYear(daySelectionDate, cIni, cFim);
+  }, [currentContractObjFull, daySelectionDate]);
+
   const availableActivities = Array.from(new Set(
-    allocations.filter(a => a.contract_id === contractId && (!isComOs || a.os_id === osId)).map(a => a.atividade)
+    allocations.filter(a => 
+      a.contract_id === contractId && 
+      (!isComOs || a.os_id === osId) && 
+      a.mes === activeCycleForInput.month && 
+      a.ano === activeCycleForInput.year
+    ).map(a => a.atividade)
   ));
 
   useEffect(() => {
@@ -256,9 +296,8 @@ function TimesheetPage() {
     }
   }, [availableActivities, activity]);
 
-  // 🌟 FUNÇÃO MESTRE: Calcula os limites do ciclo VIGENTE (HOJE) do contrato
   const getContractCycleBounds = (cid: string) => {
-    const c = allocations.find(a => a.contract_id === cid)?.contratos;
+    const c = contractsList.find(x => x.id === cid);
     const cIni = c?.ciclo_inicio || 25;
     const cF = c?.ciclo_fim || 24;
     
@@ -283,58 +322,41 @@ function TimesheetPage() {
     return { start: start.getTime(), end: end.getTime() };
   };
 
-  // Bounds de quem o usuário quer enxergar (Hoje vs Ontem)
-  const daySelectionDate = useMemo(() => {
-    if (daySelection === 'ontem') {
-      const d = new Date(); d.setDate(d.getDate() - 1); return d;
-    }
-    return new Date();
-  }, [daySelection]);
-
   const cycleBounds = useMemo(() => {
-    const c = allocations.find(a => a.contract_id === contractId)?.contratos;
-    const cIni = c?.ciclo_inicio || 25;
-    const cF = c?.ciclo_fim || 24;
+    const cIni = currentContractObjFull?.ciclo_inicio || 25;
+    const cFim = currentContractObjFull?.ciclo_fim || 24;
     const currentDay = daySelectionDate.getDate(); 
     const currentMonth = daySelectionDate.getMonth(); 
     const currentYear = daySelectionDate.getFullYear();
     let start, end;
-    if (cIni > cF) {
-      if (currentDay >= cIni) { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cF, 23,59,59,999); } 
-      else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cF, 23,59,59,999); }
-    } else { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cF, 23,59,59,999); }
+    if (cIni > cFim) {
+      if (currentDay >= cIni) { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59,999); } 
+      else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59,999); }
+    } else { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59,999); }
     return { start: start.getTime(), end: end.getTime() };
-  }, [contractId, allocations, daySelectionDate]);
+  }, [currentContractObjFull, daySelectionDate]);
 
   const currentOsObj = osList.find(o => o.id === osId);
   const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
 
-  // 🌟 Se o ciclo visualizado na tela já encerrou (ex: olhou pra "ontem" mas o ciclo virou hoje), o orçamento congela e zera saldo
-  const isMainCyclePast = cycleBounds.end < Date.now();
+  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId) && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
+  const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
+  
+  const contractBudgetMs = isComOs 
+    ? allocations.filter(a => a.contract_id === contractId && a.os_id === osId && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0)
+    : allocations.filter(a => a.contract_id === contractId && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+
+  const osBudgetMs = currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0;
+  const osUsedMs = entries.filter(e => e.os_id === osId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 
   const contractUsedMs = isComOs 
     ? entries.filter(e => e.os_id === osId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0)
     : entries.filter(e => e.contractId === contractId && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
   
   const activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && (!isComOs || e.os_id === osId) && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-  const osUsedMs = entries.filter(e => e.os_id === osId).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
-
-  // Orçamentos Congelados se o Ciclo fechou
-  const contractBudgetMs = isMainCyclePast 
-    ? contractUsedMs
-    : (isComOs 
-      ? allocations.filter(a => a.contract_id === contractId && a.os_id === osId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0)
-      : allocations.filter(a => a.contract_id === contractId).reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0));
-
-  const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId));
-  const activityBudgetMs = isMainCyclePast 
-    ? activityUsedMs 
-    : (currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0);
-
-  const osBudgetMs = isMainCyclePast ? osUsedMs : (currentOsObj ? currentOsObj.horas_previstas * 3600 * 1000 : 0);
 
   // =====================================
-  // MOTOR DO PAINEL DO CONSULTOR
+  // MOTOR DO PAINEL DO CONSULTOR (Mensalidade Flexível)
   // =====================================
   const panelCycleBounds = useMemo(() => {
     const month = parseInt(panelMes);
@@ -382,27 +404,22 @@ function TimesheetPage() {
     let totalOrcadoNesteCiclo = 0;
     let hasIlimitado = false;
 
-    allocations.filter(a => a.contratos?.status_ativo).forEach(alloc => {
+    const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
+
+    alocsDoMes.forEach(alloc => {
        const cb = getCycleBoundsForContract(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim, panelMes, panelAno);
        const isComOsCheck = alloc.contratos!.tipo === 'continuado_com_os';
        const osObjCheck = isComOsCheck && alloc.os_id ? osList.find(o => o.id === alloc.os_id) : null;
        const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(alloc.contratos!.tipo);
        
-       const nowTime = Date.now();
-       const isPast = cb.end < nowTime;
-       const isCurrent = nowTime >= cb.start && nowTime <= cb.end;
-
-       let filterEntries = entries.filter(e => e.contractId === alloc.contract_id && e.activity === alloc.atividade && e.start >= cb.start && e.start <= cb.end);
-       if (isComOsCheck && alloc.os_id) filterEntries = filterEntries.filter(e => e.os_id === alloc.os_id);
-       const gastoCiclo = filterEntries.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
-
        if (isSuportesCheck) {
           hasIlimitado = true;
+          let filterEntries = entries.filter(e => e.contractId === alloc.contract_id && e.activity === alloc.atividade && e.start >= cb.start && e.start <= cb.end);
+          if (isComOsCheck && alloc.os_id) filterEntries = filterEntries.filter(e => e.os_id === alloc.os_id);
+          const gastoCiclo = filterEntries.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
           totalOrcadoNesteCiclo += gastoCiclo;
        } else {
-          if (isPast) totalOrcadoNesteCiclo += gastoCiclo;
-          else if (isCurrent) totalOrcadoNesteCiclo += alloc.horas_disponiveis;
-          else totalOrcadoNesteCiclo += 0;
+          totalOrcadoNesteCiclo += alloc.horas_disponiveis;
        }
     });
     return { total: totalOrcadoNesteCiclo, hasIlimitado };
@@ -410,7 +427,12 @@ function TimesheetPage() {
 
   const saldoHorasMes = Math.max(0, totalOrcadoMes.total - horasTrabalhadasMesAtual);
   const percentualGasto = totalOrcadoMes.total > 0 ? (horasTrabalhadasMesAtual / totalOrcadoMes.total) * 100 : 0;
-  const metaDeg = totalOrcadoMes.total > 0 ? (horasMinimasMes / totalOrcadoMes.total) * 360 : 0;
+  
+  const metaDeg = useMemo(() => {
+    if (totalOrcadoMes.total === 0) return 0;
+    const percentualMaximo = Math.min(horasMinimasMes / totalOrcadoMes.total, 1);
+    return percentualMaximo * 360;
+  }, [horasMinimasMes, totalOrcadoMes.total]);
 
   const pieData = useMemo(() => {
     if (totalOrcadoMes.total === 0) return [{ name: 'Sem Registros', value: 1 }];
@@ -430,11 +452,12 @@ function TimesheetPage() {
     return entries.filter(e => e.start >= startDay && e.start <= endDay);
   }, [entries, panelDate]);
 
-  // 🌟 DETALHAMENTO DE ALOCAÇÕES - Ajustado com a trava imbatível do Date.now()
   const detalhamentoAlocacoes = useMemo(() => {
     const map = new Map<string, any>();
     
-    allocations.filter(a => a.contratos?.status_ativo).forEach(alloc => {
+    const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
+
+    alocsDoMes.forEach(alloc => {
       if (!map.has(alloc.contract_id)) {
         map.set(alloc.contract_id, {
           id: alloc.contract_id, codigo: alloc.contratos!.codigo, nome: alloc.contratos!.nome,
@@ -455,10 +478,6 @@ function TimesheetPage() {
       let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false;
       const cb = getCycleBoundsForContract(contract.inicio, contract.fim, panelMes, panelAno);
 
-      const nowTime = Date.now();
-      const isCurrent = nowTime >= cb.start && nowTime <= cb.end;
-      const isPast = cb.end < nowTime;
-
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
         const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(contract.tipo);
         if (isSuportes) hasIlimitado = true;
@@ -470,14 +489,7 @@ function TimesheetPage() {
           }
           
           const gastoCicloH = filterCycle.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
-          
-          let orcadoCicloH = 0;
-          if (isSuportes) orcadoCicloH = gastoCicloH;
-          else {
-            if (isPast) orcadoCicloH = gastoCicloH; // O Segredo Mestre: Passado = Executado
-            else if (isCurrent) orcadoCicloH = a.horas_disponiveis;
-            else orcadoCicloH = 0;
-          }
+          const orcadoCicloH = isSuportes ? gastoCicloH : a.horas_disponiveis;
           const saldoH = isSuportes ? 0 : (orcadoCicloH - gastoCicloH);
 
           totalGastoContrato += gastoCicloH;
@@ -496,7 +508,79 @@ function TimesheetPage() {
   }, [allocations, entries, panelMes, panelAno, osList]);
 
   // ==========================================
-  // OPERAÇÕES DE LANÇAMENTO E EXCLUSÃO (COM O CÃO DE GUARDA)
+  // EXPORTADOR EXCELJS 
+  // ==========================================
+  const handleExportarExcelConsultor = async () => {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Meu Apontamento');
+
+      sheet.columns = [
+        { header: 'Consultor', key: 'consultor', width: 25 },
+        { header: 'Data', key: 'data', width: 15 },
+        { header: 'Contrato', key: 'contrato', width: 25 },
+        { header: 'OS', key: 'os', width: 15 },
+        { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
+        { header: 'Entrada', key: 'inicio', width: 12 },
+        { header: 'Saída', key: 'fim', width: 12 },
+        { header: 'Total (h)', key: 'horas', width: 12 },
+        { header: 'Memorial Descritivo', key: 'obs', width: 50 },
+      ];
+
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+      sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+
+      let hasData = false;
+      entries.forEach(t => {
+        const cObj = contractsList.find(c => c.id === t.contractId);
+        if (cObj) {
+           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+           if (t.start >= cb.start && t.start <= cb.end) {
+              hasData = true;
+              const s = new Date(t.start);
+              const e = t.end ? new Date(t.end) : new Date();
+              sheet.addRow({
+                 consultor: userProfile?.nome || user?.email?.split('@')[0],
+                 data: s.toLocaleDateString('pt-BR'),
+                 contrato: cObj.code,
+                 os: osList.find(o => o.id === t.os_id)?.codigo || '-',
+                 atividade: t.activity,
+                 inicio: s.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+                 fim: e.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+                 horas: ((e.getTime() - s.getTime()) / 3600000).toFixed(2).replace('.', ','),
+                 obs: t.notes || ''
+              });
+           }
+        }
+      });
+
+      if (!hasData) return toast.error("Não há apontamentos no mês selecionado para exportar.");
+
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) {
+           row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+        }
+        row.eachCell((cell) => {
+           cell.border = {
+              top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}},
+              bottom: {style:'thin', color: {argb:'FFE2E8F0'}}, right: {style:'thin', color: {argb:'FFE2E8F0'}}
+           };
+        });
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      saveAs(blob, `Timesheet_Consultor_${MESES_NOME[parseInt(panelMes)]}_${panelAno}.xlsx`);
+      toast.success("Relatório Excel gerado com sucesso!");
+
+    } catch (e) {
+      toast.error("Erro ao gerar arquivo Excel.");
+    }
+  };
+
+  // ==========================================
+  // OPERAÇÕES DE LANÇAMENTO E EXCLUSÃO
   // ==========================================
   const executeLaunch = async (dateStr: string) => {
     if (!contractId || contractId === "" || contractId === "none" || !activity) return toast.error("Selecione contrato e atividade válidos.");
@@ -506,7 +590,6 @@ function TimesheetPage() {
     const startMs = getTimestampFromTimeFields(startTime, dateStr);
     const endMs = getTimestampFromTimeFields(endTime, dateStr);
 
-    // 🌟 CÃO DE GUARDA: Impede o apontamento se o ciclo correspondente ao contrato já estiver no passado
     const activeCb = getContractCycleBounds(contractId);
     if (startMs < activeCb.start) {
         return toast.error("🚫 Ciclo Fechado! Não é possível registrar horas em um ciclo já encerrado para este contrato.");
@@ -567,7 +650,6 @@ function TimesheetPage() {
   const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
     const entryToEdit = entries.find(e => e.id === id);
     if (entryToEdit) {
-       // 🌟 CÃO DE GUARDA (Edição)
        const activeCb = getContractCycleBounds(entryToEdit.contractId);
        if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
            return toast.error("🚫 Ciclo Fechado! Não é possível alterar apontamentos em um ciclo encerrado.");
@@ -596,7 +678,6 @@ function TimesheetPage() {
   const handleDeleteEntry = async (id: string) => {
     const entryToDel = entries.find(e => e.id === id);
     if (entryToDel) {
-       // 🌟 CÃO DE GUARDA (Exclusão)
        const activeCb = getContractCycleBounds(entryToDel.contractId);
        if (entryToDel.start < activeCb.start) {
            return toast.error("🚫 Ciclo Fechado! Não é possível excluir apontamentos de um ciclo já encerrado.");
@@ -640,10 +721,22 @@ function TimesheetPage() {
               <p className="text-xs text-muted-foreground leading-tight">Engenharia de Custos</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="hidden sm:inline text-xs text-muted-foreground">
-              Olá, <span className="font-medium text-foreground">{user.email?.split('@')[0]}</span>
-            </span>
+          
+          {/* 🌟 FIX: Perfil e Avatar Dinâmico */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {userProfile?.avatar_url ? (
+                <img src={userProfile.avatar_url} alt="Avatar" className="w-8 h-8 rounded-full border shadow-sm object-cover" />
+              ) : (
+                <div className="w-8 h-8 rounded-full border shadow-sm bg-primary/10 flex items-center justify-center text-primary font-bold text-[10px]">
+                   {userProfile?.nome ? userProfile.nome.substring(0,2).toUpperCase() : user?.email?.substring(0,2).toUpperCase()}
+                </div>
+              )}
+              <span className="hidden sm:inline text-xs text-muted-foreground">
+                Olá, <span className="font-medium text-foreground">{userProfile?.nome?.split(' ')[0] || user?.email?.split('@')[0]}</span>
+              </span>
+            </div>
+            <div className="w-px h-6 bg-border mx-1"></div>
             <Button size="icon" variant="ghost" onClick={toggle} aria-label="Alternar tema">
               {mounted ? (theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />) : <Moon className="h-4 w-4" />}
             </Button>
@@ -763,18 +856,22 @@ function TimesheetPage() {
 
             <div className="grid gap-4 md:grid-cols-3">
               <Card className="md:col-span-2 shadow-sm">
-                <CardHeader className="pb-3 border-b">
+                <CardHeader className="pb-3 border-b flex flex-row items-center justify-between">
                   <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                     <BarChart3 className="w-4 h-4" /> Resumo do Ciclo Selecionado
                   </CardTitle>
+                  <Button onClick={handleExportarExcelConsultor} variant="outline" size="sm" className="h-7 text-[10px] bg-green-500/10 text-green-700 border-green-500/20 hover:bg-green-500/20">
+                    <Download className="w-3 h-3 mr-1" /> EXPORTAR EXCEL
+                  </Button>
                 </CardHeader>
                 <CardContent className="pt-4 flex flex-col sm:flex-row items-center gap-8">
                   <div className="w-32 h-32 relative shrink-0 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie data={pieData} startAngle={90} endAngle={-270} dataKey="value" cx="50%" cy="50%" innerRadius={35} outerRadius={60} stroke="none">
+                          {/* FIX: Zerado usa cor neutra, não vermelho */}
                           {pieData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0'} />
+                            <Cell key={`cell-${index}`} fill={entry.name === 'Sem Registros' ? '#e2e8f0' : (entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0')} />
                           ))}
                         </Pie>
                         <RechartsTooltip 
@@ -876,7 +973,7 @@ function TimesheetPage() {
                         </div>
                         <div className="flex items-center gap-6 text-xs">
                           <div className="text-right">
-                            <p className="text-[10px] text-muted-foreground uppercase">Orçado</p>
+                            <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
                             <p className="font-mono font-bold text-foreground">
                               {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}h`}
                             </p>
