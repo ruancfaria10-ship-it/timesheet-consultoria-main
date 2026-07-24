@@ -89,6 +89,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     ],
     links: [
       {
+        rel: "icon",
+        href: "/favicon.ico",
+      },
+      {
         rel: "stylesheet",
         href: appCss,
       },
@@ -136,25 +140,25 @@ function RootComponent() {
         /* A MÁGICA AQUI: h-screen e overflow-hidden travam o layout geral */
         <div className="flex h-screen w-full overflow-hidden bg-background">
           
-          {/* MENU LATERAL - Fica fixo à esquerda */}
-          <aside className="w-64 border-r bg-card p-4 flex flex-col gap-4 shrink-0 overflow-y-auto">
-            <div className="font-bold text-xl mb-6 text-primary flex items-center gap-2 px-3 select-none w-full">
-              <img src="/favicon.ico" alt="Logo Engeprice" className="w-7 h-7 object-contain transition-colors dark:bg-white dark:p-1 dark:rounded-md" />
-              <span>Engeprice</span>
-            </div>
-            
-            <Link to="/" className="flex items-center gap-2 p-3 rounded-md hover:bg-muted transition-colors [&.active]:bg-primary/10 [&.active]:text-primary">
-              <Clock className="w-5 h-5" />
-              Meu Timesheet
-            </Link>
+          {/* MENU LATERAL - Renderizado APENAS se o usuário for Admin */}
+          {isAdmin && (
+            <aside className="w-64 border-r bg-card p-4 flex flex-col gap-4 shrink-0 overflow-y-auto">
+              <div className="font-bold text-xl mb-6 text-primary flex items-center gap-2 px-3 select-none w-full">
+                <img src="/favicon.ico" alt="Logo Engeprice" className="w-7 h-7 object-contain transition-colors dark:bg-white dark:p-1 dark:rounded-md" />
+                <span>Engeprice</span>
+              </div>
+              
+              <Link to="/" className="flex items-center gap-2 p-3 rounded-md hover:bg-muted transition-colors [&.active]:bg-primary/10 [&.active]:text-primary">
+                <Clock className="w-5 h-5" />
+                Meu Timesheet
+              </Link>
 
-            {isAdmin && (
               <Link to="/admin" className="flex items-center gap-2 p-3 rounded-md hover:bg-primary/10 text-primary/80 hover:text-primary transition-colors [&.active]:bg-primary [&.active]:text-primary-foreground mt-auto">
                 <ShieldCheck className="w-5 h-5" />
                 Central de Comando
               </Link>
-            )}
-          </aside>
+            </aside>
+          )}
 
           {/* ÁREA PRINCIPAL - Mata o scroll fantasma removendo o pb-10 e usando flex-col */}
           <main className="flex-1 flex flex-col overflow-y-auto overflow-x-hidden bg-background">

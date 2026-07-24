@@ -24,6 +24,8 @@ import { Login } from "@/components/Login";
 import type { User } from "@supabase/supabase-js";
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
+import { usePerfil } from "@/hooks/use-perfil";
+import { UpdatePassword } from "@/components/UpdatePassword";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -42,8 +44,8 @@ interface AllocationRow {
   os_id?: string;
   atividade: string;
   horas_disponiveis: number;
-  mes: string; 
-  ano: string; 
+  mes: string; // 🌟 NOVO: Agora a alocação sabe de qual mês ela é
+  ano: string; // 🌟 NOVO
   contratos: {
     codigo: string;
     nome: string;
@@ -79,6 +81,7 @@ const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: stri
   return { start, end };
 };
 
+// 🌟 FUNÇÃO AUXILIAR: Descobre em qual Mês de Ciclo uma data específica cai
 const getCycleMonthYear = (date: Date, cInicio: number, cFim: number) => {
   const d = date.getDate();
   let m = date.getMonth();
@@ -92,11 +95,20 @@ const getCycleMonthYear = (date: Date, cInicio: number, cFim: number) => {
 
 function TimesheetPage() {
   const { theme, mounted, toggle } = useTheme();
+  const { isAdmin } = usePerfil();
   
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<{nome: string, avatar_url: string | null} | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
+  // 🌟 ADICIONE ESTA LINHA: Controla a exibição da tela de senha
+  const [showUpdatePassword, setShowUpdatePassword] = useState(false);
+
+  const fetchUserProfile = async (userId: string) => {
+    const { data, error } = await supabase.from('consultores').select('nome, avatar_url').eq('id', userId).single();
+    if (!error && data) setUserProfile(data);
+  };
+  
   const [entries, setEntries] = useState<TimeEntry[]>([]);
   const [allocations, setAllocations] = useState<AllocationRow[]>([]);
   const [osList, setOsList] = useState<any[]>([]); 
@@ -149,10 +161,15 @@ function TimesheetPage() {
   };
 
   useEffect(() => {
+    // 🌟 VERIFICAÇÃO DE CONVITE: Checa se a URL possui o token de convite ou recuperação
+    if (window.location.hash.includes('type=invite') || window.location.hash.includes('type=recovery')) {
+      setShowUpdatePassword(true);
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        fetchUserProfile(session.user.id);
+        fetchUserProfile(session.user.id); // <-- ADICIONE AQUI
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -165,7 +182,7 @@ function TimesheetPage() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        fetchUserProfile(session.user.id);
+        fetchUserProfile(session.user.id); // <-- ADICIONE AQUI
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -176,11 +193,6 @@ function TimesheetPage() {
 
     return () => subscription.unsubscribe();
   }, []);
-
-  const fetchUserProfile = async (userId: string) => {
-    const { data, error } = await supabase.from('consultores').select('nome, avatar_url').eq('id', userId).single();
-    if (!error && data) setUserProfile(data);
-  };
 
   const fetchConsultorMeta = async (userId: string) => {
     const { data, error } = await supabase.from('consultores').select('horas_minimas_mes').eq('id', userId).single();
@@ -254,6 +266,7 @@ function TimesheetPage() {
   const currentContractType = currentContractObjFull?.tipo || 'horas';
   const isComOs = currentContractType === 'continuado_com_os';
 
+  // 🌟 O seletor de atividades no Lançamento agora olha para a alocação específica do ciclo ativo (Hoje/Ontem)
   const daySelectionDate = useMemo(() => {
     if (daySelection === 'ontem') {
       const d = new Date(); d.setDate(d.getDate() - 1); return d;
@@ -400,10 +413,12 @@ function TimesheetPage() {
     return { fechado: fechado / 3600000, horas: horas / 3600000 };
   }, [entries, contractsList, panelMes, panelAno]);
 
+  // 🌟 O Orçamento Global agora olha EXCLUSIVAMENTE para a coluna Mês/Ano da tabela de alocações
   const totalOrcadoMes = useMemo(() => {
     let totalOrcadoNesteCiclo = 0;
     let hasIlimitado = false;
 
+    // Filtra as alocações daquele mês específico
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
 
     alocsDoMes.forEach(alloc => {
@@ -428,6 +443,7 @@ function TimesheetPage() {
   const saldoHorasMes = Math.max(0, totalOrcadoMes.total - horasTrabalhadasMesAtual);
   const percentualGasto = totalOrcadoMes.total > 0 ? (horasTrabalhadasMesAtual / totalOrcadoMes.total) * 100 : 0;
   
+  // 🌟 FIX (Item 6): Trava o giro infinito do Marco da Meta Assegurada para no máximo 360 graus
   const metaDeg = useMemo(() => {
     if (totalOrcadoMes.total === 0) return 0;
     const percentualMaximo = Math.min(horasMinimasMes / totalOrcadoMes.total, 1);
@@ -452,9 +468,11 @@ function TimesheetPage() {
     return entries.filter(e => e.start >= startDay && e.start <= endDay);
   }, [entries, panelDate]);
 
+  // 🌟 DETALHAMENTO DE ALOCAÇÕES - Isolado no mês, zera nos outros
   const detalhamentoAlocacoes = useMemo(() => {
     const map = new Map<string, any>();
     
+    // Mostra apenas os contratos que tiveram orçamento alocado NESTE mês
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
 
     alocsDoMes.forEach(alloc => {
@@ -508,29 +526,32 @@ function TimesheetPage() {
   }, [allocations, entries, panelMes, panelAno, osList]);
 
   // ==========================================
-  // EXPORTADOR EXCELJS 
+  // 🌟 NOVO: EXPORTADOR PROFISSIONAL EXCELJS (PADRÃO 8 COLUNAS - VIA DE MÃO DUPLA)
   // ==========================================
   const handleExportarExcelConsultor = async () => {
     try {
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet('Meu Apontamento');
 
+      // As 8 colunas exatas da "Mão Dupla" (Idênticas ao Importador do Admin)
       sheet.columns = [
         { header: 'Consultor', key: 'consultor', width: 25 },
         { header: 'Data', key: 'data', width: 15 },
-        { header: 'Contrato', key: 'contrato', width: 25 },
+        { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
+        { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
         { header: 'OS', key: 'os', width: 15 },
         { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
         { header: 'Entrada', key: 'inicio', width: 12 },
         { header: 'Saída', key: 'fim', width: 12 },
-        { header: 'Total (h)', key: 'horas', width: 12 },
         { header: 'Memorial Descritivo', key: 'obs', width: 50 },
       ];
 
+      // Formatação do Cabeçalho
       sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } }; // Verde para diferenciar que veio do consultor
       sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
 
+      // Coleta dados específicos do ciclo/mês selecionado
       let hasData = false;
       entries.forEach(t => {
         const cObj = contractsList.find(c => c.id === t.contractId);
@@ -541,14 +562,14 @@ function TimesheetPage() {
               const s = new Date(t.start);
               const e = t.end ? new Date(t.end) : new Date();
               sheet.addRow({
-                 consultor: userProfile?.nome || user?.email?.split('@')[0],
+                 consultor: userProfile?.nome || user?.email?.split('@')[0] || 'Consultor',
                  data: s.toLocaleDateString('pt-BR'),
-                 contrato: cObj.code,
+                 cod_contrato: cObj.code,
+                 nome_contrato: cObj.name,
                  os: osList.find(o => o.id === t.os_id)?.codigo || '-',
                  atividade: t.activity,
                  inicio: s.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
                  fim: e.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-                 horas: ((e.getTime() - s.getTime()) / 3600000).toFixed(2).replace('.', ','),
                  obs: t.notes || ''
               });
            }
@@ -557,6 +578,7 @@ function TimesheetPage() {
 
       if (!hasData) return toast.error("Não há apontamentos no mês selecionado para exportar.");
 
+      // Formatação das Linhas
       sheet.eachRow((row, rowNumber) => {
         if (rowNumber > 1) {
            row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
@@ -709,41 +731,64 @@ function TimesheetPage() {
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background text-foreground w-full">
+      
+      {/* 🌟 TELA DE DEFINIR SENHA (Só aparece via link de convite) */}
+      {showUpdatePassword && (
+        <UpdatePassword 
+          onUpdateSuccess={() => {
+            setShowUpdatePassword(false);
+            window.location.hash = ''; // Limpa a URL para não abrir de novo se a pessoa atualizar a página
+          }} 
+        />
+      )}
+
       <Toaster position="top-right" richColors />
-      <header className="border-b w-full shrink-0">
-        <div className="mx-auto w-full max-w-none px-4 md:px-8 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Timer className="h-5 w-5" />
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold leading-tight">Timesheet</h1>
-              <p className="text-xs text-muted-foreground leading-tight">Engenharia de Custos</p>
+      <header className="border-b w-full shrink-0 bg-card/30 relative overflow-hidden">
+        <div className="mx-auto w-full max-w-none px-4 md:px-8 py-4 flex items-center justify-between">
+          
+          {/* LADO ESQUERDO: Avatar Maior e Nome */}
+          <div className="flex items-center gap-4 z-10 relative">
+            {userProfile?.avatar_url ? (
+              <img src={userProfile.avatar_url} alt="Avatar" className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md object-cover" />
+            ) : (
+              <div className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md bg-primary/10 flex items-center justify-center text-primary font-bold text-sm">
+                 {userProfile?.nome ? userProfile.nome.substring(0,2).toUpperCase() : user?.email?.substring(0,2).toUpperCase()}
+              </div>
+            )}
+            <div className="flex flex-col">
+              <span className="text-sm text-muted-foreground leading-tight">
+                Olá, <span className="font-bold text-foreground text-base">{userProfile?.nome?.split(' ')[0] || user?.email?.split('@')[0]}</span>
+              </span>
             </div>
           </div>
           
-          {/* 🌟 FIX: Perfil e Avatar Dinâmico */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              {userProfile?.avatar_url ? (
-                <img src={userProfile.avatar_url} alt="Avatar" className="w-8 h-8 rounded-full border shadow-sm object-cover" />
-              ) : (
-                <div className="w-8 h-8 rounded-full border shadow-sm bg-primary/10 flex items-center justify-center text-primary font-bold text-[10px]">
-                   {userProfile?.nome ? userProfile.nome.substring(0,2).toUpperCase() : user?.email?.substring(0,2).toUpperCase()}
-                </div>
-              )}
-              <span className="hidden sm:inline text-xs text-muted-foreground">
-                Olá, <span className="font-medium text-foreground">{userProfile?.nome?.split(' ')[0] || user?.email?.split('@')[0]}</span>
+          {/* CENTRO: Logo Engeprice Centralizada (Oculta se for Admin) */}
+          {!isAdmin && (
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2 z-0 pointer-events-none">
+              <img 
+                src="/favicon.ico" 
+                alt="Logo Engeprice" 
+                className="w-7 h-7 object-contain transition-colors dark:bg-white dark:p-1 dark:rounded-md shadow-sm" 
+              />
+              <span className="font-black text-xl tracking-tight text-primary">
+                Engeprice
               </span>
             </div>
-            <div className="w-px h-6 bg-border mx-1"></div>
-            <Button size="icon" variant="ghost" onClick={toggle} aria-label="Alternar tema">
-              {mounted ? (theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />) : <Moon className="h-4 w-4" />}
+          )}
+
+          {/* LADO DIREITO: Botões de Tema e Logout */}
+          <div className="flex items-center gap-3 z-10 relative">
+            <Button size="icon" variant="outline" onClick={toggle} aria-label="Alternar tema" className="w-10 h-10 rounded-full shadow-sm bg-background">
+              {mounted ? (theme === "dark" ? <Sun className="h-5 w-5 text-amber-500" /> : <Moon className="h-5 w-5" />) : <Moon className="h-5 w-5" />}
             </Button>
-            <Button size="icon" variant="ghost" className="text-destructive hover:bg-destructive/10" onClick={() => supabase.auth.signOut()} aria-label="Sair">
-              <LogOut className="h-4 w-4" />
+            
+            <div className="w-px h-8 bg-border mx-2"></div>
+            
+            <Button variant="ghost" className="text-destructive hover:bg-destructive/10 hover:text-destructive h-10 rounded-xl font-medium" onClick={() => supabase.auth.signOut()}>
+              <LogOut className="h-4 w-4 mr-2" /> Sair
             </Button>
           </div>
+
         </div>
       </header>
 
@@ -869,9 +914,8 @@ function TimesheetPage() {
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie data={pieData} startAngle={90} endAngle={-270} dataKey="value" cx="50%" cy="50%" innerRadius={35} outerRadius={60} stroke="none">
-                          {/* FIX: Zerado usa cor neutra, não vermelho */}
                           {pieData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.name === 'Sem Registros' ? '#e2e8f0' : (entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0')} />
+                            <Cell key={`cell-${index}`} fill={entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0'} />
                           ))}
                         </Pie>
                         <RechartsTooltip 
@@ -885,12 +929,6 @@ function TimesheetPage() {
                     <div className="absolute flex flex-col items-center justify-center pointer-events-none z-0">
                        <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
                     </div>
-
-                    {horasMinimasMes > 0 && totalOrcadoMes.total > 0 && (
-                      <div className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ transform: `rotate(${metaDeg}deg)` }}>
-                        <div className="mx-auto w-0.75 h-6 bg-amber-400 mt-1 rounded-full shadow-sm border border-amber-500/50" />
-                      </div>
-                    )}
                   </div>
                   
                   <div className="flex-1 w-full space-y-3">
@@ -918,12 +956,6 @@ function TimesheetPage() {
                       <span className="font-mono font-bold">
                         {saldoHorasMes.toFixed(1)}h
                       </span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-[11px] font-bold text-amber-600 flex items-center gap-1.5 uppercase tracking-wider">
-                        <span className="w-1.5 h-3 rounded-sm bg-amber-400"></span> Marco da Meta Assegurada
-                      </span>
-                      <span className="font-mono font-bold text-amber-600">{horasMinimasMes}h</span>
                     </div>
                   </div>
                 </CardContent>

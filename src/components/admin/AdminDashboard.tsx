@@ -21,6 +21,8 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
   ResponsiveContainer, PieChart, Pie, Cell 
 } from 'recharts'
+import ExcelJS from 'exceljs';
+import { saveAs } from 'file-saver';
 
 type Consultor = { id: string, nome: string, horas_minimas_mes: number }
 type Contrato = { id: string, codigo: string, nome: string, status_ativo: boolean, tipo: string, fonte_pagamento: string, teto_global_horas: number, ciclo_inicio: number, ciclo_fim: number, ciclo_fat_inicio: number, ciclo_fat_fim: number }
@@ -300,25 +302,50 @@ export function AdminDashboard() {
   
   async function carregarAlocacoesDoContrato(idContrato: string, idOs: string) {
     setCarregandoAlocacoes(true)
-    // 🌟 MENSALIZAÇÃO: Filtra as alocações daquele mês/ano específico!
     let query = supabase.from('alocacoes').select('*').eq('contract_id', idContrato).eq('mes', alocMes).eq('ano', alocAno)
     if (idOs && idOs !== 'global') query = query.eq('os_id', idOs);
     else query = query.is('os_id', null);
 
     const { data } = await query;
+    let alocsParaProcessar = data || [];
+
+    // 🌟 FASE 3: MEMÓRIA DO MÊS ANTERIOR (Cópia da Matriz)
+    if (alocsParaProcessar.length === 0) {
+      let prevMes = parseInt(alocMes) - 1;
+      let prevAno = parseInt(alocAno);
+      if (prevMes < 0) { prevMes = 11; prevAno--; }
+
+      let prevQuery = supabase.from('alocacoes').select('*').eq('contract_id', idContrato).eq('mes', prevMes.toString()).eq('ano', prevAno.toString());
+      if (idOs && idOs !== 'global') prevQuery = prevQuery.eq('os_id', idOs);
+      else prevQuery = prevQuery.is('os_id', null);
+
+      const { data: prevData } = await prevQuery;
+      if (prevData && prevData.length > 0) {
+        // O mês está vazio, mas achou no mês passado! Copia a estrutura e zera as horas.
+        alocsParaProcessar = prevData.map(p => ({
+          ...p,
+          id: crypto.randomUUID(), // ID temporário apenas para a interface
+          horas_disponiveis: 0,    // Zera as horas para evitar superalocação
+          mes: alocMes,
+          ano: alocAno,
+          isFromMemory: true       // Flag para o motor saber que deve criar no banco e não dar Update
+        }));
+      }
+    }
+
     const alocSalvas: Record<string, Alocacao> = {}
-    ;(data || []).forEach(row => {
+    alocsParaProcessar.forEach(row => {
       if (!alocSalvas[row.user_id]) alocSalvas[row.user_id] = { consultorId: row.user_id, horasTotais: 0, atividades: [] }
       if (row.atividade === 'Sem atividade específica' || row.atividade === 'Orçamento Geral') {
-        alocSalvas[row.user_id].geralId = row.id
+        alocSalvas[row.user_id].geralId = row.isFromMemory ? undefined : row.id
       } else {
-        alocSalvas[row.user_id].atividades.push({ id: row.id.toString(), dbId: row.id, nome: row.atividade, horas: row.horas_disponiveis })
+        alocSalvas[row.user_id].atividades.push({ id: row.id.toString(), dbId: row.isFromMemory ? undefined : row.id, nome: row.atividade, horas: row.horas_disponiveis })
       }
     })
 
     Object.values(alocSalvas).forEach(aloc => {
       if (aloc.atividades.length > 0) aloc.horasTotais = aloc.atividades.reduce((sum, a) => sum + a.horas, 0);
-      else { const rowGeral = data?.find(r => r.id === aloc.geralId); aloc.horasTotais = rowGeral ? rowGeral.horas_disponiveis : 0; }
+      else { const rowGeral = alocsParaProcessar.find(r => r.id === aloc.geralId); aloc.horasTotais = rowGeral ? rowGeral.horas_disponiveis : 0; }
     })
     setAlocacoes(alocSalvas); setCarregandoAlocacoes(false)
   }
@@ -333,18 +360,29 @@ export function AdminDashboard() {
 
     const isSemOs = targetOsId ? osList.find(o => o.id === targetOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
 
-    // TRAVA 1: Limite da OS
+    // 🌟 FASE 3: TRAVA 1 - Limite da OS c/ Estorno de Saldo Real
     if (isComOs && targetOsId && !isSemOs) {
       const currentOs = osList.find(o => o.id === targetOsId);
       if (currentOs && currentOs.horas_previstas > 0) {
+        const cycle = getCycleBoundsForContract(cObj!.ciclo_inicio, cObj!.ciclo_fim, alocMes, alocAno);
+        
+        // Puxa exatamente quanto foi executado (gasto) na vida útil da OS
+        const pastConsumedOsMs = (currentTimesheets || [])
+            .filter(t => t.os_id === targetOsId && new Date(t.start_at).getTime() < cycle.start)
+            .reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
+        const pastConsumedOsH = pastConsumedOsMs / 3600000;
+
         let totalAlocadoOS = 0;
         Object.values(alocacoes).forEach(aloc => {
           if (aloc.atividades.length > 0) totalAlocadoOS += aloc.atividades.reduce((sum, a) => sum + (Number(a.horas) || 0), 0);
           else totalAlocadoOS += Number(aloc.horasTotais) || 0;
         });
         
-        if (totalAlocadoOS > currentOs.horas_previstas) {
-          alert(`❌ LIMITE DA OS EXCEDIDO!\n\nA OS '${currentOs.codigo}' possui um limite global de ${currentOs.horas_previstas}h.\nA soma do que você distribuiu para a equipe neste ciclo dá ${totalAlocadoOS}h.\nReduza as horas antes de salvar.`);
+        // Estorno: O Saldo Livre deste mês é o Teto da OS subtraindo SOMENTE o que de fato já foi queimado.
+        const saldoLivreAtual = currentOs.horas_previstas - pastConsumedOsH;
+
+        if (totalAlocadoOS > saldoLivreAtual) {
+          alert(`❌ LIMITE DA OS EXCEDIDO (ESTORNO REAL)!\n\nA OS '${currentOs.codigo}' possui teto de ${currentOs.horas_previstas}h.\nNo passado, foram consumidas de fato ${pastConsumedOsH.toFixed(1)}h.\nO máximo que pode ser alocado neste ciclo é ${saldoLivreAtual.toFixed(1)}h (Saldo livre estornado do previsto não realizado).\nVocê tentou alocar ${totalAlocadoOS}h. Reduza antes de salvar.`);
           setSalvando(false); return;
         }
       }
@@ -365,8 +403,10 @@ export function AdminDashboard() {
           else currentAllocatedH += Number(aloc.horasTotais) || 0;
       });
 
-      if (!isSemOs && (pastConsumedH + currentAllocatedH > cObj.teto_global_horas)) {
-          alert(`❌ TETO GLOBAL EXCEDIDO!\n\nO contrato possui um teto de ${cObj.teto_global_horas}h para sua vida útil.\nNo passado já foram consumidas ${pastConsumedH.toFixed(1)}h.\nVocê está tentando alocar ${currentAllocatedH}h para este mês atual.\nO máximo que pode ser alocado agora é ${(cObj.teto_global_horas - pastConsumedH).toFixed(1)}h.`);
+      const saldoGlobalLivre = cObj.teto_global_horas - pastConsumedH;
+
+      if (!isSemOs && (currentAllocatedH > saldoGlobalLivre)) {
+          alert(`❌ TETO GLOBAL EXCEDIDO (ESTORNO REAL)!\n\nO contrato possui um teto de ${cObj.teto_global_horas}h.\nNo passado foram executadas e consumidas ${pastConsumedH.toFixed(1)}h.\nO máximo que pode ser alocado neste ciclo é ${saldoGlobalLivre.toFixed(1)}h.\nVocê tentou alocar ${currentAllocatedH}h. Reduza antes de salvar.`);
           setSalvando(false); return;
       }
     }
@@ -904,45 +944,84 @@ export function AdminDashboard() {
     if (gestaoAtividadesDisponiveis.length > 0 && !gestaoAtividadesDisponiveis.includes(gestaoAtividade)) setGestaoAtividade(gestaoAtividadesDisponiveis[0]);
   }, [gestaoAtividadesDisponiveis, gestaoAtividade])
 
-  const handleImportarTimesheetCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportarTimesheetExcel = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = async (e) => {
-      const text = e.target?.result as string;
-      const lines = text.split('\n').slice(1);
-      const toInsert = [];
+      const buffer = e.target?.result as ArrayBuffer;
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      const sheet = workbook.worksheets[0];
+
+      const toInsert: any[] = [];
       let errors = 0;
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const parts = line.split(';');
-        if (parts.length < 8) { errors++; continue; } 
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber === 1) return; // Pula o cabeçalho
 
-        const consultorNome = parts[0]?.trim();
-        const dataStr = parts[1]?.trim(); 
-        const contratoCodigo = parts[2]?.trim().toUpperCase();
-        const osCodigo = parts[3]?.trim().toUpperCase();
-        const atividadeStr = parts[4]?.trim() || 'Sem atividade específica';
-        const observacao = parts[5]?.trim(); 
-        const inicioStr = parts[6]?.trim();
-        const fimStr = parts[7]?.trim();
+        // Helper para extrair valor das células com segurança
+        const getVal = (colIndex: number) => {
+          const cell = row.getCell(colIndex);
+          if (!cell.value) return '';
+          if (cell.value instanceof Date) return cell.value;
+          if (typeof cell.value === 'object' && 'result' in cell.value) return cell.value.result;
+          if (typeof cell.value === 'object' && 'text' in cell.value) return cell.value.text;
+          return cell.value.toString().trim();
+        };
 
-        const consultor = consultores.find(c => c.nome.toLowerCase() === consultorNome?.toLowerCase());
-        const contrato = contratos.find(c => c.codigo === contratoCodigo);
-        
-        let osId = null;
-        if (osCodigo && osCodigo !== '-' && contrato) {
-           const os = osList.find(o => o.codigo === osCodigo && o.contract_id === contrato.id);
-           if (os) osId = os.id;
+        const consultorNome = String(getVal(1));
+        const dataVal = getVal(2);
+        const contratoCodigo = String(getVal(3)).toUpperCase();
+        // A coluna 4 é o Nome do Contrato, o sistema ignora pois usa o Código para achar o ID
+        const osCodigo = String(getVal(5)).toUpperCase();
+        const atividadeStr = String(getVal(6)) || 'Sem atividade específica';
+        const inicioVal = getVal(7);
+        const fimVal = getVal(8);
+        const observacao = String(getVal(9));
+
+        // Conversão segura de Data
+        let dataStr = '';
+        if (dataVal instanceof Date) {
+          dataStr = dataVal.toLocaleDateString('pt-BR');
+        } else {
+          dataStr = String(dataVal);
         }
 
-        if (!consultor || !contrato || !dataStr || !inicioStr || !fimStr) { errors++; continue; }
+        // Conversão segura de Tempo (lida com fração de hora nativa do Excel)
+        const parseTime = (val: any) => {
+          if (val instanceof Date) return val.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+          if (typeof val === 'number') {
+            const totalMs = Math.round(val * 24 * 60 * 60 * 1000);
+            const h = Math.floor(totalMs / 3600000);
+            const m = Math.floor((totalMs % 3600000) / 60000);
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+          }
+          return String(val);
+        };
+
+        const inicioStr = parseTime(inicioVal);
+        const fimStr = parseTime(fimVal);
+
+        const consultor = consultores.find(c => c.nome.toLowerCase() === consultorNome.toLowerCase());
+        const contrato = contratos.find(c => c.codigo === contratoCodigo);
+
+        let osId = null;
+        if (osCodigo && osCodigo !== '-' && contrato) {
+          const os = osList.find(o => o.codigo === osCodigo && o.contract_id === contrato.id);
+          if (os) osId = os.id;
+        }
+
+        if (!consultor || !contrato || !dataStr || !inicioStr || !fimStr) {
+          errors++;
+          return;
+        }
 
         try {
           const sep = dataStr.includes('/') ? '/' : '-';
           const [dia, mes, ano] = dataStr.split(sep);
-          const anoFinal = ano.length === 2 ? `20${ano}` : ano; 
+          const anoFinal = ano.length === 2 ? `20${ano}` : ano;
           const [hIni, mIni] = inicioStr.split(':');
           const [hFim, mFim] = fimStr.split(':');
 
@@ -953,22 +1032,30 @@ export function AdminDashboard() {
 
           toInsert.push({
             id: crypto.randomUUID(), user_id: consultor.id, contract_id: contrato.id, os_id: osId,
-            contract_name: `${contrato.codigo} — ${contrato.nome}`, activity: atividadeStr, 
-            notes: observacao, start_at: startDt.toISOString(), end_at: endDt.toISOString(), edited: true 
+            contract_name: `${contrato.codigo} — ${contrato.nome}`, activity: atividadeStr,
+            notes: observacao, start_at: startDt.toISOString(), end_at: endDt.toISOString(), edited: true
           });
-        } catch (err) { errors++; }
-      }
+        } catch (err) {
+          errors++;
+        }
+      });
 
       if (toInsert.length > 0) {
         setLoading(true);
         const { error } = await supabase.from('timesheets').insert(toInsert);
-        if (error) { alert("Erro no banco de dados: " + error.message); } 
-        else { alert(`✅ ${toInsert.length} apontamentos importados!\n❌ ${errors} linhas ignoradas com erro.`); carregarTudoParaDash(); }
+        if (error) {
+          alert("Erro no banco de dados: " + error.message);
+        } else {
+          alert(`✅ ${toInsert.length} apontamentos importados!\n❌ ${errors} linhas ignoradas com erro.`);
+          carregarTudoParaDash();
+        }
         setLoading(false);
-      } else { alert(`Nenhum apontamento válido encontrado.`); }
-      event.target.value = '';
+      } else {
+        alert(`Nenhum apontamento válido encontrado.`);
+      }
+      event.target.value = ''; // Reseta input
     };
-    reader.readAsText(file, 'UTF-8');
+    reader.readAsArrayBuffer(file);
   };
 
   async function salvarApontamentoAdmin() {
@@ -1019,13 +1106,13 @@ export function AdminDashboard() {
       .sort((a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()).slice(0, 50);
   }, [allTimesheets, gestaoConsultor])
 
-  const exportarExcel = (isFaturamento: boolean = false) => {
+  const exportarExcel = async (isFaturamento: boolean = false) => {
     let registros = allTimesheets.filter(t => {
-      const cont = contratos.find(c => c.id === t.contract_id); 
+      const cont = contratos.find(c => c.id === t.contract_id);
       if (!cont || !(isFaturamento ? fatVisaoTipos : dashVisaoTipos).includes(cont.tipo)) return false;
       if (isFaturamento) return isWithinCycle(t.start_at, fatMes, fatAno, cont.ciclo_fat_inicio, cont.ciclo_fat_fim);
       return isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim);
-    })
+    });
     
     if (isFaturamento) {
       if (fatContratosSelecionados.length > 0) registros = registros.filter(t => fatContratosSelecionados.includes(t.contract_id))
@@ -1034,21 +1121,62 @@ export function AdminDashboard() {
       if (dashConsultor !== 'todos') registros = registros.filter(t => t.user_id === dashConsultor)
     }
 
-    const csvRows = ["Consultor;Contrato;OS;Atividade;Tipo;Data;Entrada;Saida;Horas Totais;Observacao"]
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet(isFaturamento ? 'Faturamento' : 'Pagamento');
+
+    // As 8 colunas exatas da "Mão Dupla"
+    sheet.columns = [
+      { header: 'Consultor', key: 'consultor', width: 25 },
+      { header: 'Data', key: 'data', width: 15 },
+      { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
+      { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
+      { header: 'OS', key: 'os', width: 15 },
+      { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
+      { header: 'Entrada', key: 'inicio', width: 12 },
+      { header: 'Saída', key: 'fim', width: 12 },
+      { header: 'Memorial Descritivo', key: 'obs', width: 50 },
+    ];
+
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isFaturamento ? 'FFD97706' : 'FF3B82F6' } };
+    sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+
     registros.forEach(t => {
-      const consultor = consultores.find(c => c.id === t.user_id)?.nome || 'Desconhecido'; const contrato = contratos.find(c => c.id === t.contract_id)
-      const os = osList.find(o => o.id === t.os_id)?.codigo || '-'
-      const inicio = new Date(t.start_at); const fim = new Date(t.end_at!)
-      const dataStr = inicio.toLocaleDateString('pt-BR'); const horaIn = inicio.toLocaleTimeString('pt-BR', {hour: '2-digit', minute:'2-digit'})
-      const horaOut = fim.toLocaleTimeString('pt-BR', {hour: '2-digit', minute:'2-digit'})
-      const horas = ((fim.getTime() - inicio.getTime()) / 3600000).toFixed(2).replace('.', ',')
-      const obsSafe = t.notes ? `"${t.notes.replace(/"/g, '""')}"` : ""
-      csvRows.push(`${consultor};${contrato?.codigo || '-'};${os};${t.activity};${contrato?.tipo.toUpperCase()};${dataStr};${horaIn};${horaOut};${horas};${obsSafe}`)
-    })
-    const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' })
-    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); 
-    link.download = `Engeprice_${isFaturamento ? 'Faturamento' : 'Pagamento'}_${MESES_NOME[parseInt(isFaturamento ? fatMes : dashMes)]}_${isFaturamento ? fatAno : dashAno}.csv`; link.click()
-  }
+      const consultor = consultores.find(c => c.id === t.user_id)?.nome || 'Desconhecido'; 
+      const contrato = contratos.find(c => c.id === t.contract_id);
+      const os = osList.find(o => o.id === t.os_id)?.codigo || '-';
+      const inicio = new Date(t.start_at); 
+      const fim = new Date(t.end_at!);
+
+      sheet.addRow({
+        consultor: consultor,
+        data: inicio.toLocaleDateString('pt-BR'),
+        cod_contrato: contrato?.codigo || '-',
+        nome_contrato: contrato?.nome || '-',
+        os: os,
+        atividade: t.activity,
+        inicio: inicio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        fim: fim.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        obs: t.notes || ''
+      });
+    });
+
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber > 1) {
+         row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+      }
+      row.eachCell((cell) => {
+         cell.border = {
+            top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}},
+            bottom: {style:'thin', color: {argb:'FFE2E8F0'}}, right: {style:'thin', color: {argb:'FFE2E8F0'}}
+         };
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, `Engeprice_${isFaturamento ? 'Faturamento' : 'Pagamento'}_${MESES_NOME[parseInt(isFaturamento ? fatMes : dashMes)]}_${isFaturamento ? fatAno : dashAno}.xlsx`);
+  };
 
   const MAPEAMENTO_TIPOS: Record<string, string> = {
     horas: "Escopo Fechado (Horas)", fechado: "Preço Fechado (%)", continuado_com_os: "Assessoria / Sob Demanda", overhead: "Overhead"
@@ -1514,13 +1642,24 @@ export function AdminDashboard() {
           <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full">
             <div className="md:col-span-5 space-y-6">
               <Card className="border-t-4 border-t-purple-500 shadow-sm">
-                <CardHeader className="border-b pb-4">
+                <CardHeader className="border-b pb-4 space-y-4">
                   <div className="flex justify-between items-center w-full">
-                    <CardTitle className="text-sm font-bold flex items-center gap-2"><History className="w-4 h-4"/> Lançamento Direto</CardTitle>
+                    <CardTitle className="text-sm font-bold flex items-center gap-2"><History className="w-4 h-4"/> Lançamento Direto / Importação</CardTitle>
                     <div className="relative">
-                      <input type="file" id="csv-ts-up" className="hidden" accept=".csv" onChange={handleImportarTimesheetCSV} />
-                      <Button variant="outline" size="sm" className="text-purple-600 border-purple-200 text-[11px] h-8 gap-1.5" onClick={() => document.getElementById('csv-ts-up')?.click()}><FileUp className="w-3.5 h-3.5" /> Importar CSV (8 Colunas)</Button>
+                      {/* Certifique-se de que o onChange chama a sua nova função handleImportarTimesheetExcel */}
+                      <input type="file" id="excel-ts-up" className="hidden" accept=".xlsx, .xls" onChange={handleImportarTimesheetExcel} />
+                      <Button variant="outline" size="sm" className="text-purple-600 border-purple-200 text-[11px] h-8 gap-1.5" onClick={() => document.getElementById('excel-ts-up')?.click()}>
+                        <FileUp className="w-3.5 h-3.5" /> Importar Planilha (.xlsx)
+                      </Button>
                     </div>
+                  </div>
+                  
+                  {/* INSTRUÇÕES DE IMPORTAÇÃO MÃO DUPLA */}
+                  <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3 text-[10px] text-purple-800 space-y-1">
+                    <p className="font-bold uppercase tracking-wider mb-1">Como importar via Excel:</p>
+                    <p>O arquivo (.xlsx) deve conter <strong>exatamente 9 colunas</strong>, na seguinte ordem (com cabeçalho na linha 1):</p>
+                    <p className="font-mono font-semibold opacity-90 mt-1">1. Consultor | 2. Data | 3. Cód. Contrato | 4. Nome Contrato | 5. OS | 6. Disciplina/Escopo | 7. Entrada | 8. Saída | 9. Observação</p>
+                    <p className="italic opacity-80 mt-1">* Dica: Exporte a planilha na aba "Folha (Mensal)" ou no Painel do Consultor para obter o modelo idêntico.</p>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3 pt-4 text-xs">
@@ -1693,9 +1832,13 @@ export function AdminDashboard() {
                          <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                <Pie data={resumoConsultorData.pieData} innerRadius={60} outerRadius={80} paddingAngle={2} dataKey="value" stroke="none">
-                                  <Cell fill={resumoConsultorData.pieData.length === 1 && resumoConsultorData.pieData[0].name === 'Zerado' ? "#e2e8f0" : "#ef4444"} /> 
-                                  <Cell fill="#3b82f6" />
-                               </Pie>
+                                {resumoConsultorData.pieData.map((entry, index) => {
+                                  let color = "#e2e8f0"; // Cinza neutro para "Zerado"
+                                  if (entry.name === 'Gasto') color = "#e2e8f0"; // Vermelho
+                                  if (entry.name === 'Saldo') color = "#3b82f6"; // Azul
+                                  return <Cell key={`cell-${index}`} fill={color} />;
+                                })}
+                              </Pie>
                                <RechartsTooltip formatter={(v: number) => [`${v.toFixed(1)}h`, '']} contentStyle={{borderRadius: '8px', fontSize: '12px'}} wrapperStyle={{zIndex: 100}}/>
                             </PieChart>
                          </ResponsiveContainer>
@@ -1758,8 +1901,10 @@ export function AdminDashboard() {
           <Card className="border-t-4 border-t-blue-500 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-muted/10 border-b pb-4">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
-                <div><CardTitle className="text-lg">Folha de Pagamento (Equipe)</CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por monitor.</CardDescription></div>
-                <Button onClick={() => exportarExcel(false)} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8"><Download className="w-4 h-4" /> Exportar CSV</Button>
+                <div><CardTitle className="text-lg">Folha de Pagamento (Equipe)</CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por consultor.</CardDescription></div>
+                <Button onClick={() => exportarExcel(false)} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8">
+                  <Download className="w-4 h-4" /> Exportar Planilha
+                </Button>
               </div>
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm w-full">
                 {renderFiltroTiposContratoMultiplos()}
@@ -1860,8 +2005,14 @@ export function AdminDashboard() {
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie data={dashData.pieData} innerRadius={85} outerRadius={115} paddingAngle={4} dataKey="value" stroke="none">
-                            <Cell fill={dashData.isFechadoMode ? "#f59e0b" : "#ef4444"} /> 
-                            <Cell fill={dashData.pieData.length > 1 ? "#22c55e" : "#88888822"} />
+                            {dashData.pieData.map((entry, index) => {
+                              let color = "#e2e8f0"; // Cinza neutro para "Sem Registros"
+                              if (entry.name === 'Consumido') color = "#ef4444"; // Vermelho
+                              if (entry.name === 'Saldo Restante') color = "#22c55e"; // Verde
+                              if (entry.name === '% Entregue') color = "#f59e0b"; // Âmbar
+                              if (entry.name === 'A Entregar') color = "#88888822"; // Cinza claro fundo
+                              return <Cell key={`cell-${index}`} fill={color} />;
+                            })}
                           </Pie>
                           <RechartsTooltip wrapperStyle={{zIndex: 100}} formatter={(v: number) => [dashData.isFechadoMode ? `${v}%` : `${v.toFixed(1)}h`, '']} />
                         </PieChart>
@@ -1959,7 +2110,7 @@ export function AdminDashboard() {
                      </Card>
                   )}
 
-                  {/* Se tem 1 consultor selecionado -> Mostra as atividades daquele consultor */}
+                  {/* Se tem 1 consultor selecionado -> Mostra as atividades daquele consultor de forma Hierárquica */}
                   {dashConsultor !== 'todos' && (
                      <Card className="shadow-sm border-blue-500/20">
                         <CardHeader className="bg-blue-500/5 pb-3">
@@ -1971,8 +2122,7 @@ export function AdminDashboard() {
                            <table className="w-full text-sm text-left">
                               <thead className="bg-muted/30 text-[10px] uppercase text-muted-foreground">
                                  <tr>
-                                    <th className="px-4 py-3">Contrato / OS</th>
-                                    <th className="px-4 py-3">Atividade / Escopo</th>
+                                    <th className="px-4 py-3">Contrato / Escopo de Atuação</th>
                                     <th className="px-4 py-3 text-right">Orçado</th>
                                     <th className="px-4 py-3 text-right">Gasto</th>
                                     <th className="px-4 py-3 text-right">Saldo</th>
@@ -2015,19 +2165,53 @@ export function AdminDashboard() {
                                       }
                                       if (orcado === 0 && gasto === 0) return null;
 
-                                      return (
-                                        <tr key={idx} className="hover:bg-muted/10 transition-colors">
-                                          <td className="px-4 py-3"><p className="font-bold text-primary">{cObj.codigo}</p><p className="text-[10px] text-muted-foreground">{osObj?.codigo || '-'}</p></td>
-                                          <td className="px-4 py-3 font-medium">{a.atividade}</td>
-                                          <td className="px-4 py-3 text-right font-mono text-muted-foreground">{isSuportes ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${orcado.toFixed(1)}h`}</td>
-                                          <td className="px-4 py-3 text-right font-mono font-bold text-red-500">{gasto.toFixed(1)}h</td>
-                                          <td className={`px-4 py-3 text-right font-mono font-bold ${isSuportes ? 'text-amber-500' : (orcado-gasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
-                                            {isSuportes ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(orcado-gasto).toFixed(1)}h`}
-                                          </td>
-                                        </tr>
-                                      );
+                                      return {
+                                        contrato: cObj.codigo,
+                                        nomeContrato: cObj.nome,
+                                        os: osObj?.codigo || '-',
+                                        atividade: a.atividade,
+                                        orcado, gasto,
+                                        ilimitado: isSuportes
+                                      };
                                     });
-                                    return rows.every(r=>r===null) ? <tr><td colSpan={5} className="text-center py-6 text-muted-foreground text-xs">Sem atividades neste ciclo.</td></tr> : rows;
+
+                                    const validRows = rows.filter(r => r !== null);
+                                    if(validRows.length === 0) return <tr><td colSpan={4} className="text-center py-6 text-muted-foreground text-xs">Sem atividades neste ciclo.</td></tr>;
+
+                                    // 🌟 FASE 3: Motor de Agrupamento Hierárquico
+                                    const agrupado = validRows.reduce((acc: any, row: any) => {
+                                       const key = `${row.contrato}|${row.os}|${row.nomeContrato}`;
+                                       if (!acc[key]) acc[key] = { contrato: row.contrato, nomeContrato: row.nomeContrato, os: row.os, itens: [] };
+                                       acc[key].itens.push(row);
+                                       return acc;
+                                    }, {});
+
+                                    return Object.values(agrupado).map((grupo: any, i) => (
+                                       <React.Fragment key={i}>
+                                          <tr className="bg-muted/30 border-y">
+                                             <td colSpan={4} className="px-4 py-2.5">
+                                                <div className="flex items-center gap-2">
+                                                   <FolderTree className="w-4 h-4 text-blue-600" />
+                                                   <span className="font-bold text-blue-700">{grupo.contrato}</span>
+                                                   {grupo.os !== '-' && <span className="text-[10px] uppercase font-bold bg-blue-500/10 text-blue-700 px-1.5 py-0.5 rounded">OS: {grupo.os}</span>}
+                                                   <span className="text-xs text-muted-foreground truncate max-w-44 ml-1">{grupo.nomeContrato}</span>
+                                                </div>
+                                             </td>
+                                          </tr>
+                                          {grupo.itens.map((item: any, j: number) => (
+                                             <tr key={`${i}-${j}`} className="hover:bg-muted/10 transition-colors border-l-2 border-l-transparent hover:border-l-blue-500">
+                                                <td className="px-4 py-2 pl-10 font-medium text-xs text-foreground/80">{item.atividade}</td>
+                                                <td className="px-4 py-2 text-right font-mono text-muted-foreground">
+                                                   {item.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${item.orcado.toFixed(1)}h`}
+                                                </td>
+                                                <td className="px-4 py-2 text-right font-mono font-bold text-red-500">{item.gasto.toFixed(1)}h</td>
+                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.ilimitado ? 'text-amber-500' : (item.orcado-item.gasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
+                                                   {item.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(item.orcado-item.gasto).toFixed(1)}h`}
+                                                </td>
+                                             </tr>
+                                          ))}
+                                       </React.Fragment>
+                                    ));
                                  })()}
                               </tbody>
                            </table>
