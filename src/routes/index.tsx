@@ -44,8 +44,8 @@ interface AllocationRow {
   os_id?: string;
   atividade: string;
   horas_disponiveis: number;
-  mes: string; // 🌟 NOVO: Agora a alocação sabe de qual mês ela é
-  ano: string; // 🌟 NOVO
+  mes: string; 
+  ano: string; 
   contratos: {
     codigo: string;
     nome: string;
@@ -81,17 +81,19 @@ const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: stri
   return { start, end };
 };
 
-// 🌟 FUNÇÃO AUXILIAR: Descobre em qual Mês de Ciclo uma data específica cai
 const getCycleMonthYear = (date: Date, cInicio: number, cFim: number) => {
   const d = date.getDate();
   let m = date.getMonth();
   let y = date.getFullYear();
-  if (cInicio > cFim && d >= cInicio) {
+  if (cInicio > cFim && d >= cInicio) { 
     m = m === 11 ? 0 : m + 1;
     if (m === 0) y++;
   }
   return { month: String(m), year: String(y) };
 }
+
+// Tiramos a "foto" da URL na largada
+let urlOriginal = typeof window !== 'undefined' ? window.location.href : '';
 
 function TimesheetPage() {
   const { theme, mounted, toggle } = useTheme();
@@ -101,7 +103,6 @@ function TimesheetPage() {
   const [userProfile, setUserProfile] = useState<{nome: string, avatar_url: string | null} | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  // 🌟 ADICIONE ESTA LINHA: Controla a exibição da tela de senha
   const [showUpdatePassword, setShowUpdatePassword] = useState(false);
 
   const fetchUserProfile = async (userId: string) => {
@@ -161,15 +162,21 @@ function TimesheetPage() {
   };
 
   useEffect(() => {
-    // 🌟 VERIFICAÇÃO DE CONVITE: Checa se a URL possui o token de convite ou recuperação
-    if (window.location.hash.includes('type=invite') || window.location.hash.includes('type=recovery')) {
-      setShowUpdatePassword(true);
-    }
+    const checkHashAndTokens = () => {
+      // 🌟 Verifica a URL e o carimbo do SessionStorage
+      if ((urlOriginal.includes('type=invite') || urlOriginal.includes('type=recovery')) && !sessionStorage.getItem('senha_redefinida')) {
+        setShowUpdatePassword(true);
+        sessionStorage.setItem('senha_redefinida', 'true'); // Carimba que já mostrou!
+        urlOriginal = ''; 
+      }
+    };
+
+    checkHashAndTokens();
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        fetchUserProfile(session.user.id); // <-- ADICIONE AQUI
+        fetchUserProfile(session.user.id);
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -179,10 +186,17 @@ function TimesheetPage() {
       setAuthLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
+      
+      // 🌟 Reforço: Se o Supabase tentar forçar a barra, bloqueamos com o carimbo também
+      if (event === 'PASSWORD_RECOVERY' && !sessionStorage.getItem('senha_redefinida')) {
+        setShowUpdatePassword(true);
+        sessionStorage.setItem('senha_redefinida', 'true');
+      }
+      
       if (session?.user) {
-        fetchUserProfile(session.user.id); // <-- ADICIONE AQUI
+        fetchUserProfile(session.user.id);
         fetchTimesheets(session.user.id);
         fetchAllocations(session.user.id);
         fetchOs(); 
@@ -266,7 +280,6 @@ function TimesheetPage() {
   const currentContractType = currentContractObjFull?.tipo || 'horas';
   const isComOs = currentContractType === 'continuado_com_os';
 
-  // 🌟 O seletor de atividades no Lançamento agora olha para a alocação específica do ciclo ativo (Hoje/Ontem)
   const daySelectionDate = useMemo(() => {
     if (daySelection === 'ontem') {
       const d = new Date(); d.setDate(d.getDate() - 1); return d;
@@ -368,9 +381,6 @@ function TimesheetPage() {
   
   const activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && (!isComOs || e.os_id === osId) && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 
-  // =====================================
-  // MOTOR DO PAINEL DO CONSULTOR (Mensalidade Flexível)
-  // =====================================
   const panelCycleBounds = useMemo(() => {
     const month = parseInt(panelMes);
     const year = parseInt(panelAno);
@@ -413,12 +423,10 @@ function TimesheetPage() {
     return { fechado: fechado / 3600000, horas: horas / 3600000 };
   }, [entries, contractsList, panelMes, panelAno]);
 
-  // 🌟 O Orçamento Global agora olha EXCLUSIVAMENTE para a coluna Mês/Ano da tabela de alocações
   const totalOrcadoMes = useMemo(() => {
     let totalOrcadoNesteCiclo = 0;
     let hasIlimitado = false;
 
-    // Filtra as alocações daquele mês específico
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
 
     alocsDoMes.forEach(alloc => {
@@ -443,7 +451,6 @@ function TimesheetPage() {
   const saldoHorasMes = Math.max(0, totalOrcadoMes.total - horasTrabalhadasMesAtual);
   const percentualGasto = totalOrcadoMes.total > 0 ? (horasTrabalhadasMesAtual / totalOrcadoMes.total) * 100 : 0;
   
-  // 🌟 FIX (Item 6): Trava o giro infinito do Marco da Meta Assegurada para no máximo 360 graus
   const metaDeg = useMemo(() => {
     if (totalOrcadoMes.total === 0) return 0;
     const percentualMaximo = Math.min(horasMinimasMes / totalOrcadoMes.total, 1);
@@ -468,11 +475,9 @@ function TimesheetPage() {
     return entries.filter(e => e.start >= startDay && e.start <= endDay);
   }, [entries, panelDate]);
 
-  // 🌟 DETALHAMENTO DE ALOCAÇÕES - Isolado no mês, zera nos outros
   const detalhamentoAlocacoes = useMemo(() => {
     const map = new Map<string, any>();
     
-    // Mostra apenas os contratos que tiveram orçamento alocado NESTE mês
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
 
     alocsDoMes.forEach(alloc => {
@@ -525,15 +530,11 @@ function TimesheetPage() {
     });
   }, [allocations, entries, panelMes, panelAno, osList]);
 
-  // ==========================================
-  // 🌟 NOVO: EXPORTADOR PROFISSIONAL EXCELJS (PADRÃO 8 COLUNAS - VIA DE MÃO DUPLA)
-  // ==========================================
   const handleExportarExcelConsultor = async () => {
     try {
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet('Meu Apontamento');
 
-      // As 8 colunas exatas da "Mão Dupla" (Idênticas ao Importador do Admin)
       sheet.columns = [
         { header: 'Consultor', key: 'consultor', width: 25 },
         { header: 'Data', key: 'data', width: 15 },
@@ -546,12 +547,10 @@ function TimesheetPage() {
         { header: 'Memorial Descritivo', key: 'obs', width: 50 },
       ];
 
-      // Formatação do Cabeçalho
       sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } }; // Verde para diferenciar que veio do consultor
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
       sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
 
-      // Coleta dados específicos do ciclo/mês selecionado
       let hasData = false;
       entries.forEach(t => {
         const cObj = contractsList.find(c => c.id === t.contractId);
@@ -578,7 +577,6 @@ function TimesheetPage() {
 
       if (!hasData) return toast.error("Não há apontamentos no mês selecionado para exportar.");
 
-      // Formatação das Linhas
       sheet.eachRow((row, rowNumber) => {
         if (rowNumber > 1) {
            row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
@@ -601,9 +599,6 @@ function TimesheetPage() {
     }
   };
 
-  // ==========================================
-  // OPERAÇÕES DE LANÇAMENTO E EXCLUSÃO
-  // ==========================================
   const executeLaunch = async (dateStr: string) => {
     if (!contractId || contractId === "" || contractId === "none" || !activity) return toast.error("Selecione contrato e atividade válidos.");
     if (currentContractType === 'continuado_com_os' && !osId) return toast.error("Selecione uma Ordem de Serviço (OS) para este contrato.");
@@ -730,14 +725,17 @@ function TimesheetPage() {
   if (!user) return <Login onLoginSuccess={() => {}} />;
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background text-foreground w-full">
+    <div className="flex-1 flex flex-col h-full bg-background text-foreground w-full relative">
       
-      {/* 🌟 TELA DE DEFINIR SENHA (Só aparece via link de convite) */}
+      {/* 🌟 TELA DE DEFINIR SENHA (Modal Flutuante de Convite/Recuperação) */}
       {showUpdatePassword && (
         <UpdatePassword 
           onUpdateSuccess={() => {
             setShowUpdatePassword(false);
-            window.location.hash = ''; // Limpa a URL para não abrir de novo se a pessoa atualizar a página
+            // 🌟 A SUA IDEIA APLICADA AQUI: 
+            // window.location.href força o navegador a dar um F5 automático e limpo,
+            // matando qualquer "fantasma" do TanStack Router de uma vez por todas.
+            window.location.href = window.location.pathname; 
           }} 
         />
       )}
@@ -746,7 +744,6 @@ function TimesheetPage() {
       <header className="border-b w-full shrink-0 bg-card/30 relative overflow-hidden">
         <div className="mx-auto w-full max-w-none px-4 md:px-8 py-4 flex items-center justify-between">
           
-          {/* LADO ESQUERDO: Avatar Maior e Nome */}
           <div className="flex items-center gap-4 z-10 relative">
             {userProfile?.avatar_url ? (
               <img src={userProfile.avatar_url} alt="Avatar" className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md object-cover" />
@@ -762,7 +759,6 @@ function TimesheetPage() {
             </div>
           </div>
           
-          {/* CENTRO: Logo Engeprice Centralizada (Oculta se for Admin) */}
           {!isAdmin && (
             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2 z-0 pointer-events-none">
               <img 
@@ -776,7 +772,6 @@ function TimesheetPage() {
             </div>
           )}
 
-          {/* LADO DIREITO: Botões de Tema e Logout */}
           <div className="flex items-center gap-3 z-10 relative">
             <Button size="icon" variant="outline" onClick={toggle} aria-label="Alternar tema" className="w-10 h-10 rounded-full shadow-sm bg-background">
               {mounted ? (theme === "dark" ? <Sun className="h-5 w-5 text-amber-500" /> : <Moon className="h-5 w-5" />) : <Moon className="h-5 w-5" />}
@@ -919,9 +914,9 @@ function TimesheetPage() {
                           ))}
                         </Pie>
                         <RechartsTooltip 
-                           formatter={(v: number) => [`${v.toFixed(1)}h`, '']} 
-                           contentStyle={{ borderRadius: '8px', fontSize: '12px' }} 
-                           wrapperStyle={{ zIndex: 100 }} 
+                            formatter={(v: number) => [`${v.toFixed(1)}h`, '']} 
+                            contentStyle={{ borderRadius: '8px', fontSize: '12px' }} 
+                            wrapperStyle={{ zIndex: 100 }} 
                         />
                       </PieChart>
                     </ResponsiveContainer>
