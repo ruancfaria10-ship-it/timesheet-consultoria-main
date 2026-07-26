@@ -55,7 +55,7 @@ export function TaskSelector({
 
   // Identificação das modalidades de contrato
   const currentOs = osList?.find(o => o.id === osId);
-  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(contractType) || currentOs?.codigo === '🛠️ Pequenos Suportes';
+  const isIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(contractType) || currentOs?.codigo === '🛠️ Pequenos Suportes';
   const isMensal = ['overhead', 'continuado_limite_mensal'].includes(contractType);
   const isComOS = contractType === 'continuado_com_os';
   

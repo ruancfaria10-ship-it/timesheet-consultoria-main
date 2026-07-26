@@ -1,15 +1,17 @@
+// src/components/Login.tsx
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Timer, ArrowLeft } from "lucide-react";
+import { Timer, ArrowLeft, AlertCircle } from "lucide-react";
 
 export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
   
   // Controle para alternar entre a tela de Login e a tela de Recuperação
   const [isResetting, setIsResetting] = useState(false);
@@ -17,6 +19,7 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setErrorMsg(""); // Limpa erros anteriores
 
     const { error } = await supabase.auth.signInWithPassword({
       email,
@@ -24,6 +27,7 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
     });
 
     if (error) {
+      setErrorMsg("E-mail ou senha inválidos. Tente novamente.");
       toast.error("Erro ao entrar: Verifique seu e-mail e senha.");
     } else {
       toast.success("Login realizado com sucesso!");
@@ -37,6 +41,7 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
     if (!email) return toast.error("Por favor, digite seu e-mail.");
     
     setLoading(true);
+    setErrorMsg("");
     
     // Dispara o e-mail de redefinição oficial do Supabase
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
@@ -126,6 +131,14 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                 required
               />
             </div>
+
+            {errorMsg && (
+              <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 p-3 rounded-md border border-destructive/20 animate-in fade-in slide-in-from-top-1">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <p>{errorMsg}</p>
+              </div>
+            )}
+
             <Button type="submit" className="w-full h-12 text-md" disabled={loading}>
               {loading ? "Entrando..." : "Entrar"}
             </Button>

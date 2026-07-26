@@ -15,7 +15,7 @@ import {
   PlusCircle, ArrowRight, Trash2, 
   Loader2, Pencil, Check, X, Save, Sun, Moon, User, Layers, 
   CalendarDays, Download, Percent, History, 
-  FileUp, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2
+  FileUp, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2, Users, GripVertical
 } from 'lucide-react'
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
@@ -23,14 +23,20 @@ import {
 } from 'recharts'
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
+import { toast } from "sonner";
 
-type Consultor = { id: string, nome: string, horas_minimas_mes: number }
+type Consultor = { id: string, nome: string, horas_minimas_mes: number, avatar_url?: string, status_ativo?: boolean, is_convidado?: boolean }
 type Contrato = { id: string, codigo: string, nome: string, status_ativo: boolean, tipo: string, fonte_pagamento: string, teto_global_horas: number, ciclo_inicio: number, ciclo_fim: number, ciclo_fat_inicio: number, ciclo_fat_fim: number }
 type OrdemServico = { id: string, contract_id: string, codigo: string, descricao: string, status_ativa: boolean, horas_previstas: number }
+
+// --- NOVOS TIPOS (LINHA DE BASE) ---
+type LinhaBase = { id: string, contract_id: string, os_id: string | null, versao: number, created_at: string }
+type LinhaBaseItem = { id: string, base_id: string, user_id: string, horas_teto: number, atividades: string[], tipo_pagamento: 'horas' | 'fechado' }
+
 type AtividadeAlocada = { id: string, dbId?: string, nome: string, horas: number }
-type Alocacao = { consultorId: string, horasTotais: number, geralId?: string, atividades: AtividadeAlocada[] }
+type Alocacao = { consultorId: string, horasTotais: number, geralId?: string, atividades: AtividadeAlocada[], tipo_pagamento?: 'horas' | 'fechado' }
 type TimesheetLog = { id: string, user_id: string, contract_id: string, os_id?: string, activity: string, start_at: string, end_at: string | null, notes?: string }
-type Medicao = { id?: string, contract_id: string, user_id: string, mes: string, ano: string, percentual: number }
+type Medicao = { id?: string, contract_id: string, os_id?: string | null, user_id: string, mes: string, ano: string, percentual: number }
 
 const MESES_NOME = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
 const CORES_GRAFICO = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f43f5e']
@@ -94,48 +100,65 @@ export function AdminDashboard() {
   const [editOsDescricao, setEditOsDescricao] = useState('')
   const [editOsHoras, setEditOsHoras] = useState<number>(0)
 
-  // Estados Alocações (Agora Mensalizadas!)
-  const [alocMes, setAlocMes] = useState<string>(new Date().getMonth().toString())
-  const [alocAno, setAlocAno] = useState<string>(new Date().getFullYear().toString())
+  // Função para ler a memória do navegador
+  const getSavedMes = () => localStorage.getItem('ep_mes') || new Date().getMonth().toString();
+  const getSavedAno = () => localStorage.getItem('ep_ano') || new Date().getFullYear().toString();
+
+  // --- ESTADOS: ALOCAÇÕES & LINHA DE BASE ---
+  const [viewAlocacao, setViewAlocacao] = useState<'baseline' | 'mensal'>('mensal')
+  const [alocMes, setAlocMes] = useState<string>(getSavedMes)
+  const [alocAno, setAlocAno] = useState<string>(getSavedAno)
   const [contratoAtivo, setContratoAtivo] = useState<string>('')
   const [alocacaoOsId, setAlocacaoOsId] = useState<string>('') 
   const [alocacoes, setAlocacoes] = useState<Record<string, Alocacao>>({})
   const [carregandoAlocacoes, setCarregandoAlocacoes] = useState(false)
+  const [metasEdit, setMetasEdit] = useState<Record<string, number>>({})
+  
+  // Memória da Linha de Base
+  const [currentBase, setCurrentBase] = useState<LinhaBase | null>(null)
+  const [baseVersions, setBaseVersions] = useState<LinhaBase[]>([])
+  const [baseItems, setBaseItems] = useState<Record<string, LinhaBaseItem>>({})
+  
   const contratoSelecionadoObj = contratos.find(c => c.id === contratoAtivo);
   const isSemOsType = alocacaoOsId ? osList.find(o => o.id === alocacaoOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
+  const isOverheadType = contratoSelecionadoObj?.tipo === 'overhead';
   const isComOsType = contratoSelecionadoObj?.tipo === 'continuado_com_os';
   
-  // Estados Equipe e Metas
-  const [metasEdit, setMetasEdit] = useState<Record<string, number>>({})
-
-  // Estados Medições
-  const [medContrato, setMedContrato] = useState<string>('')
-  const [medMes, setMedMes] = useState<string>(new Date().getMonth().toString())
-  const [medAno, setMedAno] = useState<string>(new Date().getFullYear().toString())
-  const [medFonte, setMedFonte] = useState<string>('todas')
+  // Estados Medições (Invertido: Por Consultor)
+  const [medConsultor, setMedConsultor] = useState<string>('')
+  const [medMes, setMedMes] = useState<string>(getSavedMes)
+  const [medAno, setMedAno] = useState<string>(getSavedAno)
   const [medicoesInput, setMedicoesInput] = useState<Record<string, number>>({})
-  const [medConsultores, setMedConsultores] = useState<Consultor[]>([])
+  const [medContratosVinculados, setMedContratosVinculados] = useState<any[]>([])
   const [medLoading, setMedLoading] = useState(false)
 
   // Estados Dashboards (Filtros Globais)
   const [dashVisaoTipos, setDashVisaoTipos] = useState<string[]>(['horas', 'continuado_com_os', 'overhead'])
-  const [dashMes, setDashMes] = useState<string>(new Date().getMonth().toString())
-  const [dashAno, setDashAno] = useState<string>(new Date().getFullYear().toString())
+  const [dashMes, setDashMes] = useState<string>(getSavedMes)
+  const [dashAno, setDashAno] = useState<string>(getSavedAno)
   const [dashContratosSelecionados, setDashContratosSelecionados] = useState<string[]>([]) 
   const [dashOs, setDashOs] = useState<string>('todas') 
   const [dashConsultor, setDashConsultor] = useState<string>('todos')
   const [dashFonte, setDashFonte] = useState<string>('todas')
 
-  // Estados Painel do Consultor (NOVO)
+  // Estados Painel do Consultor
   const [resConsId, setResConsId] = useState<string>('')
-  const [resConsMes, setResConsMes] = useState<string>(new Date().getMonth().toString())
-  const [resConsAno, setResConsAno] = useState<string>(new Date().getFullYear().toString())
+  const [resConsMes, setResConsMes] = useState<string>(getSavedMes)
+  const [resConsAno, setResConsAno] = useState<string>(getSavedAno)
 
   const [fatVisaoTipos, setFatVisaoTipos] = useState<string[]>(['horas', 'continuado_com_os', 'overhead'])
-  const [fatMes, setFatMes] = useState<string>(new Date().getMonth().toString())
-  const [fatAno, setFatAno] = useState<string>(new Date().getFullYear().toString())
+  const [fatMes, setFatMes] = useState<string>(getSavedMes)
+  const [fatAno, setFatAno] = useState<string>(getSavedAno)
   const [fatContratosSelecionados, setFatContratosSelecionados] = useState<string[]>([]) 
   const [fatFonte, setFatFonte] = useState<string>('todas')
+
+  // Salva o mês na memória sempre que ele mudar em qualquer aba
+  useEffect(() => { localStorage.setItem('ep_mes', alocMes); }, [alocMes]);
+  useEffect(() => { localStorage.setItem('ep_ano', alocAno); }, [alocAno]);
+  useEffect(() => { localStorage.setItem('ep_mes', dashMes); }, [dashMes]);
+  useEffect(() => { localStorage.setItem('ep_mes', fatMes); }, [fatMes]);
+  useEffect(() => { localStorage.setItem('ep_mes', medMes); }, [medMes]);
+  useEffect(() => { localStorage.setItem('ep_mes', resConsMes); }, [resConsMes]);
 
   const [allTimesheets, setAllTimesheets] = useState<TimesheetLog[]>([])
   const [allAlocacoes, setAllAlocacoes] = useState<any[]>([])
@@ -162,7 +185,7 @@ export function AdminDashboard() {
   async function carregarDadosDoBanco() {
     try {
       setLoading(true)
-      const { data: dbCons } = await supabase.from('consultores').select('id, nome, horas_minimas_mes').order('nome')
+      const { data: dbCons } = await supabase.from('consultores').select('id, nome, horas_minimas_mes, avatar_url, status_ativo, is_convidado').order('nome')
       const { data: dbCont } = await supabase.from('contratos').select('*').order('codigo')
       const { data: dbOs } = await supabase.from('ordens_servico').select('*').order('created_at', { ascending: false })
       
@@ -183,26 +206,16 @@ export function AdminDashboard() {
   // ==========================================
   async function criarNovoContrato() {
     if (!novoCodigo || !novoNomeContrato) return alert("Preencha todos os campos obrigatórios!")
-    
     const { data: newContract, error } = await supabase.from('contratos').insert([{ 
       codigo: novoCodigo.toUpperCase().trim(), nome: novoNomeContrato.trim(), 
       status_ativo: true, tipo: novoTipo, fonte_pagamento: novaFonte, 
-      teto_global_horas: novoTetoGlobal,
+      teto_global_horas: novoTipo === 'continuado_com_os' ? novoTetoGlobal : 0,
       ciclo_inicio: novoInicio, ciclo_fim: novoFim, ciclo_fat_inicio: novoFatInicio, ciclo_fat_fim: novoFatFim
     }]).select('*').single()
-
     if (error || !newContract) return alert("Erro ao criar contrato no banco de dados.");
-
     if (novoTipo === 'continuado_com_os') {
-       await supabase.from('ordens_servico').insert([{
-         contract_id: newContract.id,
-         codigo: '🛠️ Pequenos Suportes',
-         descricao: 'Serviços pontuais e assessoria (Saldo Dinâmico)',
-         horas_previstas: 0,
-         status_ativa: true
-       }]);
+       await supabase.from('ordens_servico').insert([{ contract_id: newContract.id, codigo: '🛠️ Pequenos Suportes', descricao: 'Serviços pontuais e assessoria (Saldo Dinâmico)', horas_previstas: 0, status_ativa: true }]);
     }
-
     setNovoCodigo(''); setNovoNomeContrato(''); setNovoTetoGlobal(0); carregarDadosDoBanco();
   }
 
@@ -215,16 +228,32 @@ export function AdminDashboard() {
   async function salvarEdicaoContrato(id: string) {
     await supabase.from('contratos').update({ 
       codigo: editCodigo.toUpperCase().trim(), nome: editNome.trim(), status_ativo: editStatus, 
-      tipo: editTipo, fonte_pagamento: editFonte, teto_global_horas: editTetoGlobal,
+      tipo: editTipo, fonte_pagamento: editFonte, teto_global_horas: editTipo === 'continuado_com_os' ? editTetoGlobal : 0,
       ciclo_inicio: editInicio, ciclo_fim: editFim, ciclo_fat_inicio: editFatInicio, ciclo_fat_fim: editFatFim 
     }).eq('id', id)
     setEditandoId(null); carregarDadosDoBanco();
   }
+
+  async function excluirConsultorSistema(id: string, nome: string) {
+    if (!window.confirm(`ATENÇÃO: Você está prestes a excluir definitivamente o consultor(a) "${nome}".\nIsso apagará o perfil dele(a). Você tem certeza?`)) return;
+    setLoading(true);
+    // Exclui da tabela consultores (isso deve apagar tudo via ON DELETE CASCADE no banco, dependendo da sua arquitetura)
+    await supabase.from('consultores').delete().eq('id', id);
+    setConsultores(p => p.filter(c => c.id !== id));
+    toast.success("Consultor excluído com sucesso.");
+    setLoading(false);
+  }
   
   async function excluirContrato(id: string, nome: string) {
-    const { count } = await supabase.from('timesheets').select('*', { count: 'exact', head: true }).eq('contract_id', id);
-    if (count && count > 0) return alert(`❌ BLOQUEIO:\n\nEste contrato possui ${count} apontamentos vinculados. Apenas inative-o.`);
-    if (!window.confirm(`Excluir definitivamente "${nome}" e suas alocações vazias?`)) return;
+    const { count: countTimesheets } = await supabase.from('timesheets').select('*', { count: 'exact', head: true }).eq('contract_id', id);
+    if (countTimesheets && countTimesheets > 0) return alert(`❌ BLOQUEIO:\n\nEste contrato possui ${countTimesheets} apontamentos de horas vinculados. Apenas inative-o.`);
+    
+    const { count: countAloc } = await supabase.from('alocacoes').select('*', { count: 'exact', head: true }).eq('contract_id', id);
+    if (countAloc && countAloc > 0) {
+      if (!window.confirm(`⚠️ AVISO:\n\nEste contrato possui ${countAloc} alocações de horas de consultores cadastradas.\nSe você excluir, todas essas alocações serão DELETADAS PARA SEMPRE.\n\nTem certeza absoluta?`)) return;
+    } else {
+      if (!window.confirm(`Excluir definitivamente o contrato "${nome}"?`)) return;
+    }
     await supabase.from('alocacoes').delete().eq('contract_id', id); 
     await supabase.from('medicoes').delete().eq('contract_id', id); 
     await supabase.from('contratos').delete().eq('id', id);
@@ -237,49 +266,25 @@ export function AdminDashboard() {
   // ==========================================
   async function criarOS() {
     if (!osContratoId || !osCodigo) return alert("Selecione o Contrato e digite o Código da OS.");
-    const contMestre = contratos.find(c => c.id === osContratoId);
-    if (contMestre && contMestre.teto_global_horas > 0) {
-      const horasAtuais = osList.filter(o => o.contract_id === osContratoId).reduce((sum, o) => sum + o.horas_previstas, 0);
-      if (horasAtuais + osHoras > contMestre.teto_global_horas) {
-        return alert(`❌ Teto Excedido!\nO contrato mestre possui um limite global de ${contMestre.teto_global_horas}h.\nAs OS atuais já somam ${horasAtuais}h. Você não pode adicionar mais ${osHoras}h.`);
-      }
-    }
-    await supabase.from('ordens_servico').insert([{
-      contract_id: osContratoId, codigo: osCodigo.toUpperCase().trim(), descricao: osDescricao.trim(), horas_previstas: osHoras, status_ativa: true
-    }]);
-    setOsCodigo(''); setOsDescricao(''); setOsHoras(0); carregarDadosDoBanco(); alert("OS criada com sucesso!");
+    await supabase.from('ordens_servico').insert([{ contract_id: osContratoId, codigo: osCodigo.toUpperCase().trim(), descricao: osDescricao.trim(), horas_previstas: 0, status_ativa: true }]);
+    setOsCodigo(''); setOsDescricao(''); carregarDadosDoBanco(); toast.success("OS criada com sucesso!");
   }
 
-  function iniciarEdicaoOS(os: OrdemServico) {
-    setOsEditandoId(os.id); setEditOsCodigo(os.codigo); setEditOsDescricao(os.descricao); setEditOsHoras(os.horas_previstas);
-  }
+  function iniciarEdicaoOS(os: OrdemServico) { setOsEditandoId(os.id); setEditOsCodigo(os.codigo); setEditOsDescricao(os.descricao); }
 
   async function salvarEdicaoOS(id: string) {
-    await supabase.from('ordens_servico').update({
-      codigo: editOsCodigo.toUpperCase().trim(), descricao: editOsDescricao.trim(), horas_previstas: editOsHoras
-    }).eq('id', id);
+    await supabase.from('ordens_servico').update({ codigo: editOsCodigo.toUpperCase().trim(), descricao: editOsDescricao.trim() }).eq('id', id);
     setOsEditandoId(null); carregarDadosDoBanco();
   }
 
   async function apagarOS(id: string) {
     const { count } = await supabase.from('timesheets').select('*', { count: 'exact', head: true }).eq('os_id', id);
     if (count && count > 0) return alert(`❌ BLOQUEIO: Esta OS possui ${count} apontamentos vinculados. Exclusão proibida.`);
-    if (window.confirm("Apagar esta OS?")) {
-      await supabase.from('ordens_servico').delete().eq('id', id);
-      carregarDadosDoBanco();
-    }
-  }
-
-  async function atualizarMetaConsultor(id: string, valor: number) {
-    setConsultores(p => p.map(c => c.id === id ? { ...c, horas_minimas_mes: valor } : c));
-    const { data, error } = await supabase.from('consultores').update({ horas_minimas_mes: valor }).eq('id', id).select();
-    if (error) alert("❌ Erro do banco: " + error.message);
-    else if (!data || data.length === 0) alert("❌ Falha Silenciosa no Supabase.");
-    else alert("✅ Meta salva com segurança!");
+    if (window.confirm("Apagar esta OS?")) { await supabase.from('ordens_servico').delete().eq('id', id); carregarDadosDoBanco(); }
   }
 
   // ==========================================
-  // FUNÇÕES DE ALOCAÇÃO (MENSALIZADAS)
+  // MOTOR DA LINHA DE BASE (MATRIZ) E ALOCAÇÕES
   // ==========================================
   useEffect(() => { 
     if (contratoAtivo && menuAtivo === 'alocacoes') {
@@ -287,160 +292,251 @@ export function AdminDashboard() {
       if (c?.tipo === 'continuado_com_os') {
         const primeiraOs = osList.filter(o => o.contract_id === contratoAtivo)[0];
         setAlocacaoOsId(primeiraOs ? primeiraOs.id : '');
-        if(primeiraOs) carregarAlocacoesDoContrato(contratoAtivo, primeiraOs.id);
-        else setAlocacoes({});
+        if(primeiraOs) {
+          carregarLinhaBase(contratoAtivo, primeiraOs.id);
+          if (viewAlocacao === 'mensal') carregarAlocacoesMensais(contratoAtivo, primeiraOs.id);
+        } else {
+          setBaseItems({}); setAlocacoes({}); setCurrentBase(null); setBaseVersions([]);
+        }
       } else {
         setAlocacaoOsId('');
-        carregarAlocacoesDoContrato(contratoAtivo, '');
+        carregarLinhaBase(contratoAtivo, null);
+        if (viewAlocacao === 'mensal') carregarAlocacoesMensais(contratoAtivo, null);
       }
     }
-  }, [contratoAtivo, menuAtivo, alocMes, alocAno]) // 🌟 Adicionado gatilho para Mês e Ano
+  }, [contratoAtivo, menuAtivo])
 
   useEffect(() => {
-    if (contratoAtivo && alocacaoOsId && menuAtivo === 'alocacoes') carregarAlocacoesDoContrato(contratoAtivo, alocacaoOsId);
-  }, [alocacaoOsId])
+    if (contratoAtivo && menuAtivo === 'alocacoes') {
+      carregarLinhaBase(contratoAtivo, alocacaoOsId || null);
+      if (viewAlocacao === 'mensal') carregarAlocacoesMensais(contratoAtivo, alocacaoOsId || null);
+    }
+  }, [alocacaoOsId, alocMes, alocAno, viewAlocacao])
   
-  async function carregarAlocacoesDoContrato(idContrato: string, idOs: string) {
-    setCarregandoAlocacoes(true)
+  // 1. Carregar a Linha de Base
+  async function carregarLinhaBase(idContrato: string, idOs: string | null) {
+    setCarregandoAlocacoes(true);
+    let query = supabase.from('linha_base').select('*').eq('contract_id', idContrato).order('versao', { ascending: false });
+    if (idOs && idOs !== 'global') query = query.eq('os_id', idOs);
+    else query = query.is('os_id', null);
+
+    const { data: bases } = await query;
+    if (bases && bases.length > 0) {
+      setBaseVersions(bases);
+      setCurrentBase(bases[0]); // Pega a mais recente
+      
+      const { data: items } = await supabase.from('linha_base_items').select('*').eq('base_id', bases[0].id);
+      const itemsMap: Record<string, LinhaBaseItem> = {};
+      (items || []).forEach(item => { itemsMap[item.user_id] = item; });
+      setBaseItems(itemsMap);
+    } else {
+      setBaseVersions([]); setCurrentBase(null); setBaseItems({});
+    }
+    setCarregandoAlocacoes(false);
+  }
+
+  // 2. Salvar Nova Versão da Linha de Base
+  async function salvarLinhaBase() {
+    setSalvando(true);
+    const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+    const cObj = contratos.find(c => c.id === contratoAtivo);
+
+    // --- NOVA TRAVA: TETO GLOBAL DA ASSESSORIA ---
+    if (cObj?.tipo === 'continuado_com_os' && cObj.teto_global_horas > 0 && idOsValido !== null && !isSemOsType) {
+        const tetoDestaOS = Object.values(baseItems).reduce((sum, item) => sum + (item.tipo_pagamento === 'horas' ? Number(item.horas_teto) : 0), 0);
+        
+        // Busca as últimas bases de todas as OSs deste contrato para ver quanto já "comeram" do Teto Global
+        const { data: allBases } = await supabase.from('linha_base').select('id, os_id, versao').eq('contract_id', contratoAtivo);
+        
+        let tetoOutrasOS = 0;
+        if (allBases && allBases.length > 0) {
+            const latestBasesMap = new Map();
+            allBases.forEach(b => {
+               if (b.os_id && b.os_id !== idOsValido) {
+                  if (!latestBasesMap.has(b.os_id) || latestBasesMap.get(b.os_id).versao < b.versao) {
+                     latestBasesMap.set(b.os_id, b);
+                  }
+               }
+            });
+            
+            const latestBaseIds = Array.from(latestBasesMap.values()).map(b => b.id);
+            if (latestBaseIds.length > 0) {
+                const { data: allItems } = await supabase.from('linha_base_items').select('horas_teto').in('base_id', latestBaseIds);
+                tetoOutrasOS = (allItems || []).reduce((sum, item) => sum + Number(item.horas_teto), 0);
+            }
+        }
+        
+        if (tetoDestaOS + tetoOutrasOS > cObj.teto_global_horas) {
+            alert(`❌ TETO GLOBAL DA ASSESSORIA EXCEDIDO!\n\nEste contrato de assessoria tem um Teto Global de ${cObj.teto_global_horas}h.\nOutras Ordens de Serviço (OS) já bloqueiam ${tetoOutrasOS}h da Matriz.\nO máximo que você pode distribuir para a equipe nesta OS é ${(cObj.teto_global_horas - tetoOutrasOS).toFixed(1)}h.\n\nVocê tentou alocar ${tetoDestaOS}h. Reduza o teto dos consultores.`);
+            setSalvando(false);
+            return;
+        }
+    }
+    const novaVersaoNum = currentBase ? currentBase.versao + 1 : 1;
+
+    // Cria a capa da Baseline
+    const { data: novaBase, error: errBase } = await supabase.from('linha_base').insert([{
+      contract_id: contratoAtivo,
+      os_id: idOsValido,
+      versao: novaVersaoNum
+    }]).select().single();
+
+    if (errBase || !novaBase) { alert("Erro ao criar versão da linha de base."); setSalvando(false); return; }
+
+    // Cria os Itens (Consultores, Teto e Atividades)
+    const itemsToInsert = Object.values(baseItems).map(item => ({
+      base_id: novaBase.id,
+      user_id: item.user_id,
+      horas_teto: item.horas_teto,
+      atividades: item.atividades,
+      tipo_pagamento: item.tipo_pagamento // <--- NOVA COLUNA AQUI
+    }));
+
+    if (itemsToInsert.length > 0) {
+      await supabase.from('linha_base_items').insert(itemsToInsert);
+    }
+
+    toast.success(`Linha de Base (Versão ${novaVersaoNum}) salva com sucesso!`);
+    carregarLinhaBase(contratoAtivo, idOsValido);
+    setSalvando(false);
+  }
+
+  // 3. Carregar Alocações do Mês selecionado (Balizado pela Linha de Base mais recente)
+  async function carregarAlocacoesMensais(idContrato: string, idOs: string | null) {
+    setCarregandoAlocacoes(true);
+    
+    // Primeiro, recarregamos a matriz mais atual para garantir que os consultores e atividades estão sincronizados
+    let queryBase = supabase.from('linha_base').select('*').eq('contract_id', idContrato).order('versao', { ascending: false });
+    if (idOs && idOs !== 'global') queryBase = queryBase.eq('os_id', idOs);
+    else queryBase = queryBase.is('os_id', null);
+    
+    const { data: bases } = await queryBase;
+    let matrizAtual: Record<string, LinhaBaseItem> = {};
+    if (bases && bases.length > 0) {
+      const { data: items } = await supabase.from('linha_base_items').select('*').eq('base_id', bases[0].id);
+      (items || []).forEach(item => { matrizAtual[item.user_id] = item; });
+    }
+
+    // Agora buscamos o que já foi salvo de fato na tabela de alocação mensal
     let query = supabase.from('alocacoes').select('*').eq('contract_id', idContrato).eq('mes', alocMes).eq('ano', alocAno)
     if (idOs && idOs !== 'global') query = query.eq('os_id', idOs);
     else query = query.is('os_id', null);
 
-    const { data } = await query;
-    let alocsParaProcessar = data || [];
-
-    // 🌟 FASE 3: MEMÓRIA DO MÊS ANTERIOR (Cópia da Matriz)
-    if (alocsParaProcessar.length === 0) {
-      let prevMes = parseInt(alocMes) - 1;
-      let prevAno = parseInt(alocAno);
-      if (prevMes < 0) { prevMes = 11; prevAno--; }
-
-      let prevQuery = supabase.from('alocacoes').select('*').eq('contract_id', idContrato).eq('mes', prevMes.toString()).eq('ano', prevAno.toString());
-      if (idOs && idOs !== 'global') prevQuery = prevQuery.eq('os_id', idOs);
-      else prevQuery = prevQuery.is('os_id', null);
-
-      const { data: prevData } = await prevQuery;
-      if (prevData && prevData.length > 0) {
-        // O mês está vazio, mas achou no mês passado! Copia a estrutura e zera as horas.
-        alocsParaProcessar = prevData.map(p => ({
-          ...p,
-          id: crypto.randomUUID(), // ID temporário apenas para a interface
-          horas_disponiveis: 0,    // Zera as horas para evitar superalocação
-          mes: alocMes,
-          ano: alocAno,
-          isFromMemory: true       // Flag para o motor saber que deve criar no banco e não dar Update
-        }));
+    const { data: alocsMensais } = await query;
+    
+    // Mapeamento Inteligente: Mescla a estrutura da Matriz com os valores salvos no Mês
+    const alocSalvas: Record<string, Alocacao> = {};
+    
+    // A. Constrói o esqueleto com base na Matriz (para garantir que novas atividades/consultores apareçam)
+    Object.values(matrizAtual).forEach(matrizItem => {
+      alocSalvas[matrizItem.user_id] = {
+        consultorId: matrizItem.user_id,
+        tipo_pagamento: matrizItem.tipo_pagamento, // <--- HERDA AQUI
+        horasTotais: 0,
+        atividades: matrizItem.atividades.map(nomeAtiv => ({
+          id: crypto.randomUUID(),
+          nome: nomeAtiv,
+          horas: 0 // Inicia zerado, vai ser preenchido se achar no banco
+        }))
+      };
+      
+      if (matrizItem.atividades.length === 0 || matrizItem.tipo_pagamento === 'fechado') {
+         alocSalvas[matrizItem.user_id].geralId = undefined; 
       }
-    }
+    });
 
-    const alocSalvas: Record<string, Alocacao> = {}
-    alocsParaProcessar.forEach(row => {
-      if (!alocSalvas[row.user_id]) alocSalvas[row.user_id] = { consultorId: row.user_id, horasTotais: 0, atividades: [] }
-      if (row.atividade === 'Sem atividade específica' || row.atividade === 'Orçamento Geral') {
-        alocSalvas[row.user_id].geralId = row.isFromMemory ? undefined : row.id
+    // B. Preenche com os dados reais salvos do mês
+    (alocsMensais || []).forEach(row => {
+      if (!alocSalvas[row.user_id]) return; 
+
+      if (row.atividade === 'Sem atividade específica' || row.atividade === 'Orçamento Geral' || row.atividade === 'Preço Fechado (Medição)') {
+        alocSalvas[row.user_id].geralId = row.id;
+        alocSalvas[row.user_id].horasTotais = row.horas_disponiveis;
       } else {
-        alocSalvas[row.user_id].atividades.push({ id: row.id.toString(), dbId: row.isFromMemory ? undefined : row.id, nome: row.atividade, horas: row.horas_disponiveis })
+        // Acha a atividade no esqueleto da matriz e preenche
+        const ativIndex = alocSalvas[row.user_id].atividades.findIndex(a => a.nome === row.atividade);
+        if (ativIndex !== -1) {
+          alocSalvas[row.user_id].atividades[ativIndex].dbId = row.id;
+          alocSalvas[row.user_id].atividades[ativIndex].horas = row.horas_disponiveis;
+        }
       }
-    })
+    });
 
+    // C. Recalcula os totais visuais
     Object.values(alocSalvas).forEach(aloc => {
       if (aloc.atividades.length > 0) aloc.horasTotais = aloc.atividades.reduce((sum, a) => sum + a.horas, 0);
-      else { const rowGeral = alocsParaProcessar.find(r => r.id === aloc.geralId); aloc.horasTotais = rowGeral ? rowGeral.horas_disponiveis : 0; }
-    })
-    setAlocacoes(alocSalvas); setCarregandoAlocacoes(false)
+    });
+
+    setAlocacoes(alocSalvas); 
+    setCarregandoAlocacoes(false);
   }
 
+  // 4. Salvar Alocações Mensais (Agora com trava cruzando a Base de todas as alocações da vida)
   async function salvarAlocacoesNoBanco() {
     setSalvando(true)
-    const { data: currentTimesheets } = await supabase.from('timesheets').select('*').eq('contract_id', contratoAtivo);
     const cObj = contratos.find(c => c.id === contratoAtivo);
     const isHora = cObj?.tipo === 'horas';
     const isComOs = cObj?.tipo === 'continuado_com_os';
     const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
-
     const isSemOs = targetOsId ? osList.find(o => o.id === targetOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
+    const isOverheadTypeSave = cObj?.tipo === 'overhead';
+    const isDynamic = isSemOs || isOverheadTypeSave;
 
-    // 🌟 FASE 3: TRAVA 1 - Limite da OS c/ Estorno de Saldo Real
-    if (isComOs && targetOsId && !isSemOs) {
-      const currentOs = osList.find(o => o.id === targetOsId);
-      if (currentOs && currentOs.horas_previstas > 0) {
-        const cycle = getCycleBoundsForContract(cObj!.ciclo_inicio, cObj!.ciclo_fim, alocMes, alocAno);
-        
-        // Puxa exatamente quanto foi executado (gasto) na vida útil da OS
-        const pastConsumedOsMs = (currentTimesheets || [])
-            .filter(t => t.os_id === targetOsId && new Date(t.start_at).getTime() < cycle.start)
-            .reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
-        const pastConsumedOsH = pastConsumedOsMs / 3600000;
-
-        let totalAlocadoOS = 0;
-        Object.values(alocacoes).forEach(aloc => {
-          if (aloc.atividades.length > 0) totalAlocadoOS += aloc.atividades.reduce((sum, a) => sum + (Number(a.horas) || 0), 0);
-          else totalAlocadoOS += Number(aloc.horasTotais) || 0;
-        });
-        
-        // Estorno: O Saldo Livre deste mês é o Teto da OS subtraindo SOMENTE o que de fato já foi queimado.
-        const saldoLivreAtual = currentOs.horas_previstas - pastConsumedOsH;
-
-        if (totalAlocadoOS > saldoLivreAtual) {
-          alert(`❌ LIMITE DA OS EXCEDIDO (ESTORNO REAL)!\n\nA OS '${currentOs.codigo}' possui teto de ${currentOs.horas_previstas}h.\nNo passado, foram consumidas de fato ${pastConsumedOsH.toFixed(1)}h.\nO máximo que pode ser alocado neste ciclo é ${saldoLivreAtual.toFixed(1)}h (Saldo livre estornado do previsto não realizado).\nVocê tentou alocar ${totalAlocadoOS}h. Reduza antes de salvar.`);
-          setSalvando(false); return;
-        }
-      }
-    }
-
-    // 🌟 TRAVA 2: Teto Global Antimistura (Lê consumo do passado vs Alocação do mês atual)
-    if (cObj && cObj.teto_global_horas > 0) {
-      const cycle = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, alocMes, alocAno);
-      
-      const pastConsumedMs = (currentTimesheets || [])
-          .filter(t => new Date(t.start_at).getTime() < cycle.start)
-          .reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
-      const pastConsumedH = pastConsumedMs / 3600000;
-
-      let currentAllocatedH = 0;
-      Object.values(alocacoes).forEach(aloc => {
-          if (aloc.atividades.length > 0) currentAllocatedH += aloc.atividades.reduce((sum, a) => sum + (Number(a.horas) || 0), 0);
-          else currentAllocatedH += Number(aloc.horasTotais) || 0;
-      });
-
-      const saldoGlobalLivre = cObj.teto_global_horas - pastConsumedH;
-
-      if (!isSemOs && (currentAllocatedH > saldoGlobalLivre)) {
-          alert(`❌ TETO GLOBAL EXCEDIDO (ESTORNO REAL)!\n\nO contrato possui um teto de ${cObj.teto_global_horas}h.\nNo passado foram executadas e consumidas ${pastConsumedH.toFixed(1)}h.\nO máximo que pode ser alocado neste ciclo é ${saldoGlobalLivre.toFixed(1)}h.\nVocê tentou alocar ${currentAllocatedH}h. Reduza antes de salvar.`);
-          setSalvando(false); return;
-      }
-    }
+    // Traz todas as alocações da vida deste contrato para checar o TETO DA MATRIZ
+    let queryAll = supabase.from('alocacoes').select('*').eq('contract_id', contratoAtivo);
+    if (targetOsId) queryAll = queryAll.eq('os_id', targetOsId);
+    else queryAll = queryAll.is('os_id', null);
+    const { data: allAllocHistory } = await queryAll;
 
     const upserts: any[] = []; const inserts: any[] = []; const deletes: string[] = [];
     let bloqueio = false;
 
-    Object.values(alocacoes).forEach(aloc => {
+    for (const aloc of Object.values(alocacoes)) {
       const nomeCons = consultores.find(c => c.id === aloc.consultorId)?.nome;
-      const hTotais = isSemOs ? 9999 : aloc.horasTotais;
-      const cycle = getCycleBoundsForContract(cObj!.ciclo_inicio, cObj!.ciclo_fim, alocMes, alocAno);
+      const matrizConsultor = baseItems[aloc.consultorId];
+
+      if (!matrizConsultor && !isDynamic) {
+         alert(`❌ ERRO: O consultor ${nomeCons} não está definido na Matriz (Linha de Base). Adicione-o lá primeiro.`);
+         bloqueio = true; break;
+      }
+
+      const isFechado = matrizConsultor?.tipo_pagamento === 'fechado';
+
+      if (isFechado) {
+         // Salva uma linha "fantasma" de controle para os gráficos de medição, mas com 0h.
+         if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: 0, atividade: 'Preço Fechado (Medição)', mes: alocMes, ano: alocAno });
+         else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: 0, atividade: 'Preço Fechado (Medição)', mes: alocMes, ano: alocAno });
+         continue; // Pula as validações de horas
+      }
+
+      // Calcula o quanto já foi alocado em TODOS OS OUTROS MESES para este consultor
+      const allocatedOtherMonths = (allAllocHistory || [])
+          .filter(a => a.user_id === aloc.consultorId && !(a.mes === alocMes && a.ano === alocAno))
+          .reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+      
+      const newMonthlyTotal = isDynamic ? 9999 : aloc.horasTotais;
+      
+      // TRAVA DA LINHA DE BASE (Teto do Consultor)
+      if (!isDynamic && matrizConsultor.horas_teto > 0) {
+         if ((allocatedOtherMonths + newMonthlyTotal) > matrizConsultor.horas_teto) {
+            const livre = Math.max(0, matrizConsultor.horas_teto - allocatedOtherMonths);
+            alert(`❌ TETO DA MATRIZ EXCEDIDO!\n\nConsultor: ${nomeCons}\nTeto na Linha de Base: ${matrizConsultor.horas_teto}h\nJá alocado em outros meses: ${allocatedOtherMonths}h\nSaldo livre para alocar agora: ${livre}h\n\nVocê tentou alocar ${newMonthlyTotal}h neste mês. Reduza para salvar.`);
+            bloqueio = true; break;
+         }
+      }
 
       if (aloc.atividades.length > 0) {
         aloc.atividades.forEach(ativ => {
-          const hAtiv = isSemOs ? 9999 : ativ.horas;
-          if (isHora && currentTimesheets) {
-            const consumedCycleMs = currentTimesheets.filter(t => t.user_id === aloc.consultorId && t.activity === ativ.nome && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end).reduce((acc, t) => acc + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
-            const consumedCycleH = consumedCycleMs / 3600000;
-            if (hAtiv < consumedCycleH) { alert(`❌ TRAVA:\n${nomeCons} já gastou ${consumedCycleH.toFixed(1)}h neste ciclo na disciplina '${ativ.nome}'. Não pode reduzir o limite mensal para ${hAtiv}h.`); bloqueio = true; }
-          }
+          const hAtiv = isDynamic ? 9999 : ativ.horas;
           if (ativ.dbId) upserts.push({ id: ativ.dbId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: hAtiv, atividade: ativ.nome.trim(), mes: alocMes, ano: alocAno })
           else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: hAtiv, atividade: ativ.nome.trim(), mes: alocMes, ano: alocAno })
         })
-        if (aloc.geralId) deletes.push(aloc.geralId)
+        if (aloc.geralId) deletes.push(aloc.geralId) // Limpa caso existisse um "Geral" antes
       } else {
-        if (isHora && currentTimesheets) {
-          const consumedCycleMs = currentTimesheets.filter(t => t.user_id === aloc.consultorId && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end).reduce((acc, t) => acc + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0);
-          const consumedCycleH = consumedCycleMs / 3600000;
-          if (hTotais < consumedCycleH) { alert(`❌ TRAVA:\n${nomeCons} já gastou ${consumedCycleH.toFixed(1)}h neste ciclo. Não pode reduzir o limite mensal para ${hTotais}h.`); bloqueio = true; }
-        }
-        if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: hTotais, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno })
-        else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: hTotais, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno })
+        if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: newMonthlyTotal, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno })
+        else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: newMonthlyTotal, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno })
       }
-    })
+    }
 
     if (bloqueio) return setSalvando(false);
 
@@ -448,47 +544,64 @@ export function AdminDashboard() {
       for (const u of upserts) await supabase.from('alocacoes').update({ horas_disponiveis: u.horas_disponiveis, atividade: u.atividade, os_id: u.os_id, mes: u.mes, ano: u.ano }).eq('id', u.id)
       if (inserts.length > 0) await supabase.from('alocacoes').insert(inserts)
       if (deletes.length > 0) await supabase.from('alocacoes').delete().in('id', deletes)
-      alert("Alocações salvas com sucesso!"); carregarAlocacoesDoContrato(contratoAtivo, alocacaoOsId)
+      toast.success("Distribuição mensal salva com sucesso!"); 
+      carregarAlocacoesMensais(contratoAtivo, alocacaoOsId)
     } catch (e) { alert("Erro ao salvar.") }
     setSalvando(false)
   }
 
-  const addConsultor = (id: string) => { if (!alocacoes[id]) setAlocacoes(p => ({ ...p, [id]: { consultorId: id, horasTotais: 0, atividades: [] } })) }
-  const updateHoras = (id: string, h: number) => setAlocacoes(p => ({ ...p, [id]: { ...p[id], horasTotais: h } }))
-  const addAtiv = (id: string) => { const n = prompt("Nome da Atividade:"); if (n) setAlocacoes(p => { const newAtivs = [...p[id].atividades, { id: Date.now().toString(), nome: n, horas: 0 }]; const newTotal = newAtivs.reduce((sum, a) => sum + a.horas, 0); return { ...p, [id]: { ...p[id], atividades: newAtivs, horasTotais: newTotal } } }) }
-  const updateAtiv = (cid: string, aid: string, h: number) => setAlocacoes(p => { const newAtivs = p[cid].atividades.map(a => a.id === aid ? { ...a, horas: h } : a); const newTotal = newAtivs.reduce((sum, a) => sum + a.horas, 0); return { ...p, [cid]: { ...p[cid], atividades: newAtivs, horasTotais: newTotal } } })
-  const removeAtiv = async (cid: string, aid: string, dbId?: string) => { 
-    if (dbId && !window.confirm("Apagar do banco?")) return; 
-    if (dbId) await supabase.from('alocacoes').delete().eq('id', dbId); 
-    setAlocacoes(p => { const newAtivs = p[cid].atividades.filter(a => a.id !== aid); const newTotal = newAtivs.reduce((sum, a) => sum + a.horas, 0); return { ...p, [cid]: { ...p[cid], atividades: newAtivs, horasTotais: newTotal } } }) 
+  // --- Funções Auxiliares da View da Linha de Base ---
+  const addConsultorBase = (id: string) => { 
+    if (!baseItems[id]) setBaseItems(p => ({ ...p, [id]: { id: crypto.randomUUID(), base_id: '', user_id: id, horas_teto: 0, atividades: [], tipo_pagamento: 'horas' } }));
   }
-  const removeConsultor = async (cid: string) => { 
-    const dbIds = [...alocacoes[cid].atividades.map(a => a.dbId).filter(Boolean), alocacoes[cid].geralId].filter(Boolean); 
-    if (dbIds.length > 0 && !window.confirm("Excluir esta alocação de ciclo para o consultor?")) return; 
-    if (dbIds.length > 0) await supabase.from('alocacoes').delete().in('id', dbIds as string[]); 
-    setAlocacoes(p => { const n = { ...p }; delete n[cid]; return n }) 
+  const removeConsultorBase = (id: string) => { setBaseItems(p => { const n = {...p}; delete n[id]; return n; }); }
+  const updateTetoBase = (id: string, h: number) => { setBaseItems(p => ({ ...p, [id]: { ...p[id], horas_teto: h } })); }
+  
+  const updateTipoPagamentoBase = (id: string, tipo: 'horas' | 'fechado') => { 
+    if (tipo === 'fechado') {
+      const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+      const temHoras = allTimesheets.some(t => t.user_id === id && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true));
+      if (temHoras) {
+        alert("❌ BLOQUEIO: Este consultor já possui horas registradas neste projeto.\nNão é possível alterar para Preço Fechado para não corromper o histórico.\nSe necessário, inative a alocação e crie um novo contrato/OS.");
+        return;
+      }
+    }
+    // Se mudou pra fechado, varre e apaga as atividades (pois preço fechado não usa escopo de horas)
+    setBaseItems(p => ({ ...p, [id]: { ...p[id], tipo_pagamento: tipo, atividades: tipo === 'fechado' ? [] : p[id].atividades } })); 
   }
 
-  // ==========================================
-  // MEDIÇÕES MENSAIS
-  // ==========================================
-  useEffect(() => { if (menuAtivo === 'medicoes' && medContrato) carregarMedicoes() }, [menuAtivo, medContrato, medMes, medAno])
-  async function carregarMedicoes() {
-    setMedLoading(true)
-    const { data: alocs } = await supabase.from('alocacoes').select('user_id').eq('contract_id', medContrato)
-    const idsNaObra = Array.from(new Set((alocs || []).map(a => a.user_id)))
-    setMedConsultores(consultores.filter(c => idsNaObra.includes(c.id)))
-    const { data: meds } = await supabase.from('medicoes').select('*').eq('contract_id', medContrato).eq('mes', medMes).eq('ano', medAno)
-    const inputs: Record<string, number> = {}; (meds || []).forEach(m => { inputs[m.user_id] = m.percentual })
-    setMedicoesInput(inputs); setMedLoading(false)
+  async function mudarVersaoBase(baseId: string) {
+    setCarregandoAlocacoes(true);
+    const version = baseVersions.find(b => b.id === baseId);
+    if (version) setCurrentBase(version);
+    const { data: items } = await supabase.from('linha_base_items').select('*').eq('base_id', baseId);
+    const itemsMap: Record<string, LinhaBaseItem> = {};
+    (items || []).forEach(item => { itemsMap[item.user_id] = item; });
+    setBaseItems(itemsMap);
+    setCarregandoAlocacoes(false);
   }
-  async function salvarMedicoes() {
-    setSalvando(true)
-    await supabase.from('medicoes').delete().eq('contract_id', medContrato).eq('mes', medMes).eq('ano', medAno)
-    const inserts = medConsultores.map(c => ({ contract_id: medContrato, user_id: c.id, mes: medMes, ano: medAno, percentual: medicoesInput[c.id] || 0 })).filter(m => m.percentual > 0)
-    if (inserts.length > 0) await supabase.from('medicoes').insert(inserts)
-    alert("Medição do mês salva com sucesso!"); await carregarTudoParaDash(); setSalvando(false)
+  const addAtividadeBase = (id: string) => { 
+    const n = prompt("Nome da Atividade Permanente:"); 
+    if (n && n.trim()) setBaseItems(p => ({ ...p, [id]: { ...p[id], atividades: [...p[id].atividades, n.trim()] } })); 
   }
+  const removeAtividadeBase = (userId: string, ativName: string) => {
+    setBaseItems(p => ({ ...p, [userId]: { ...p[userId], atividades: p[userId].atividades.filter(a => a !== ativName) } }));
+  }
+  
+  // Drag and Drop (Simulado/Lógica Simples para reordenar Atividade)
+  const moverAtividadeBase = (userId: string, ativName: string, direction: 'up'|'down') => {
+    setBaseItems(p => {
+       const arr = [...p[userId].atividades];
+       const idx = arr.indexOf(ativName);
+       if (direction === 'up' && idx > 0) { [arr[idx], arr[idx-1]] = [arr[idx-1], arr[idx]]; }
+       if (direction === 'down' && idx < arr.length - 1) { [arr[idx], arr[idx+1]] = [arr[idx+1], arr[idx]]; }
+       return { ...p, [userId]: { ...p[userId], atividades: arr } };
+    });
+  }
+
+  // --- Funções Auxiliares da View Mensal ---
+  const updateHorasMensal = (id: string, h: number) => setAlocacoes(p => ({ ...p, [id]: { ...p[id], horasTotais: h } }))
+  const updateAtivMensal = (cid: string, aid: string, h: number) => setAlocacoes(p => { const newAtivs = p[cid].atividades.map(a => a.id === aid ? { ...a, horas: h } : a); const newTotal = newAtivs.reduce((sum, a) => sum + a.horas, 0); return { ...p, [cid]: { ...p[cid], atividades: newAtivs, horasTotais: newTotal } } })
 
   // ==========================================
   // AUTORIZAÇÕES RETROATIVAS E CARREGAMENTOS GLOBAIS
@@ -524,7 +637,7 @@ export function AdminDashboard() {
     setSalvando(false);
 
     if (error) return alert("Erro ao liberar data: " + error.message);
-    alert("Acesso retroativo liberado com sucesso!");
+    toast.success("Acesso retroativo liberado com sucesso!");
     setLiberarData(new Date().toISOString().split('T')[0]);
     carregarAutorizacoes();
   }
@@ -536,14 +649,13 @@ export function AdminDashboard() {
   }
 
   // ==========================================
-  // DASHBOARDS, CÁLCULOS E CICLOS
+  // DASHBOARDS, CÁLCULOS E GESTÃO
   // ==========================================
   const isWithinCycle = (dateStr: string, monthStr: string, yearStr: string, cInicio: number, cFim: number) => {
     const date = new Date(dateStr).getTime(); 
     const month = parseInt(monthStr); 
     const year = parseInt(yearStr);
     const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
-
     let start, end;
     if (cInicio > cFim) {
       const startMonth = month === 0 ? 11 : month - 1;
@@ -570,398 +682,21 @@ export function AdminDashboard() {
     return osList.filter(o => dashContratosSelecionados.includes(o.contract_id));
   }, [dashContratosSelecionados, osList]);
 
-  // 🌟 O Filtro de Saúde Global agora ignora "dashAtividade", que foi removido.
-  const dashData = useMemo(() => {
-    let fTimes = allTimesheets.filter(t => contratosVisao.some(cv => cv.id === t.contract_id))
-    
-    // 🌟 MENSALIZAÇÃO: Isola a alocação apenas para o mês do filtro do Dashboard
-    let fAlocs = allAlocacoes.filter(a => a.mes === dashMes && a.ano === dashAno && contratosVisao.some(cv => cv.id === a.contract_id));
-    
-    let fMeds = allMedicoes.filter(m => contratosVisao.some(cv => cv.id === m.contract_id))
-
-    if (dashContratosSelecionados.length > 0) {
-      fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id)); 
-      fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id)); 
-      fMeds = fMeds.filter(m => dashContratosSelecionados.includes(m.contract_id))
-    }
-    if (dashOs !== 'todas') { 
-      fTimes = fTimes.filter(t => t.os_id === dashOs); 
-      fAlocs = fAlocs.filter(a => a.os_id === dashOs); 
-    }
-    if (dashConsultor !== 'todos') { 
-      fTimes = fTimes.filter(t => t.user_id === dashConsultor); 
-      fAlocs = fAlocs.filter(a => a.user_id === dashConsultor); 
-      fMeds = fMeds.filter(m => m.user_id === dashConsultor) 
-    }
-
-    const isFechadoMode = dashVisaoTipos.includes('fechado') && dashVisaoTipos.length === 1;
-
-    const consultoresPagamento = consultores.map(c => {
-      let valorGrafico = 0; let tooltipExtra = ""
-      if (isFechadoMode) {
-        valorGrafico = fMeds.filter(m => m.user_id === c.id && m.mes === dashMes && m.ano === dashAno).reduce((acc, m) => acc + m.percentual, 0)
-        const horasInfinitas = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, contratos.find(con => con.id === t.contract_id)?.ciclo_inicio || 25, contratos.find(con => con.id === t.contract_id)?.ciclo_fim || 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
-        tooltipExtra = horasInfinitas > 0 ? `(Tempo investido: ${horasInfinitas.toFixed(1)}h)` : ""
-      } else {
-        const logs = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, contratos.find(con => con.id === t.contract_id)?.ciclo_inicio || 25, contratos.find(con => con.id === t.contract_id)?.ciclo_fim || 24))
-        valorGrafico = logs.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
-      }
-      return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)), tooltipExtra }
-    }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
-
-    let orcadoGlobal = 0;
-    let gastoGlobal = 0;
-    let medidoGlobal = 0;
-
-    contratosVisao.forEach(cont => {
-      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
-      
-      const timesContrato = fTimes.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
-      const gastoAtual = timesContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-      
-      const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-      if (cont.ciclo_inicio > cont.ciclo_fim) {
-        if (currentDay >= cont.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
-      }
-      const dM = parseInt(dashMes); const dA = parseInt(dashAno);
-      const isPast = (dA < y) || (dA === y && dM < m);
-      const isCurrent = (dA === y && dM === m);
-
-      let orcadoAtual = 0;
-      const alocsContrato = fAlocs.filter(a => a.contract_id === cont.id);
-      
-      alocsContrato.forEach(a => {
-        const os = osList.find(o => o.id === a.os_id);
-        if (os?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cont.tipo)) {
-           const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-           orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-        } else {
-           if (isPast) {
-             const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-             orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-           } else if (isCurrent) {
-             orcadoAtual += a.horas_disponiveis;
-           } else {
-             orcadoAtual += 0;
-           }
-        }
-      });
-
-      const medsContrato = fMeds.filter(m => m.contract_id === cont.id && m.mes === dashMes && m.ano === dashAno);
-      medidoGlobal += medsContrato.reduce((sum, m) => sum + m.percentual, 0);
-
-      orcadoGlobal += orcadoAtual;
-      gastoGlobal += gastoAtual;
-    });
-
-    const saldoPositivo = orcadoGlobal - gastoGlobal > 0 ? orcadoGlobal - gastoGlobal : 0;
-    const saldoMedido = 100 - medidoGlobal > 0 ? 100 - medidoGlobal : 0;
-    
-    let pieData = isFechadoMode ? [ { name: '% Entregue', value: Number(medidoGlobal.toFixed(1)) }, { name: 'A Entregar', value: Number(saldoMedido.toFixed(1)) } ] : [ { name: 'Consumido', value: Number(gastoGlobal.toFixed(2)) }, { name: 'Saldo Restante', value: Number(saldoPositivo.toFixed(2)) } ]
-    pieData = pieData.filter(p => p.value > 0); if (pieData.length === 0) pieData.push({ name: 'Sem Registros', value: 1 });
-
-    return { 
-      consultoresPagamento, maxValor: Math.max(...consultoresPagamento.map(c => c.valorGrafico), 1), 
-      orcadoGlobal, gastoGlobal: Number(gastoGlobal.toFixed(2)), medidoGlobal: Number(medidoGlobal.toFixed(1)),
-      saldoGlobal: Number((orcadoGlobal - gastoGlobal).toFixed(2)),
-      percentualGlobal: orcadoGlobal > 0 ? ((gastoGlobal / orcadoGlobal) * 100).toFixed(1) : '0', pieData, isFechadoMode
-    }
-  }, [allTimesheets, allAlocacoes, allMedicoes, dashMes, dashAno, dashContratosSelecionados, dashOs, dashConsultor, consultores, dashVisaoTipos, contratosVisao, contratos, osList])
-
-  // 🌟 NOVO: Lógica das Tabelas Mágicas na Saúde Global
-  const tableByConsultant = useMemo(() => {
-    if (dashContratosSelecionados.length !== 1 || dashConsultor !== 'todos') return null;
-    
-    const cid = dashContratosSelecionados[0];
-    const cObj = contratos.find(c => c.id === cid);
-    if (!cObj) return null;
-
-    const cycle = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
-    const fTimes = allTimesheets.filter(t => t.contract_id === cid && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
-    const fAlocs = allAlocacoes.filter(a => a.contract_id === cid && a.mes === dashMes && a.ano === dashAno);
-
-    const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-    if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
-    const dM = parseInt(dashMes); const dA = parseInt(dashAno);
-    const isPast = (dA < y) || (dA === y && dM < m);
-    const isCurrent = (dA === y && dM === m);
-
-    const rows = consultores.map(c => {
-      const uTimes = fTimes.filter(t => t.user_id === c.id);
-      const uAlocs = fAlocs.filter(a => a.user_id === c.id);
-      
-      let uGasto = uTimes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-      let uOrcado = 0;
-      let hasIlimitado = false;
-
-      uAlocs.forEach(a => {
-        const osObj = osList.find(o => o.id === a.os_id);
-        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cObj.tipo);
-        if (isSuportes) {
-           hasIlimitado = true;
-           const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-           uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-        } else {
-           if (isPast) {
-             const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-             uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-           } else if (isCurrent) uOrcado += a.horas_disponiveis;
-        }
-      });
-
-      // Handle specific case where a user logged hours but wasn't allocated directly (dynamic OS)
-      if (uAlocs.length === 0) {
-         const tSuportes = uTimes.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
-         if (tSuportes.length > 0) {
-            hasIlimitado = true;
-            uOrcado += tSuportes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-         }
-      }
-
-      if (uOrcado === 0 && uGasto === 0) return null;
-      return { nome: c.nome, orcado: uOrcado, gasto: uGasto, saldo: isSuportesOrIlimitado(cObj, hasIlimitado) ? 0 : uOrcado - uGasto, ilimitado: isSuportesOrIlimitado(cObj, hasIlimitado) };
-    }).filter(Boolean);
-
-    return rows;
-  }, [dashContratosSelecionados, dashConsultor, allTimesheets, allAlocacoes, consultores, contratos, dashMes, dashAno, osList]);
-
-  const tableByActivity = useMemo(() => {
-    if (dashConsultor === 'todos') return null;
-    
-    const uid = dashConsultor;
-    let fTimes = allTimesheets.filter(t => t.user_id === uid);
-    let fAlocs = allAlocacoes.filter(a => a.user_id === uid && a.mes === dashMes && a.ano === dashAno);
-
-    if (dashContratosSelecionados.length > 0) {
-      fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id));
-      fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id));
-    }
-
-    const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-    const dM = parseInt(dashMes); const dA = parseInt(dashAno);
-
-    const rows = fAlocs.map(a => {
-      const cObj = contratos.find(c => c.id === a.contract_id);
-      if (!cObj) return null;
-      
-      const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
-      const isPast = (dA < y) || (dA === y && dM < m) || (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio && dM === (m === 11 ? 0 : m+1) ? false : (dA === y && dM < m)); // Simplificado para usar a const isPast correta
-      
-      const isPastCalc = (cInicio: number, cFim: number) => {
-         let mm = m; let yy = y;
-         if (cInicio > cFim && currentDay >= cInicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
-         return (dA < yy) || (dA === yy && dM < mm);
-      };
-      const isCurrentCalc = (cInicio: number, cFim: number) => {
-         let mm = m; let yy = y;
-         if (cInicio > cFim && currentDay >= cInicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
-         return (dA === yy && dM === mm);
-      };
-
-      const cIsPast = isPastCalc(cObj.ciclo_inicio, cObj.ciclo_fim);
-      const cIsCurrent = isCurrentCalc(cObj.ciclo_inicio, cObj.ciclo_fim);
-
-      let tAtiv = fTimes.filter(t => t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-      if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
-      
-      const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-      
-      const osObj = osList.find(o => o.id === a.os_id);
-      const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cObj.tipo);
-      
-      let orcado = 0;
-      if (isSuportes) orcado = gasto;
-      else {
-        if (cIsPast) orcado = gasto;
-        else if (cIsCurrent) orcado = a.horas_disponiveis;
-      }
-
-      return {
-        contrato: cObj.codigo,
-        os: osObj?.codigo || '-',
-        atividade: a.atividade,
-        orcado, gasto, saldo: isSuportes ? 0 : orcado - gasto, ilimitado: isSuportes
-      };
-    }).filter(Boolean);
-
-    return rows;
-  }, [dashConsultor, dashContratosSelecionados, allTimesheets, allAlocacoes, contratos, osList, dashMes, dashAno]);
-
-  function isSuportesOrIlimitado(cObj: Contrato, hasIlimitadoLocal: boolean) {
-     return ['continuado_sem_os', 'fechado'].includes(cObj.tipo) || hasIlimitadoLocal;
-  }
-
-  // ==========================================
-  // 🌟 NOVO: ABA RESUMO INDIVIDUAL DO CONSULTOR
-  // ==========================================
-  const resumoConsultorData = useMemo(() => {
-     if (!resConsId) return null;
-     const consObj = consultores.find(c => c.id === resConsId);
-     if (!consObj) return null;
-
-     let orcadoTotal = 0;
-     let gastoTotal = 0;
-
-     // Lê apenas as alocações deste consultor neste mês
-     const alocsMes = allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo);
-     
-     const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-     const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
-
-     const contratosListados: any[] = [];
-
-     alocsMes.forEach(a => {
-        const cObj = contratos.find(c => c.id === a.contract_id);
-        if (!cObj) return;
-        const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
-        
-        let isPast = false; let isCurrent = false;
-        let mm = m; let yy = y;
-        if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
-        isPast = (pA < yy) || (pA === yy && pM < mm);
-        isCurrent = (pA === yy && pM === mm);
-
-        let tAtiv = allTimesheets.filter(t => t.user_id === resConsId && t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-        if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
-        
-        const gastoH = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-        
-        const osObj = osList.find(o => o.id === a.os_id);
-        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cObj.tipo);
-        
-        let orcadoH = 0;
-        if (isSuportes) orcadoH = gastoH;
-        else {
-           if (isPast) orcadoH = gastoH;
-           else if (isCurrent) orcadoH = a.horas_disponiveis;
-        }
-
-        orcadoTotal += orcadoH;
-        gastoTotal += gastoH;
-
-        const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
-        if (extIdx === -1) {
-           contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoH, gasto: gastoH, ilimitado: isSuportes });
-        } else {
-           contratosListados[extIdx].orcado += orcadoH;
-           contratosListados[extIdx].gasto += gastoH;
-           if(isSuportes) contratosListados[extIdx].ilimitado = true;
-        }
-     });
-
-     const saldoTotal = orcadoTotal - gastoTotal;
-     const percGasto = orcadoTotal > 0 ? (gastoTotal / orcadoTotal) * 100 : 0;
-     const pieData = [{name: 'Gasto', value: gastoTotal}, {name: 'Saldo', value: Math.max(0, saldoTotal)}].filter(d=>d.value>0);
-     if (pieData.length===0) pieData.push({name:'Zerado', value:1});
-
-     return {
-        nome: consObj.nome, iniciais: consObj.nome.substring(0,2).toUpperCase(), meta: consObj.horas_minimas_mes,
-        orcadoTotal, gastoTotal, saldoTotal: Math.max(0, saldoTotal), percGasto, pieData, contratosListados
-     }
-
-  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores]);
-
-  // Lógica Base para Dashboard FATURAMENTO (Cliente)
-  const fatContratosVisao = contratos.filter(c => c.status_ativo && fatVisaoTipos.includes(c.tipo) && (fatFonte === 'todas' ? true : c.fonte_pagamento === fatFonte))
-  const fatData = useMemo(() => {
-    let fTimes = allTimesheets.filter(t => fatContratosVisao.some(cv => cv.id === t.contract_id))
-    if (fatContratosSelecionados.length > 0) fTimes = fTimes.filter(t => fatContratosSelecionados.includes(t.contract_id))
-    
-    const isFechadoMode = fatVisaoTipos.includes('fechado') && fatVisaoTipos.length === 1;
-
-    const consultoresPagamento = consultores.map(c => {
-      let valorGrafico = 0;
-      if (!isFechadoMode) {
-        const logs = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, fatMes, fatAno, contratos.find(con => con.id === t.contract_id)?.ciclo_fat_inicio || 1, contratos.find(con => con.id === t.contract_id)?.ciclo_fat_fim || 31))
-        valorGrafico = logs.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
-      }
-      return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)) }
-    }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
-
-    return { consultoresPagamento, isFechadoMode }
-  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, consultores, fatVisaoTipos, fatContratosVisao, contratos])
-
-  const radarAlertas = useMemo(() => {
-    const ociosos: any[] = []; const estourados: any[] = [];
-    const now = new Date(); const currentDay = now.getDate(); const currentMonth = now.getMonth(); const currentYear = now.getFullYear();
-    let startDt, endDt;
-    const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
-
-    if (25 > 24) { 
-      if (currentDay >= 25) { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, 24, 23, 59, 59); } 
-      else { startDt = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
-    } else { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
-
-    const meioDoCicloMs = startDt.getTime() + (endDt.getTime() - startDt.getTime()) / 2;
-    const jaPassouDaMetade = Date.now() >= meioDoCicloMs;
-
-    const refMonth = currentDay >= 25 ? (currentMonth === 11 ? 0 : currentMonth + 1) : currentMonth;
-    const refYear = currentDay >= 25 && currentMonth === 11 ? currentYear + 1 : currentYear;
-
-    consultores.forEach(c => {
-      if (c.horas_minimas_mes > 0) {
-        const horasTrabalhadas = allTimesheets.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, refMonth.toString(), refYear.toString(), 25, 24)).reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
-        const percentual = (horasTrabalhadas / c.horas_minimas_mes) * 100;
-        if (percentual < 30 && jaPassouDaMetade) ociosos.push({ id: c.id, nome: c.nome, trabalhadas: horasTrabalhadas.toFixed(1), meta: c.horas_minimas_mes, percentual: percentual.toFixed(1) })
-      }
-    });
-
-    contratos.filter(c => c.status_ativo && ['horas', 'continuado_limite_mensal', 'continuado_com_os', 'overhead'].includes(c.tipo)).forEach(cont => {
-      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, refMonth.toString(), refYear.toString());
-      // Radar usa alocação MENSALIZADA!
-      let orcadoAtual = allAlocacoes.filter(a => a.contract_id === cont.id && a.mes === refMonth.toString() && a.ano === refYear.toString()).reduce((sum, a) => sum + a.horas_disponiveis, 0);
-      
-      const tsAtual = allTimesheets.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
-      const consumidoAtual = tsAtual.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
-
-      const tsSuportes = tsAtual.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
-      const gastoSuportes = tsSuportes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
-      
-      orcadoAtual += gastoSuportes;
-
-      if (orcadoAtual > 0) {
-        const perc = (consumidoAtual / orcadoAtual) * 100;
-        if (perc >= 70) estourados.push({ contrato: cont.nome, consumido: consumidoAtual.toFixed(1), orcado: orcadoAtual, perc: perc.toFixed(1), tipo: cont.tipo })
-      }
-    });
-    
-    return { ociosos, estourados, jaPassouDaMetade };
-  }, [consultores, contratos, allTimesheets, allAlocacoes, osList]);
-
-  const gestaoAtividadesDisponiveis = useMemo(() => {
-    if (!gestaoContrato) return ['Sem atividade específica'];
-    const isComOsType = contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os';
-    const alocs = allAlocacoes.filter(a => 
-      a.contract_id === gestaoContrato && 
-      (gestaoConsultor ? a.user_id === gestaoConsultor : true) &&
-      (!isComOsType || !gestaoOs || a.os_id === gestaoOs)
-    );
-    const acts = Array.from(new Set(alocs.map(a => a.atividade)));
-    return acts.length > 0 ? acts as string[] : ['Sem atividade específica'];
-  }, [gestaoContrato, gestaoConsultor, gestaoOs, allAlocacoes, contratos])
-
-  useEffect(() => {
-    if (gestaoAtividadesDisponiveis.length > 0 && !gestaoAtividadesDisponiveis.includes(gestaoAtividade)) setGestaoAtividade(gestaoAtividadesDisponiveis[0]);
-  }, [gestaoAtividadesDisponiveis, gestaoAtividade])
-
   const handleImportarTimesheetExcel = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    // Código de importação igual à versão anterior, mantido para estabilidade.
     const file = event.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = async (e) => {
       const buffer = e.target?.result as ArrayBuffer;
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(buffer);
       const sheet = workbook.worksheets[0];
-
       const toInsert: any[] = [];
       let errors = 0;
 
       sheet.eachRow((row, rowNumber) => {
-        if (rowNumber === 1) return; // Pula o cabeçalho
-
-        // Helper para extrair valor das células com segurança
+        if (rowNumber === 1) return;
         const getVal = (colIndex: number) => {
           const cell = row.getCell(colIndex);
           if (!cell.value) return '';
@@ -974,22 +709,16 @@ export function AdminDashboard() {
         const consultorNome = String(getVal(1));
         const dataVal = getVal(2);
         const contratoCodigo = String(getVal(3)).toUpperCase();
-        // A coluna 4 é o Nome do Contrato, o sistema ignora pois usa o Código para achar o ID
         const osCodigo = String(getVal(5)).toUpperCase();
         const atividadeStr = String(getVal(6)) || 'Sem atividade específica';
         const inicioVal = getVal(7);
         const fimVal = getVal(8);
         const observacao = String(getVal(9));
 
-        // Conversão segura de Data
         let dataStr = '';
-        if (dataVal instanceof Date) {
-          dataStr = dataVal.toLocaleDateString('pt-BR');
-        } else {
-          dataStr = String(dataVal);
-        }
+        if (dataVal instanceof Date) dataStr = dataVal.toLocaleDateString('pt-BR');
+        else dataStr = String(dataVal);
 
-        // Conversão segura de Tempo (lida com fração de hora nativa do Excel)
         const parseTime = (val: any) => {
           if (val instanceof Date) return val.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
           if (typeof val === 'number') {
@@ -1013,10 +742,7 @@ export function AdminDashboard() {
           if (os) osId = os.id;
         }
 
-        if (!consultor || !contrato || !dataStr || !inicioStr || !fimStr) {
-          errors++;
-          return;
-        }
+        if (!consultor || !contrato || !dataStr || !inicioStr || !fimStr) { errors++; return; }
 
         try {
           const sep = dataStr.includes('/') ? '/' : '-';
@@ -1027,7 +753,6 @@ export function AdminDashboard() {
 
           const startDt = new Date(parseInt(anoFinal), parseInt(mes) - 1, parseInt(dia), parseInt(hIni), parseInt(mIni));
           const endDt = new Date(parseInt(anoFinal), parseInt(mes) - 1, parseInt(dia), parseInt(hFim), parseInt(mFim));
-
           if (endDt <= startDt) endDt.setDate(endDt.getDate() + 1);
 
           toInsert.push({
@@ -1035,29 +760,72 @@ export function AdminDashboard() {
             contract_name: `${contrato.codigo} — ${contrato.nome}`, activity: atividadeStr,
             notes: observacao, start_at: startDt.toISOString(), end_at: endDt.toISOString(), edited: true
           });
-        } catch (err) {
-          errors++;
-        }
+        } catch (err) { errors++; }
       });
 
       if (toInsert.length > 0) {
         setLoading(true);
         const { error } = await supabase.from('timesheets').insert(toInsert);
-        if (error) {
-          alert("Erro no banco de dados: " + error.message);
-        } else {
-          alert(`✅ ${toInsert.length} apontamentos importados!\n❌ ${errors} linhas ignoradas com erro.`);
-          carregarTudoParaDash();
-        }
+        if (error) alert("Erro no banco de dados: " + error.message);
+        else { toast.success(`✅ ${toInsert.length} apontamentos importados!\n❌ ${errors} linhas com erro.`); carregarTudoParaDash(); }
         setLoading(false);
-      } else {
-        alert(`Nenhum apontamento válido encontrado.`);
-      }
-      event.target.value = ''; // Reseta input
+      } else alert(`Nenhum apontamento válido encontrado.`);
+      event.target.value = ''; 
     };
     reader.readAsArrayBuffer(file);
   };
 
+  const gestaoSaldos = useMemo(() => {
+    if (!gestaoConsultor || !gestaoContrato || !gestaoAtividade || !gestaoData) return null;
+    const cObj = contratos.find(c => c.id === gestaoContrato);
+    if (!cObj) return null;
+    
+    const [y, mStr, d] = gestaoData.split('-');
+    let m = parseInt(mStr) - 1; let yNum = parseInt(y); let day = parseInt(d);
+    if (cObj.ciclo_inicio > cObj.ciclo_fim && day >= cObj.ciclo_inicio) {
+       m = m === 11 ? 0 : m + 1;
+       if (m === 0) yNum++;
+    }
+    const refMonth = m.toString(); const refYear = yNum.toString();
+    const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, refMonth, refYear);
+
+    const isComOs = cObj.tipo === 'continuado_com_os';
+    const osObj = osList.find(o => o.id === gestaoOs);
+    const isSemOs = osObj?.codigo === '🛠️ Pequenos Suportes' || cObj.tipo === 'overhead';
+
+    const alocs = allAlocacoes.filter(a => a.user_id === gestaoConsultor && a.contract_id === gestaoContrato && a.mes === refMonth && a.ano === refYear);
+    const alocAtiv = alocs.find(a => a.atividade === gestaoAtividade && (!isComOs || a.os_id === (gestaoOs || null)));
+
+    let orcado = isSemOs ? 9999 : (alocAtiv ? alocAtiv.horas_disponiveis : 0);
+    
+    let tAtiv = allTimesheets.filter(t => t.user_id === gestaoConsultor && t.contract_id === gestaoContrato && t.activity === gestaoAtividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+    if (isComOs && gestaoOs) tAtiv = tAtiv.filter(t => t.os_id === gestaoOs);
+    
+    let gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+
+    if (gestaoEditandoId) {
+       const editingEntry = allTimesheets.find(t => t.id === gestaoEditandoId);
+       if (editingEntry) {
+          gasto -= (new Date(editingEntry.end_at!).getTime() - new Date(editingEntry.start_at).getTime()) / 3600000;
+       }
+    }
+
+    let orcadoGlobal = 0; let gastoGlobal = 0;
+    if (!isSemOs) {
+       orcadoGlobal = isComOs ? alocs.filter(a => a.os_id === (gestaoOs || null)).reduce((sum, a) => sum + a.horas_disponiveis, 0) : alocs.reduce((sum, a) => sum + a.horas_disponiveis, 0);
+       let tGlob = allTimesheets.filter(t => t.user_id === gestaoConsultor && t.contract_id === gestaoContrato && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+       if (isComOs && gestaoOs) tGlob = tGlob.filter(t => t.os_id === gestaoOs);
+       gastoGlobal = tGlob.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+       
+       if (gestaoEditandoId) {
+          const editingEntry = allTimesheets.find(t => t.id === gestaoEditandoId);
+          if (editingEntry) gastoGlobal -= (new Date(editingEntry.end_at!).getTime() - new Date(editingEntry.start_at).getTime()) / 3600000;
+       }
+    }
+
+    return { orcado, gasto, saldo: orcado - gasto, orcadoGlobal, gastoGlobal, saldoGlobal: orcadoGlobal - gastoGlobal, isSemOs };
+  }, [gestaoConsultor, gestaoContrato, gestaoOs, gestaoAtividade, gestaoData, gestaoEditandoId, contratos, osList, allAlocacoes, allTimesheets]);
+  
   async function salvarApontamentoAdmin() {
     if(!gestaoConsultor || !gestaoContrato || !gestaoAtividade || !gestaoData || !gestaoInicio || !gestaoFim) return alert("Preencha todos os campos obrigatórios.");
     const startMs = new Date(`${gestaoData}T${gestaoInicio}:00`).getTime();
@@ -1076,10 +844,10 @@ export function AdminDashboard() {
     try {
       if(gestaoEditandoId) {
         await supabase.from('timesheets').update(payload).eq('id', gestaoEditandoId);
-        alert("Atualizado com sucesso!"); setGestaoEditandoId(null);
+        toast.success("Atualizado com sucesso!"); setGestaoEditandoId(null);
       } else {
         await supabase.from('timesheets').insert([{ ...payload, id: crypto.randomUUID() }]);
-        alert("Criado com sucesso!");
+        toast.success("Criado com sucesso!");
       }
       setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); setGestaoOs(''); await carregarTudoParaDash();
     } catch (e) { alert("Erro ao processar."); } finally { setSalvando(false); }
@@ -1106,6 +874,473 @@ export function AdminDashboard() {
       .sort((a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()).slice(0, 50);
   }, [allTimesheets, gestaoConsultor])
 
+  // --- FUNÇÕES E CÁLCULOS RESTAURADOS ---
+  async function atualizarMetaConsultor(id: string, valor: number) {
+    setConsultores(p => p.map(c => c.id === id ? { ...c, horas_minimas_mes: valor } : c));
+    const { data, error } = await supabase.from('consultores').update({ horas_minimas_mes: valor }).eq('id', id).select();
+    if (error) toast.error("❌ Erro do banco: " + error.message);
+    else if (!data || data.length === 0) toast.error("❌ Falha Silenciosa no Supabase.");
+    else toast.success("✅ Meta salva com segurança!");
+  }
+
+  // Carrega sempre que mudar de consultor, mês ou ano
+  useEffect(() => { if (menuAtivo === 'medicoes' && medConsultor) carregarMedicoes() }, [menuAtivo, medConsultor, medMes, medAno])
+  
+  async function carregarMedicoes() {
+    setMedLoading(true)
+    // Busca TODOS os contratos que esse consultor tem alocação no mês, ou que o tipo seja preço fechado na matriz
+    const { data: alocs } = await supabase.from('alocacoes').select('contract_id, os_id, atividade').eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno)
+    const { data: matrizFechado } = await supabase.from('linha_base_items').select('contract_id, os_id').eq('user_id', medConsultor).eq('tipo_pagamento', 'fechado')
+    
+    const vinculados: any[] = [];
+    
+    // 1. Adiciona contratos e OS que nasceram puramente como Preço Fechado
+    (matrizFechado || []).forEach(m => {
+       const c = contratos.find(x => x.id === m.contract_id);
+       const o = osList.find(x => x.id === m.os_id);
+       if (c) {
+          const key = m.os_id ? `${c.id}_${m.os_id}` : c.id;
+          if (!vinculados.find(v => v.key === key)) vinculados.push({ key, contract_id: c.id, os_id: m.os_id, codigo: c.codigo, nome: c.nome, os_codigo: o?.codigo });
+       }
+    });
+
+    // 2. Adiciona as alocações híbridas de OS que têm a atividade mágica
+    (alocs || []).filter(a => a.atividade === 'Preço Fechado (Medição)').forEach(a => {
+       const c = contratos.find(x => x.id === a.contract_id);
+       const o = osList.find(x => x.id === a.os_id);
+       if (c) {
+          const key = a.os_id ? `${c.id}_${a.os_id}` : c.id;
+          if (!vinculados.find(v => v.key === key)) vinculados.push({ key, contract_id: c.id, os_id: a.os_id, codigo: c.codigo, nome: c.nome, os_codigo: o?.codigo });
+       }
+    });
+    setMedContratosVinculados(vinculados);
+    
+    const { data: meds } = await supabase.from('medicoes').select('*').eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno)
+    const inputs: Record<string, number> = {}; 
+    (meds || []).forEach(m => { 
+       const key = m.os_id ? `${m.contract_id}_${m.os_id}` : m.contract_id;
+       inputs[key] = m.percentual;
+    })
+    setMedicoesInput(inputs); 
+    setMedLoading(false)
+  }
+  
+  async function salvarMedicoes() {
+    setSalvando(true)
+    await supabase.from('medicoes').delete().eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno)
+    
+    const inserts = medContratosVinculados.map(v => ({ contract_id: v.contract_id, os_id: v.os_id || null, user_id: medConsultor, mes: medMes, ano: medAno, percentual: medicoesInput[v.key] || 0 })).filter(m => m.percentual > 0)
+    
+    if (inserts.length > 0) await supabase.from('medicoes').insert(inserts)
+    toast.success("Medições do consultor salvas com sucesso!"); await carregarTudoParaDash(); setSalvando(false)
+  }
+
+  const gestaoAtividadesDisponiveis = useMemo(() => {
+    if (!gestaoContrato) return ['Sem atividade específica'];
+    const isComOsType = contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os';
+    const alocs = allAlocacoes.filter(a => 
+      a.contract_id === gestaoContrato && 
+      (gestaoConsultor ? a.user_id === gestaoConsultor : true) &&
+      (!isComOsType || !gestaoOs || a.os_id === gestaoOs)
+    );
+    const acts = Array.from(new Set(alocs.map(a => a.atividade)));
+    return acts.length > 0 ? acts as string[] : ['Sem atividade específica'];
+  }, [gestaoContrato, gestaoConsultor, gestaoOs, allAlocacoes, contratos])
+
+  const dashData = useMemo(() => {
+    let fTimes = allTimesheets.filter(t => contratosVisao.some(cv => cv.id === t.contract_id))
+    let fAlocs = allAlocacoes.filter(a => a.mes === dashMes && a.ano === dashAno && contratosVisao.some(cv => cv.id === a.contract_id));
+
+    if (dashContratosSelecionados.length > 0) {
+      fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id)); 
+      fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id)); 
+    }
+    if (dashOs !== 'todas') { 
+      fTimes = fTimes.filter(t => t.os_id === dashOs); 
+      fAlocs = fAlocs.filter(a => a.os_id === dashOs); 
+    }
+    if (dashConsultor !== 'todos') { 
+      fTimes = fTimes.filter(t => t.user_id === dashConsultor); 
+      fAlocs = fAlocs.filter(a => a.user_id === dashConsultor); 
+    }
+
+    const consultoresPagamento: Array<{id: string, nome: string, nomeCurto: string, valorGrafico: number, tooltipExtra: string}> = consultores.map(c => {
+      const logs = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, dashMes, dashAno, contratos.find(con => con.id === t.contract_id)?.ciclo_inicio || 25, contratos.find(con => con.id === t.contract_id)?.ciclo_fim || 24))
+      const valorGrafico = logs.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
+      return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)), tooltipExtra: "" }
+    }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
+
+    let orcadoGlobal = 0; let gastoGlobal = 0;
+
+    contratosVisao.forEach(cont => {
+      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
+      const timesContrato = fTimes.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
+      const gastoAtual = timesContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+      
+      const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
+      if (cont.ciclo_inicio > cont.ciclo_fim && currentDay >= cont.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
+      const dM = parseInt(dashMes); const dA = parseInt(dashAno);
+      const isPast = (dA < y) || (dA === y && dM < m);
+      const isCurrent = (dA === y && dM === m);
+
+      let orcadoAtual = 0;
+      const alocsContrato = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)');
+      
+      alocsContrato.forEach(a => {
+        const os = osList.find(o => o.id === a.os_id);
+        if (os?.codigo === '🛠️ Pequenos Suportes' || cont.tipo === 'overhead') {
+           const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+           orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+        } else {
+           if (isPast) {
+             const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+             orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+           } else if (isCurrent) orcadoAtual += a.horas_disponiveis;
+        }
+      });
+
+      orcadoGlobal += orcadoAtual;
+      gastoGlobal += gastoAtual;
+    });
+
+    const saldoPositivo = orcadoGlobal - gastoGlobal > 0 ? orcadoGlobal - gastoGlobal : 0;
+    
+    let pieData: Array<{name: string, value: number}> = [ { name: 'Consumido', value: Number(gastoGlobal.toFixed(2)) }, { name: 'Saldo Restante', value: Number(saldoPositivo.toFixed(2)) } ]
+    pieData = pieData.filter(p => p.value > 0); 
+    if (pieData.length === 0) pieData.push({ name: 'Sem Registros', value: 1 });
+
+    return { 
+      consultoresPagamento, maxValor: Math.max(...consultoresPagamento.map(c => c.valorGrafico), 1), 
+      orcadoGlobal, gastoGlobal: Number(gastoGlobal.toFixed(2)),
+      saldoGlobal: Number((orcadoGlobal - gastoGlobal).toFixed(2)),
+      percentualGlobal: orcadoGlobal > 0 ? ((gastoGlobal / orcadoGlobal) * 100).toFixed(1) : '0', pieData
+    }
+  }, [allTimesheets, allAlocacoes, dashMes, dashAno, dashContratosSelecionados, dashOs, dashConsultor, consultores, dashVisaoTipos, contratosVisao, contratos, osList])
+
+  const exportarPainelConsultor = async (tipo: 'detalhada' | 'consolidada') => {
+    const cObj = consultores.find(c => c.id === resConsId);
+    if (!cObj) return;
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet(`Relatório ${cObj.nome.split(' ')[0]}`);
+
+    if (tipo === 'detalhada') {
+      sheet.columns = [
+        { header: 'Data', key: 'data', width: 15 },
+        { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
+        { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
+        { header: 'OS', key: 'os', width: 15 },
+        { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
+        { header: 'Entrada', key: 'inicio', width: 12 },
+        { header: 'Saída', key: 'fim', width: 12 },
+        { header: 'Memorial Descritivo', key: 'obs', width: 50 },
+      ];
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+      
+      const alocsMes = allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo);
+      const contratosValidos = Array.from(new Set(alocsMes.map(a => a.contract_id)));
+      
+      let registros = allTimesheets.filter(t => t.user_id === resConsId && contratosValidos.includes(t.contract_id));
+      
+      registros.forEach(t => {
+        const cont = contratos.find(c => c.id === t.contract_id);
+        if (!cont) return;
+        if (!isWithinCycle(t.start_at, resConsMes, resConsAno, cont.ciclo_inicio, cont.ciclo_fim)) return;
+
+        const os = osList.find(o => o.id === t.os_id)?.codigo || '-';
+        const inicio = new Date(t.start_at); 
+        const fim = new Date(t.end_at!);
+
+        sheet.addRow({
+          data: inicio.toLocaleDateString('pt-BR'), cod_contrato: cont.codigo, nome_contrato: cont.nome,
+          os: os, atividade: t.activity, inicio: inicio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          fim: fim.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), obs: t.notes || ''
+        });
+      });
+    } else {
+       sheet.columns = [
+         { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
+         { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
+         { header: 'Orçado', key: 'orcado', width: 15 },
+         { header: 'Gasto', key: 'gasto', width: 15 },
+         { header: 'Saldo', key: 'saldo', width: 15 },
+       ];
+       sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+       sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
+
+       resumoConsultorData?.contratosListados.forEach(ct => {
+          sheet.addRow({
+             cod_contrato: ct.codigo, nome_contrato: ct.nome,
+             orcado: ct.ilimitado ? 'Ilimitado' : `${ct.orcado.toFixed(1)}h`,
+             gasto: `${ct.gasto.toFixed(1)}h`,
+             saldo: ct.ilimitado ? '-' : `${(ct.orcado - ct.gasto).toFixed(1)}h`
+          });
+       });
+    }
+    
+    sheet.eachRow((row, rowNumber) => {
+      row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+      row.eachCell((cell) => { cell.border = { top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}}, bottom: {style:'thin', color: {argb:'FFE2E8F0'}}, right: {style:'thin', color: {argb:'FFE2E8F0'}} }; });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, `Relatorio_${tipo}_${cObj.nome.split(' ')[0]}_${MESES_NOME[parseInt(resConsMes)]}_${resConsAno}.xlsx`);
+  }
+  const resumoConsultorData = useMemo(() => {
+     if (!resConsId) return null;
+     const consObj = consultores.find(c => c.id === resConsId);
+     if (!consObj) return null;
+
+     let orcadoTotal = 0; let gastoTotal = 0;
+     const alocsMes = allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo);
+     
+     const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
+     const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
+
+     const contratosListados: Array<{id: string, codigo: string, nome: string, orcado: number, gasto: number, ilimitado: boolean}> = [];
+
+     alocsMes.forEach(a => {
+        const cObj = contratos.find(c => c.id === a.contract_id);
+        if (!cObj) return;
+        const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
+        
+        let isPast = false; let isCurrent = false; let mm = m; let yy = y;
+        if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
+        isPast = (pA < yy) || (pA === yy && pM < mm);
+        isCurrent = (pA === yy && pM === mm);
+
+        let tAtiv = allTimesheets.filter(t => t.user_id === resConsId && t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+        if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
+        
+        const gastoH = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+        const osObj = osList.find(o => o.id === a.os_id);
+        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
+        
+        let orcadoH = 0;
+        if (isSuportes) orcadoH = gastoH;
+        else {
+           if (isPast) orcadoH = gastoH;
+           else if (isCurrent) orcadoH = a.horas_disponiveis;
+        }
+
+        orcadoTotal += orcadoH; gastoTotal += gastoH;
+
+        const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
+        if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoH, gasto: gastoH, ilimitado: isSuportes });
+        else {
+           contratosListados[extIdx].orcado += orcadoH;
+           contratosListados[extIdx].gasto += gastoH;
+           if(isSuportes) contratosListados[extIdx].ilimitado = true;
+        }
+     });
+
+     const saldoTotal = orcadoTotal - gastoTotal;
+     const percGasto = orcadoTotal > 0 ? (gastoTotal / orcadoTotal) * 100 : 0;
+     const pieData: Array<{name: string, value: number}> = [{name: 'Gasto', value: gastoTotal}, {name: 'Saldo', value: Math.max(0, saldoTotal)}].filter(d=>d.value>0);
+     if (pieData.length===0) pieData.push({name:'Zerado', value:1});
+
+     return { nome: consObj.nome, iniciais: consObj.nome.substring(0,2).toUpperCase(), meta: consObj.horas_minimas_mes, orcadoTotal, gastoTotal, saldoTotal: Math.max(0, saldoTotal), percGasto, pieData, contratosListados }
+  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores]);
+
+  const fatContratosVisao = contratos.filter(c => c.status_ativo && fatVisaoTipos.includes(c.tipo) && (fatFonte === 'todas' ? true : c.fonte_pagamento === fatFonte))
+  
+  const fatData = useMemo(() => {
+    let fTimes = allTimesheets.filter(t => fatContratosVisao.some(cv => cv.id === t.contract_id))
+    if (fatContratosSelecionados.length > 0) fTimes = fTimes.filter(t => fatContratosSelecionados.includes(t.contract_id))
+
+    const consultoresPagamento: Array<{id: string, nome: string, nomeCurto: string, valorGrafico: number}> = consultores.map(c => {
+      const logs = fTimes.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, fatMes, fatAno, contratos.find(con => con.id === t.contract_id)?.ciclo_fat_inicio || 1, contratos.find(con => con.id === t.contract_id)?.ciclo_fat_fim || 31))
+      const valorGrafico = logs.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0)
+      return { id: c.id, nome: c.nome, nomeCurto: c.nome.split(' ')[0], valorGrafico: Number(valorGrafico.toFixed(2)) }
+    }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
+
+    return { consultoresPagamento }
+  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, consultores, fatVisaoTipos, fatContratosVisao, contratos])
+
+  const radarAlertas = useMemo(() => {
+    const ociosos: Array<{id: string, nome: string, trabalhadas: string, meta: number, percentual: string}> = []; 
+    const estouradosConsultor: Array<{nome: string, orcado: number, consumido: string, perc: string}> = [];
+    const estouradosContrato: Array<{codigo: string, orcado: number, consumido: string, perc: string}> = [];
+    const estouradosAssessoria: Array<{codigo: string, orcado: number, consumido: string, perc: string}> = [];
+    const estouradosOS: Array<{contrato: string, os: string, orcado: number, consumido: string, perc: string}> = [];
+    
+    const now = new Date(); const currentDay = now.getDate(); const currentMonth = now.getMonth(); const currentYear = now.getFullYear();
+    let startDt, endDt;
+    if (25 > 24) { 
+      if (currentDay >= 25) { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, 24, 23, 59, 59); } 
+      else { startDt = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
+    } else { startDt = new Date(currentYear, currentMonth, 25, 0, 0, 0); endDt = new Date(currentYear, currentMonth, 24, 23, 59, 59); }
+
+    const meioDoCicloMs = startDt.getTime() + (endDt.getTime() - startDt.getTime()) / 2;
+    const jaPassouDaMetade = Date.now() >= meioDoCicloMs;
+
+    const refMonth = currentDay >= 25 ? (currentMonth === 11 ? 0 : currentMonth + 1) : currentMonth;
+    const refYear = currentDay >= 25 && currentMonth === 11 ? currentYear + 1 : currentYear;
+
+    // 1. Alertas de Consultores (Ociosidade e Estouro de Saldo Mensal)
+    consultores.forEach(c => {
+      const tsMes = allTimesheets.filter(t => t.user_id === c.id && isWithinCycle(t.start_at, refMonth.toString(), refYear.toString(), 25, 24));
+      const horasTrabalhadas = tsMes.reduce((acc, curr) => acc + (new Date(curr.end_at!).getTime() - new Date(curr.start_at).getTime()) / 3600000, 0);
+      
+      if (c.horas_minimas_mes > 0) {
+        const percentual = (horasTrabalhadas / c.horas_minimas_mes) * 100;
+        if (percentual < 30 && jaPassouDaMetade) ociosos.push({ id: c.id, nome: c.nome, trabalhadas: horasTrabalhadas.toFixed(1), meta: c.horas_minimas_mes, percentual: percentual.toFixed(1) })
+      }
+      
+      const alocMesAtual = allAlocacoes.filter(a => a.user_id === c.id && a.mes === refMonth.toString() && a.ano === refYear.toString() && a.atividade !== 'Preço Fechado (Medição)');
+      const orcadoMensalTotal = alocMesAtual.reduce((sum, a) => sum + a.horas_disponiveis, 0);
+      if (orcadoMensalTotal > 0) {
+         const percGasto = (horasTrabalhadas / orcadoMensalTotal) * 100;
+         if (percGasto >= 70) estouradosConsultor.push({ nome: c.nome, orcado: orcadoMensalTotal, consumido: horasTrabalhadas.toFixed(1), perc: percGasto.toFixed(1) });
+      }
+    });
+
+    // 2. Alertas de Contratos (Horas e Assessoria) e OS
+    contratos.filter(c => c.status_ativo).forEach(cont => {
+      if (cont.tipo === 'fechado' || cont.tipo === 'overhead') return; // Ignora esses dois
+
+      const tsContrato = allTimesheets.filter(t => t.contract_id === cont.id);
+      
+      if (cont.tipo === 'horas') {
+         // Contrato de Horas usa o somatório da Linha de Base como teto
+         let tetoContrato = 0;
+         const { data: bases } = supabase.from('linha_base').select('id').eq('contract_id', cont.id).order('versao', { ascending: false }).limit(1) as any;
+         // Simulando a leitura rápida (na vida real você faz um join, mas podemos inferir das alocações globais se não bater no banco aqui)
+         // Para simplificar no Frontend sem await no useMemo, usamos o teto_global_horas se existir, ou ignoramos se for 0.
+         // (Seu contrato de horas não tem mais teto global nativo, então ele alerta pelo somatório do mês)
+      }
+
+      if (cont.tipo === 'continuado_com_os') {
+         const tsAssessoria = tsContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+         if (cont.teto_global_horas > 0) {
+            const percAsses = (tsAssessoria / cont.teto_global_horas) * 100;
+            if (percAsses >= 70) estouradosAssessoria.push({ codigo: cont.codigo, orcado: cont.teto_global_horas, consumido: tsAssessoria.toFixed(1), perc: percAsses.toFixed(1) });
+         }
+
+         // Varre as OSs
+         const osDoContrato = osList.filter(o => o.contract_id === cont.id && o.codigo !== '🛠️ Pequenos Suportes');
+         osDoContrato.forEach(os => {
+            const tsOs = tsContrato.filter(t => t.os_id === os.id).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+            // Pega o teto da matriz da OS (somando as horas teto das alocacoes da vida toda dessa OS)
+            const alocsOS = allAlocacoes.filter(a => a.os_id === os.id && a.atividade !== 'Preço Fechado (Medição)');
+            // Usa o max por consultor para achar o teto (aproximação rapida do frontend)
+            const mapTeto = new Map();
+            alocsOS.forEach(a => { if(!mapTeto.has(a.user_id) || mapTeto.get(a.user_id) < a.horas_disponiveis) mapTeto.set(a.user_id, a.horas_disponiveis) });
+            const orcadoOS = Array.from(mapTeto.values()).reduce((sum, v) => sum + v, 0);
+            
+            if (orcadoOS > 0) {
+               const percOs = (tsOs / orcadoOS) * 100;
+               if (percOs >= 70) estouradosOS.push({ contrato: cont.codigo, os: os.codigo, orcado: orcadoOS, consumido: tsOs.toFixed(1), perc: percOs.toFixed(1) });
+            }
+         });
+      }
+    });
+    
+    return { ociosos, estouradosConsultor, estouradosAssessoria, estouradosOS, jaPassouDaMetade };
+  }, [consultores, contratos, allTimesheets, allAlocacoes, osList]);
+
+  const exportarMatrizConsolidada = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Matriz Consolidada');
+
+    const consultoresAtivos = consultores.filter(c => c.status_ativo !== false);
+
+    // Linha 1: Mês
+    sheet.getCell('A1').value = 'Mês:';
+    sheet.getCell('A1').font = { bold: true };
+    sheet.getCell('B1').value = `${MESES_NOME[parseInt(dashMes)]}/${dashAno}`;
+    
+    // Linha 2: Cabeçalhos Mestres
+    sheet.mergeCells('A2:D2');
+    sheet.getCell('A2').value = 'CONTRATOS';
+    sheet.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('A2').font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+
+    consultoresAtivos.forEach((c, i) => {
+      const cell = sheet.getCell(2, 5 + i);
+      cell.value = c.nome;
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
+    });
+
+    // Linha 3: Sub-cabeçalhos
+    sheet.getCell('A3').value = 'Nº do Contrato';
+    sheet.getCell('B3').value = 'Descrição do Contrato';
+    sheet.getCell('C3').value = 'Contratada Pela';
+    sheet.getCell('D3').value = 'OS';
+    
+    consultoresAtivos.forEach((c, i) => {
+      sheet.getCell(3, 5 + i).value = 'Entregue / Medido';
+    });
+
+    sheet.getRow(3).font = { bold: true };
+    sheet.getColumn('A').width = 15;
+    sheet.getColumn('B').width = 35;
+    sheet.getColumn('C').width = 15;
+    sheet.getColumn('D').width = 20;
+    consultoresAtivos.forEach((_, i) => sheet.getColumn(5 + i).width = 15);
+
+    // Preenchimento dos Dados
+    contratosVisao.forEach(cont => {
+       const osDoContrato = osList.filter(o => o.contract_id === cont.id);
+       
+       if (osDoContrato.length > 0) {
+          osDoContrato.forEach(os => {
+             const rowValues = [cont.codigo, cont.nome, cont.fonte_pagamento, os.codigo];
+             consultoresAtivos.forEach(cons => {
+                const cb = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
+                const tAtiv = allTimesheets.filter(t => t.user_id === cons.id && t.contract_id === cont.id && t.os_id === os.id && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                
+                const isFechado = allAlocacoes.some(a => a.user_id === cons.id && a.contract_id === cont.id && a.mes === dashMes && a.ano === dashAno && a.atividade === 'Preço Fechado (Medição)');
+                if (isFechado) {
+                   const med = allMedicoes.find(m => m.user_id === cons.id && m.contract_id === cont.id && m.mes === dashMes && m.ano === dashAno);
+                   rowValues.push((med?.percentual || 0) + '%');
+                } else {
+                   rowValues.push(gasto > 0 ? gasto.toFixed(1) + 'h' : '-');
+                }
+             });
+             sheet.addRow(rowValues);
+          });
+       } else {
+          const rowValues = [cont.codigo, cont.nome, cont.fonte_pagamento, '-'];
+          consultoresAtivos.forEach(cons => {
+             const cb = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
+             const tAtiv = allTimesheets.filter(t => t.user_id === cons.id && t.contract_id === cont.id && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+             const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+             
+             const isFechado = allAlocacoes.some(a => a.user_id === cons.id && a.contract_id === cont.id && a.mes === dashMes && a.ano === dashAno && a.atividade === 'Preço Fechado (Medição)');
+             if (isFechado) {
+                const med = allMedicoes.find(m => m.user_id === cons.id && m.contract_id === cont.id && m.mes === dashMes && m.ano === dashAno);
+                rowValues.push((med?.percentual || 0) + '%');
+             } else {
+                rowValues.push(gasto > 0 ? gasto.toFixed(1) + 'h' : '-');
+             }
+          });
+          sheet.addRow(rowValues);
+       }
+    });
+
+    // Centralizar as células de dados
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber > 3) {
+         row.alignment = { vertical: 'middle', horizontal: 'center' };
+         row.getCell(2).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }; // Descrição fica à esquerda
+      }
+      row.eachCell((cell) => {
+         cell.border = { top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}}, bottom: {style:'thin', color: {argb:'FFE2E8F0'}}, right: {style:'thin', color: {argb:'FFE2E8F0'}} };
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, `Matriz_Consolidada_${MESES_NOME[parseInt(dashMes)]}_${dashAno}.xlsx`);
+  };
+
   const exportarExcel = async (isFaturamento: boolean = false) => {
     let registros = allTimesheets.filter(t => {
       const cont = contratos.find(c => c.id === t.contract_id);
@@ -1124,7 +1359,6 @@ export function AdminDashboard() {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(isFaturamento ? 'Faturamento' : 'Pagamento');
 
-    // As 8 colunas exatas da "Mão Dupla"
     sheet.columns = [
       { header: 'Consultor', key: 'consultor', width: 25 },
       { header: 'Data', key: 'data', width: 15 },
@@ -1162,9 +1396,7 @@ export function AdminDashboard() {
     });
 
     sheet.eachRow((row, rowNumber) => {
-      if (rowNumber > 1) {
-         row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
-      }
+      if (rowNumber > 1) { row.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }; }
       row.eachCell((cell) => {
          cell.border = {
             top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}},
@@ -1179,7 +1411,7 @@ export function AdminDashboard() {
   };
 
   const MAPEAMENTO_TIPOS: Record<string, string> = {
-    horas: "Escopo Fechado (Horas)", fechado: "Preço Fechado (%)", continuado_com_os: "Assessoria / Sob Demanda", overhead: "Overhead"
+    horas: "Escopo Fechado (Horas)", continuado_com_os: "Assessoria / Sob Demanda", overhead: "Overhead"
   };
 
   const renderFiltroTiposContratoMultiplos = (isFat: boolean = false) => {
@@ -1255,13 +1487,13 @@ export function AdminDashboard() {
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('contratos')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'contratos' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Briefcase className="w-4 h-4"/> Contratos de Clientes</button>
               <button onClick={() => setMenuAtivo('os')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'os' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><FolderTree className="w-4 h-4"/> Ordens de Serviço (OS)</button>
-              <button onClick={() => setMenuAtivo('equipe')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'equipe' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Target className="w-4 h-4"/> Equipe & Metas</button>
+              <button onClick={() => setMenuAtivo('equipe')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'equipe' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Users className="w-4 h-4"/> Equipe & Acessos</button>
             </div>
           </div>
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Operação & Lançamentos</p>
             <div className="space-y-1">
-              <button onClick={() => setMenuAtivo('alocacoes')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'alocacoes' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Clock className="w-4 h-4"/> Alocação de Consultores</button>
+              <button onClick={() => setMenuAtivo('alocacoes')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'alocacoes' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Clock className="w-4 h-4"/> Alocação & Linha Base</button>
               <button onClick={() => setMenuAtivo('medicoes')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'medicoes' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Percent className="w-4 h-4"/> Medições Preços Fechados (%)</button>
               <button onClick={() => setMenuAtivo('gestao')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'gestao' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><History className="w-4 h-4"/> Ajustes de Horas (Admin)</button>
             </div>
@@ -1269,17 +1501,21 @@ export function AdminDashboard() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">BI & Indicadores</p>
             <div className="space-y-1">
-              {/* 🌟 NOVO MENU: RESUMO CONSULTOR */}
-              <button onClick={() => setMenuAtivo('resumo-consultor')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'resumo-consultor' ? 'bg-blue-600 text-white' : 'text-blue-700 hover:bg-blue-600/10'}`}><Contact2 className="w-4 h-4"/> Painel Individual</button>
-              <button onClick={() => setMenuAtivo('dash-mensal')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-mensal' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><CalendarDays className="w-4 h-4"/> Folha (Mensal)</button>
-              <button onClick={() => setMenuAtivo('dash-global')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Layers className="w-4 h-4"/> Saúde (Global)</button>
-              <button onClick={() => setMenuAtivo('alertas')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors bg-red-500/5 ${menuAtivo === 'alertas' ? 'bg-red-500! text-white' : 'text-red-600 hover:bg-red-500/10'}`}><AlertTriangle className="w-4 h-4"/> Radar de Alertas</button>
+              <button onClick={() => setMenuAtivo('resumo-consultor')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'resumo-consultor' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Contact2 className="w-4 h-4"/> Painel por Consultor</button>
+              <button onClick={() => setMenuAtivo('dash-global')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Layers className="w-4 h-4"/> Painel dos Contratos</button>
             </div>
           </div>
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Faturamento & Recebíveis</p>
             <div className="space-y-1">
-              <button onClick={() => setMenuAtivo('faturamento-cliente')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'faturamento-cliente' ? 'bg-amber-600 text-white' : 'text-amber-700 hover:bg-amber-600/10'}`}><Receipt className="w-4 h-4"/> Extração p/ Clientes</button>
+              <button onClick={() => setMenuAtivo('dash-mensal')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'dash-mensal' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><CalendarDays className="w-4 h-4"/> Folha (Mensal)</button>
+              <button onClick={() => setMenuAtivo('faturamento-cliente')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'faturamento-cliente' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Receipt className="w-4 h-4"/> Extração p/ Clientes</button>
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Alertas & Notificações</p>
+            <div className="space-y-1">
+              <button onClick={() => setMenuAtivo('alertas')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors bg-red-500/5 ${menuAtivo === 'alertas' ? 'bg-red-500! text-white' : 'text-red-600 hover:bg-red-500/10'}`}><AlertTriangle className="w-4 h-4"/> Radar de Alertas</button>
             </div>
           </div>
         </nav>
@@ -1308,9 +1544,7 @@ export function AdminDashboard() {
                     <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                      <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
                       <SelectItem value="continuado_com_os">Assessoria / Sob Demanda</SelectItem>
-                      {/* 🌟 REMOVIDA A OPÇÃO DE CRIAR NOVO OVERHEAD AQUI */}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1322,7 +1556,9 @@ export function AdminDashboard() {
                   </Select>
                 </div>
 
-                <div className="space-y-2"><Label>Teto Global (h)</Label><Input type="number" placeholder="Ex: 500 (0=Livre)" value={novoTetoGlobal || ''} onChange={e => setNovoTetoGlobal(Number(e.target.value))} /></div>
+                {novoTipo === 'continuado_com_os' && (
+                  <div className="space-y-2"><Label>Teto Global da Assessoria (h)</Label><Input type="number" placeholder="Ex: 500" value={novoTetoGlobal || ''} onChange={e => setNovoTetoGlobal(Number(e.target.value))} /></div>
+                )}
 
                 <div className="space-y-2 col-span-2 md:col-span-1 border p-2.5 rounded-lg bg-background/50">
                   <Label className="text-[10px] uppercase font-bold text-muted-foreground">Pagamento (Equipe)</Label>
@@ -1351,15 +1587,15 @@ export function AdminDashboard() {
                             <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                             <SelectContent>
                               <SelectItem value="horas">Escopo Fechado (Por Horas)</SelectItem>
-                              <SelectItem value="fechado">Preço Fechado (%)</SelectItem>
                               <SelectItem value="continuado_com_os">Assessoria / Sob Demanda</SelectItem>
-                              <SelectItem value="overhead">Overhead (Custos/Apoio)</SelectItem>
                             </SelectContent>
                           </Select>
                           <Select value={editFonte} onValueChange={editFonte => setEditFonte(editFonte)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EC">EC</SelectItem><SelectItem value="ET">ET</SelectItem></SelectContent></Select>
                         </div>
                         <div className="w-full flex flex-wrap gap-4 items-end justify-between">
-                          <div className="space-y-1"><Label className="text-[10px]">Teto Global (h)</Label><Input type="number" value={editTetoGlobal} onChange={(e) => setEditTetoGlobal(Number(e.target.value))} className="w-20" /></div>
+                          {editTipo === 'continuado_com_os' ? (
+                            <div className="space-y-1"><Label className="text-[10px]">Teto Global (h)</Label><Input type="number" value={editTetoGlobal} onChange={(e) => setEditTetoGlobal(Number(e.target.value))} className="w-20" /></div>
+                          ) : <div className="w-20"></div>}
                           <div className="space-y-1"><Label className="text-[10px]">Pgto (Ini/Fim)</Label><div className="flex gap-1"><Input type="number" value={editInicio} onChange={(e) => setEditInicio(Number(e.target.value))} className="w-14" /><Input type="number" value={editFim} onChange={(e) => setEditFim(Number(e.target.value))} className="w-14" /></div></div>
                           <div className="space-y-1"><Label className="text-[10px] text-amber-700">Fat. (Ini/Fim)</Label><div className="flex gap-1"><Input type="number" value={editFatInicio} onChange={(e) => setEditFatInicio(Number(e.target.value))} className="w-14 border-amber-500/30" /><Input type="number" value={editFatFim} onChange={(e) => setEditFatFim(Number(e.target.value))} className="w-14 border-amber-500/30" /></div></div>
                           <div className="flex gap-2 border p-2 rounded-md bg-background h-9 items-center"><Switch id={`st-${c.id}`} checked={editStatus} onCheckedChange={setEditStatus} /><Label htmlFor={`st-${c.id}`}>{editStatus ? 'Ativo' : 'Inativo'}</Label></div>
@@ -1371,11 +1607,11 @@ export function AdminDashboard() {
                         <div className="flex items-center gap-4 flex-1">
                           <Briefcase className="text-primary w-5 h-5 shrink-0" />
                           <div>
-                            <p className="font-bold flex items-center gap-2">
-                              {c.codigo} 
-                              <Badge variant="secondary" className={c.fonte_pagamento === 'EC' ? 'bg-blue-500/10 text-blue-600 border-none' : 'bg-purple-500/10 text-purple-600 border-none'}>{c.fonte_pagamento}</Badge>
+                            <p className="font-bold text-foreground text-sm flex items-center gap-2">
+                              {c.codigo} - {c.nome}
+                              <span className="text-[10px] font-black tracking-wider text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded border">{c.fonte_pagamento}</span>
                             </p>
-                            <p className="text-xs text-muted-foreground mt-0.5">{c.nome} • Modalidade: {c.tipo.replace(/_/g, ' ').toUpperCase()}</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">Modalidade: {c.tipo.replace(/_/g, ' ').toUpperCase()}</p>
                             {c.teto_global_horas > 0 && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 mt-1 border-none font-mono">Teto Vida Útil: {c.teto_global_horas}h</Badge>}
                           </div>
                         </div>
@@ -1410,7 +1646,6 @@ export function AdminDashboard() {
                 </div>
                 <div className="space-y-2 w-32"><Label>Código OS</Label><Input placeholder="OS-001" value={osCodigo} onChange={e => setOsCodigo(e.target.value)} className="uppercase" /></div>
                 <div className="space-y-2 flex-1"><Label>Escopo / Descrição</Label><Input placeholder="Projeto X..." value={osDescricao} onChange={e => setOsDescricao(e.target.value)} /></div>
-                <div className="space-y-2 w-32"><Label>Limite (Horas)</Label><Input type="number" placeholder="50" value={osHoras || ''} onChange={e => setOsHoras(Number(e.target.value))} /></div>
                 <Button onClick={criarOS} className="bg-amber-500 hover:bg-amber-600 text-white shadow-sm"><FolderTree className="w-4 h-4 mr-2"/> Vincular OS</Button>
               </div>
 
@@ -1423,7 +1658,6 @@ export function AdminDashboard() {
                       <div className="flex flex-1 gap-3 items-center w-full">
                         <Input value={editOsCodigo} onChange={e => setEditOsCodigo(e.target.value)} className="w-24 uppercase font-bold" />
                         <Input value={editOsDescricao} onChange={e => setEditOsDescricao(e.target.value)} className="flex-1" />
-                        <div className="relative w-32"><Input type="number" value={editOsHoras} onChange={e => setEditOsHoras(Number(e.target.value))} className="pr-8" /><span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">h</span></div>
                         <Button size="icon" variant="ghost" className="text-green-500" onClick={() => salvarEdicaoOS(os.id)}><Check className="w-4 h-4" /></Button>
                         <Button size="icon" variant="ghost" onClick={() => setOsEditandoId(null)}><X className="w-4 h-4" /></Button>
                       </div>
@@ -1431,8 +1665,8 @@ export function AdminDashboard() {
                       <>
                         <div className="flex items-center gap-4">
                           <div><p className="font-bold text-amber-600 text-sm">{os.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">{os.descricao || 'Sem descrição cadastrada'}</p></div>
-                          <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-none ml-4 font-mono">
-                            {os.codigo === '🛠️ Pequenos Suportes' ? 'Ilimitado' : `${os.horas_previstas}h orçadas`}
+                          <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-none ml-4 text-[10px] uppercase">
+                            {os.codigo === '🛠️ Pequenos Suportes' ? 'Ilimitado' : `Controlado pela Matriz`}
                           </Badge>
                         </div>
                         {os.codigo !== '🛠️ Pequenos Suportes' && (
@@ -1450,67 +1684,46 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* VIEW: EQUIPE & METAS */}
-        {menuAtivo === 'equipe' && (
-          <Card className="border-t-4 border-t-emerald-500 w-full">
-            <CardHeader><CardTitle>Horas Contratuais Mínimas</CardTitle><CardDescription>Defina a meta de horas mínimas que a Engeprice assegura faturar para cada consultor por mês.</CardDescription></CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
-                {consultores.map(c => (
-                  <div key={c.id} className="border p-4 rounded-xl flex flex-col gap-3 bg-muted/10 shadow-sm">
-                    <div className="flex items-center gap-2"><User className="w-4 h-4 text-emerald-600"/><span className="font-bold text-sm">{c.nome}</span></div>
-                    <div className="flex gap-2 items-center">
-                      <div className="relative flex-1">
-                        <Input 
-                          type="number" 
-                          value={metasEdit[c.id] !== undefined ? metasEdit[c.id] : c.horas_minimas_mes} 
-                          onChange={(e) => setMetasEdit(prev => ({...prev, [c.id]: Number(e.target.value)}))}
-                          className="pl-8 font-bold" 
-                        />
-                        <Target className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                      </div>
-                      <span className="text-xs font-semibold text-muted-foreground shrink-0">horas/mês</span>
-                      <Button size="icon" onClick={() => atualizarMetaConsultor(c.id, metasEdit[c.id] !== undefined ? metasEdit[c.id] : c.horas_minimas_mes)} className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shrink-0"><Save className="w-4 h-4"/></Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* VIEW: ALOCAÇÃO DE CONSULTORES */}
+        {/* 🌟 VIEW: ALOCAÇÃO DE CONSULTORES & LINHA DE BASE */}
         {menuAtivo === 'alocacoes' && (
           <div className="space-y-6 w-full">
             <div className="bg-linear-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm w-full">
               <div>
                 <h2 className="text-2xl font-black text-primary tracking-tight flex items-center gap-2">
-                  <Clock className="w-6 h-6" /> Alocação Mensal
+                  <Clock className="w-6 h-6" /> Gestão de Alocações
                 </h2>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Defina o limite de horas de cada engenheiro <span className="font-bold text-primary">para um ciclo mensal específico</span>.
+                  Defina a matriz estrutural do contrato (Linha de Base) e gerencie a distribuição de horas mensais.
                 </p>
               </div>
               
-              {/* 🌟 MENSALIZAÇÃO: Dropdowns de Mês e Ano */}
-              <div className="flex gap-2 bg-background p-2 rounded-lg border shadow-sm">
-                <Select value={alocMes} onValueChange={setAlocMes}>
-                  <SelectTrigger className="w-32 h-9 border-primary/50 text-xs font-bold text-primary"><SelectValue /></SelectTrigger>
-                  <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
-                </Select>
-                <Select value={alocAno} onValueChange={setAlocAno}>
-                  <SelectTrigger className="w-24 h-9 border-primary/50 text-xs font-bold text-primary"><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
-                </Select>
+              <div className="flex bg-muted/50 p-1 rounded-lg border shadow-inner">
+                <Button 
+                  variant={viewAlocacao === 'baseline' ? 'default' : 'ghost'} 
+                  size="sm" 
+                  onClick={() => setViewAlocacao('baseline')}
+                  className="rounded-md font-bold"
+                >
+                  <FolderTree className="w-4 h-4 mr-1.5" /> Linha de Base (Matriz)
+                </Button>
+                <Button 
+                  variant={viewAlocacao === 'mensal' ? 'default' : 'ghost'} 
+                  size="sm" 
+                  onClick={() => setViewAlocacao('mensal')}
+                  className="rounded-md font-bold"
+                >
+                  <CalendarDays className="w-4 h-4 mr-1.5" /> Distribuição Mensal
+                </Button>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full">
               <div className="md:col-span-4 space-y-4">
+                {/* 1. SELETOR DE PROJETO (Comum para as duas views) */}
                 <Card>
                   <CardHeader className="pb-3"><CardTitle className="text-sm">1. Projeto Mestre</CardTitle></CardHeader>
                   <CardContent>
-                    <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); }}>
+                    <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); setBaseItems({}); }}>
                       <SelectTrigger className="w-full"><SelectValue placeholder="Escolha o contrato..." /></SelectTrigger>
                       <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
                     </Select>
@@ -1533,22 +1746,40 @@ export function AdminDashboard() {
                       </div>
                     )}
 
-                    {isSemOsType && (
+                    {(isSemOsType || isOverheadType) && (
                       <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                        <p className="text-xs font-bold text-blue-700 flex items-center gap-1.5"><Wrench className="w-3.5 h-3.5"/> Pequenos Suportes</p>
-                        <p className="text-[10px] text-blue-700/70 mt-1 leading-tight">Os apontamentos desta OS são dinâmicos e não requerem limitação de horas.</p>
+                        <p className="text-xs font-bold text-blue-700 flex items-center gap-1.5"><Wrench className="w-3.5 h-3.5"/> {isOverheadType ? 'Overhead (Custo Fixo/Apoio)' : 'Pequenos Suportes'}</p>
+                        <p className="text-[10px] text-blue-700/70 mt-1 leading-tight">
+                          {isOverheadType 
+                            ? 'As atividades do Overhead são ilimitadas e não requerem teto de horas na matriz ou alocação mensal.' 
+                            : 'Os apontamentos desta OS são dinâmicos, não possuem escopo específico e não requerem limite de horas.'}
+                        </p>
                       </div>
                     )}
                   </CardContent>
                 </Card>
                 
+                {/* 2. ADICIONAR ENGENHEIRO (Comum, mas salva no state correspondente) */}
                 <Card className={(!contratoAtivo || (isComOsType && !alocacaoOsId)) ? 'opacity-40 pointer-events-none' : ''}>
-                  <CardHeader className="pb-3"><CardTitle className="text-sm">2. Adicionar Engenheiro</CardTitle></CardHeader>
+                  <CardHeader className="pb-3">
+                     <CardTitle className="text-sm text-primary flex items-center gap-2">
+                        <Users className="w-4 h-4" /> 2. Adicionar Consultor à {viewAlocacao === 'baseline' ? 'Matriz' : 'Distribuição'}
+                     </CardTitle>
+                  </CardHeader>
                   <CardContent className="space-y-1.5 max-h-87.5 overflow-y-auto p-3">
                     {consultores.map(user => {
-                      const jaAlocado = !!alocacoes[user.id]
+                      const jaAlocado = viewAlocacao === 'baseline' ? !!baseItems[user.id] : !!alocacoes[user.id];
                       return (
-                        <div key={user.id} onClick={() => addConsultor(user.id)} className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}>
+                        <div 
+                          key={user.id} 
+                          onClick={() => {
+                             if (!jaAlocado) {
+                                if (viewAlocacao === 'baseline') addConsultorBase(user.id);
+                                else toast.info("Consultores só podem ser adicionados à distribuição se já estiverem cadastrados na Linha de Base.");
+                             }
+                          }} 
+                          className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}
+                        >
                           <span className="font-medium">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
                         </div>
                       )
@@ -1558,79 +1789,327 @@ export function AdminDashboard() {
               </div>
               
               <div className="md:col-span-8 w-full">
-                <Card className="h-full min-h-112.5 flex flex-col w-full">
-                  <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/5">
-                    <div>
-                      <CardTitle className="text-base flex items-center gap-2">3. Distribuição (<span className="text-primary">{MESES_NOME[parseInt(alocMes)]}/{alocAno}</span>)</CardTitle>
-                      {isComOsType && alocacaoOsId && <CardDescription className="text-amber-600 font-bold mt-1">Alocando para a OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</CardDescription>}
-                    </div>
-                    {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Gravar Matriz no Mês</Button>}
-                  </CardHeader>
-                  <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
-                    {carregandoAlocacoes ? (
-                      <div className="flex justify-center"><Loader2 className="w-8 h-8 animate-spin" /></div>
-                    ) : Object.values(alocacoes).length === 0 ? <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2">Adicione consultores ao lado para iniciar a alocação deste mês.</div> : 
-                      Object.values(alocacoes).map(aloc => (
-                        <div key={aloc.consultorId} className="border rounded-xl p-4 bg-card shadow-sm w-full transition-all hover:border-primary/50">
-                          <div className={`flex justify-between items-center ${!isSemOsType ? 'border-b pb-3 mb-3' : ''}`}>
-                            <div><h4 className="font-bold text-sm text-foreground">{consultores.find(c => c.id === aloc.consultorId)?.nome}</h4></div>
-                            <div className="flex items-center gap-2">
-                              {isSemOsType ? (
-                                <Badge className="bg-blue-500/10 text-blue-600 border-none mr-2 font-mono"><Wrench className="w-3 h-3 mr-1" /> Dinâmico</Badge>
-                              ) : (
-                                <div className="relative flex items-center">
-                                  <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHoras(aloc.consultorId, Number(e.target.value))} className="w-24 h-8 pr-6 font-bold text-right text-primary bg-muted/50 border-primary/20 focus-visible:ring-primary/50" disabled={aloc.atividades.length > 0} />
-                                  <span className="absolute right-2 text-xs text-muted-foreground">h</span>
+                {/* --- MODO LINHA DE BASE --- */}
+                {viewAlocacao === 'baseline' && (
+                  <Card className="h-full min-h-112.5 flex flex-col w-full border-primary/30 shadow-md">
+                    <CardHeader className="flex flex-row items-start justify-between border-b pb-4 bg-primary/5">
+                      <div>
+                        <CardTitle className="text-base flex items-center gap-2 text-primary">
+                           <FolderTree className="w-5 h-5" /> 3. Linha de Base (Matriz do Projeto)
+                        </CardTitle>
+                        {isComOsType && alocacaoOsId && <CardDescription className="text-amber-600 font-bold mt-1">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</CardDescription>}
+                        <p className="text-xs text-muted-foreground mt-2 max-w-lg">
+                           Aqui você define as regras permanentes: o teto máximo de horas de cada consultor na vida útil do contrato e o escopo (atividades) que eles executarão.
+                        </p>
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        {baseVersions.length > 0 && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase font-bold text-muted-foreground">Histórico:</span>
+                            <Select value={currentBase?.id} onValueChange={mudarVersaoBase}>
+                              <SelectTrigger className="h-8 w-32 text-xs font-mono bg-background">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {baseVersions.map((b, i) => (
+                                  <SelectItem key={b.id} value={b.id}>v{b.versao} {i === 0 ? '(Atual)' : ''}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        {(contratoAtivo && currentBase?.id === baseVersions[0]?.id) && (
+                          <Button onClick={salvarLinhaBase} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Salvar Versão da Matriz</Button>
+                        )}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
+                      {carregandoAlocacoes ? (
+                        <div className="flex justify-center py-10"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
+                      ) : Object.values(baseItems).length === 0 ? (
+                         <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2 bg-muted/10">Adicione consultores ao lado para construir a matriz deste contrato/OS.</div>
+                      ) : (
+                        Object.values(baseItems).map(item => {
+                          const cNome = consultores.find(c => c.id === item.user_id)?.nome;
+                          const isFechado = item.tipo_pagamento === 'fechado';
+                          const isUltimaVersao = currentBase?.id === baseVersions[0]?.id;
+                          
+                          // --- CÁLCULO DE SALDO VITALÍCIO ---
+                          const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                          const gastoVidaH = allTimesheets.filter(t => t.user_id === item.user_id && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                          const saldoH = item.horas_teto - gastoVidaH;
+                          
+                          return (
+                            <div key={item.user_id} className={`border-2 rounded-xl p-4 shadow-sm w-full transition-all ${isUltimaVersao ? 'hover:border-primary/50' : 'opacity-80 pointer-events-none grayscale-20'} ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                              <div className={`flex flex-col md:flex-row md:justify-between md:items-center gap-4 ${(!isSemOsType && !isFechado && !isOverheadType) ? 'border-b pb-3 mb-3' : ''}`}>
+                                <div>
+                                    <h4 className="font-bold text-sm text-foreground">{cNome}</h4>
+                                    {(!isSemOsType && !isFechado && !isOverheadType) ? (
+                                      <div className="flex items-center gap-3 mt-1.5 text-[10px] uppercase tracking-wider font-mono">
+                                        <span className="text-primary font-bold">Consumido: {gastoVidaH.toFixed(1)}h</span>
+                                        <span className={`${saldoH < 0 ? 'text-red-500' : 'text-green-600'} font-bold`}>Saldo Base: {saldoH.toFixed(1)}h</span>
+                                      </div>
+                                    ) : (
+                                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Definições da Matriz</p>
+                                    )}
+                                    
+                                    <div className="mt-1.5 flex items-center gap-2">
+                                      <Select value={item.tipo_pagamento || 'horas'} onValueChange={(val: 'horas' | 'fechado') => updateTipoPagamentoBase(item.user_id, val)}>
+                                        <SelectTrigger className="h-7 w-36 text-[10px] font-bold shadow-xs bg-background">
+                                          <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          <SelectItem value="horas">⏳ Por Horas</SelectItem>
+                                          <SelectItem value="fechado">🎯 Preço Fechado (%)</SelectItem>
+                                        </SelectContent>
+                                      </Select>
+                                      {isFechado && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none">Sem controle de horas</Badge>}
+                                    </div>
+                                </div>
+                                
+                                <div className="flex items-center gap-3">
+                                  {(!isSemOsType && !isFechado && !isOverheadType) && (
+                                    <div className="relative flex items-center">
+                                      <Input type="number" value={item.horas_teto || ''} onChange={(e) => updateTetoBase(item.user_id, Number(e.target.value))} className="w-28 h-9 pr-7 font-bold text-right border-primary/40 focus-visible:ring-primary/50" placeholder="Teto (ex: 100)" />
+                                      <span className="absolute right-3 text-xs text-muted-foreground font-bold">h</span>
+                                    </div>
+                                  )}
+                                  {(isOverheadType && !isFechado) && (
+                                    <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Horas Livres</Badge>
+                                  )}
+                                  <Button variant="ghost" size="icon" onClick={() => removeConsultorBase(item.user_id)} className="h-9 w-9 text-red-500 hover:bg-red-500/10 shrink-0"><Trash2 className="w-4 h-4" /></Button>
+                                </div>
+                              </div>
+                              
+                              {(!isSemOsType && !isFechado) && (
+                                <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
+                                  <div className="flex justify-between items-center text-xs">
+                                      <span className="font-semibold text-muted-foreground">Atividades Permanentes (Escopo)</span>
+                                      <Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10" onClick={() => addAtividadeBase(item.user_id)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar Atividade</Button>
+                                  </div>
+                                  {item.atividades.length === 0 ? (
+                                      <p className="text-[10px] italic text-muted-foreground py-1">Nenhuma atividade específica definida. O consultor poderá alocar na categoria "Geral".</p>
+                                  ) : (
+                                      item.atividades.map((ativNome, idx) => (
+                                        <div key={idx} className="flex gap-2 items-center bg-muted/20 p-2 rounded-lg text-xs w-full group">
+                                          <GripVertical className="w-4 h-4 text-muted-foreground/30 cursor-move" />
+                                          <span className="flex-1 font-medium">{ativNome}</span>
+                                          <div className="flex opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'up')} disabled={idx === 0}>↑</Button>
+                                            <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'down')} disabled={idx === item.atividades.length - 1}>↓</Button>
+                                          </div>
+                                          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => removeAtividadeBase(item.user_id, ativNome)}><X className="w-3.5 h-3.5" /></Button>
+                                        </div>
+                                      ))
+                                  )}
                                 </div>
                               )}
-                              <Button variant="ghost" size="icon" onClick={() => removeConsultor(aloc.consultorId)} className="h-8 w-8 text-red-500 hover:bg-red-500/10"><Trash2 className="w-4 h-4" /></Button>
                             </div>
-                          </div>
-                          
-                          {!isSemOsType && (
-                            <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
-                              <div className="flex justify-between items-center text-xs"><span className="font-medium text-muted-foreground">Disciplinas / Escopos Específicos</span><Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10" onClick={() => addAtiv(aloc.consultorId)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar</Button></div>
-                              {aloc.atividades.map(a => (
-                                <div key={a.id} className="flex gap-2 items-center bg-muted/20 p-2 rounded-lg text-xs w-full">
-                                  <span className="flex-1 font-medium">{a.nome}</span>
-                                  <div className="relative w-24"><Input type="number" className="h-7 text-right font-bold pr-5 border-primary/20 focus-visible:ring-primary/50 bg-background" value={a.horas || ''} onChange={(e) => updateAtiv(aloc.consultorId, a.id, Number(e.target.value))} /><span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span></div>
-                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => removeAtiv(aloc.consultorId, a.id, a.dbId)}><X className="w-3.5 h-3.5" /></Button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
+                          )
+                        })
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* --- MODO DISTRIBUIÇÃO MENSAL --- */}
+                {viewAlocacao === 'mensal' && (
+                  <Card className="h-full min-h-112.5 flex flex-col w-full shadow-sm">
+                    <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/5">
+                      <div>
+                        <CardTitle className="text-base flex items-center gap-2">
+                           3. Distribuição de Horas do Mês
+                        </CardTitle>
+                        <div className="flex items-center gap-3 mt-2">
+                           <div className="flex bg-background border p-1 rounded-md shadow-sm">
+                             <Select value={alocMes} onValueChange={setAlocMes}>
+                               <SelectTrigger className="w-28 h-7 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
+                               <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                             </Select>
+                             <div className="w-px bg-border my-1"></div>
+                             <Select value={alocAno} onValueChange={setAlocAno}>
+                               <SelectTrigger className="w-20 h-7 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
+                               <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+                             </Select>
+                           </div>
+                           {isComOsType && alocacaoOsId && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</Badge>}
                         </div>
-                      ))}
-                  </CardContent>
-                </Card>
+                      </div>
+                      {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Gravar Distribuição no Mês</Button>}
+                    </CardHeader>
+                    <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
+                      {carregandoAlocacoes ? (
+                        <div className="flex justify-center py-10"><Loader2 className="w-8 h-8 animate-spin" /></div>
+                      ) : Object.values(alocacoes).length === 0 ? (
+                         <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2 bg-muted/10">Nenhum consultor encontrado na Linha de Base.<br/>Volte para a aba <b>"Linha de Base (Matriz)"</b> e configure a equipe e os tetos primeiro.</div>
+                      ) : (
+                        Object.values(alocacoes).map(aloc => {
+                           // Traz a referência da Matriz para mostrar o Teto
+                           const matrizRef = baseItems[aloc.consultorId];
+                           
+                           const isFechado = aloc.tipo_pagamento === 'fechado';
+                           
+                           return (
+                             <div key={aloc.consultorId} className={`border rounded-xl p-4 shadow-sm w-full transition-all hover:border-primary/50 ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                               <div className={`flex justify-between items-center ${(!isSemOsType && !isFechado) ? 'border-b pb-3 mb-3' : ''}`}>
+                                 <div>
+                                    <h4 className="font-bold text-sm text-foreground flex items-center gap-2">
+                                       {consultores.find(c => c.id === aloc.consultorId)?.nome}
+                                       {!isSemOsType && !isFechado && matrizRef && <Badge variant="outline" className="text-[9px] h-5 px-1.5 font-mono bg-muted/40">Teto da Base: {matrizRef.horas_teto}h</Badge>}
+                                       {isFechado && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none">Preço Fechado</Badge>}
+                                    </h4>
+                                 </div>
+                                 <div className="flex items-center gap-2">
+                                   {isFechado ? null : (isSemOsType || isOverheadType) ? (
+                                     <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Dinâmico</Badge>
+                                   ) : (
+                                     <div className="relative flex items-center">
+                                       <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHorasMensal(aloc.consultorId, Number(e.target.value))} className="w-24 h-8 pr-6 font-bold text-right text-primary bg-muted/50 border-primary/20 focus-visible:ring-primary/50" disabled={aloc.atividades.length > 0} />
+                                       <span className="absolute right-2 text-xs text-muted-foreground">h</span>
+                                     </div>
+                                   )}
+                                 </div>
+                               </div>
+                               
+                               {(!isSemOsType && !isFechado && aloc.atividades.length > 0) && (
+                                 <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
+                                   <div className="flex justify-between items-center text-xs">
+                                      <span className="font-medium text-muted-foreground">{isOverheadType ? "Disciplinas do Overhead" : "Horas do Mês por Disciplina"}</span>
+                                      <span className="text-[9px] text-muted-foreground/60 italic">(Adicione novas disciplinas via Linha de Base)</span>
+                                   </div>
+                                   {aloc.atividades.map(a => (
+                                     <div key={a.id} className="flex justify-between items-center bg-muted/10 p-2 rounded-lg text-xs w-full border border-dashed border-transparent hover:border-muted-foreground/30">
+                                       <span className="font-medium">{a.nome}</span>
+                                       {isOverheadType ? (
+                                         <Badge className="bg-transparent text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Livre</Badge>
+                                       ) : (
+                                         <div className="relative w-24">
+                                            <Input type="number" className="h-7 text-right font-bold pr-5 border-primary/20 focus-visible:ring-primary/50 bg-background" value={a.horas || ''} onChange={(e) => updateAtivMensal(aloc.consultorId, a.id, Number(e.target.value))} />
+                                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span>
+                                         </div>
+                                       )}
+                                     </div>
+                                   ))}
+                                 </div>
+                               )}
+                             </div>
+                           )
+                        })
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </div>
             </div>
           </div>
         )}
 
+        {/* VIEW: EQUIPE & ACESSOS (FASE 4) */}
+        {menuAtivo === 'equipe' && (
+          <Card className="border-t-4 border-t-emerald-500 w-full shadow-sm">
+            <CardHeader className="border-b pb-4 bg-muted/5">
+              <CardTitle className="flex items-center gap-2 text-emerald-700"><Users className="w-5 h-5"/> Gestão de Equipe e Acessos</CardTitle>
+              <CardDescription>Gerencie quem tem acesso ao aplicativo (Ativos) e crie usuários de controle interno (Convidados/Fantasmas).</CardDescription>
+            </CardHeader>
+            <CardContent className="pt-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
+                {consultores.map(c => (
+                  <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                    <div className="flex items-start justify-between">
+                       <div className="flex items-center gap-3">
+                          {c.avatar_url ? (
+                            <img src={c.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full border border-primary/20 object-cover" />
+                          ) : (
+                            <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20">
+                               {c.nome.substring(0,2).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <span className="font-bold text-sm block leading-tight">{c.nome}</span>
+                            {c.is_convidado ? (
+                               <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Controle Interno)</Badge>
+                            ) : (
+                               <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
+                            )}
+                          </div>
+                       </div>
+                    </div>
+                    
+                    <div className="flex items-center justify-between border-t pt-3 mt-1">
+                      <div className="flex items-center gap-2">
+                         <Switch 
+                            id={`status-${c.id}`} 
+                            checked={c.status_ativo !== false} 
+                            onCheckedChange={async (checked) => {
+                               setConsultores(p => p.map(user => user.id === c.id ? { ...user, status_ativo: checked } : user));
+                               await supabase.from('consultores').update({ status_ativo: checked }).eq('id', c.id);
+                            }} 
+                         />
+                         <Label htmlFor={`status-${c.id}`} className="text-xs cursor-pointer">{c.status_ativo !== false ? 'Ativo' : 'Inativo'}</Label>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* VIEW: MEDIÇÕES PREÇOS FECHADOS (%) */}
         {menuAtivo === 'medicoes' && (
-          <Card className="border-t-4 border-t-amber-500 w-full">
+          <Card className="border-t-4 border-t-amber-500 w-full shadow-sm">
             <CardHeader className="bg-muted/10 border-b pb-6">
-              <CardTitle className="text-xl">Lançamento de Medições</CardTitle>
-              <CardDescription>Insira o avanço físico mensal dos consultores em contratos fechados.</CardDescription>
+              <CardTitle className="text-xl">Lançamento de Medições (Preço Fechado)</CardTitle>
+              <CardDescription>Insira o avanço físico mensal do consultor nos contratos em que ele atua por pacote.</CardDescription>
               <div className="flex flex-wrap gap-3 mt-4 p-3 bg-background border rounded-lg shadow-sm">
+                <Select value={medConsultor} onValueChange={setMedConsultor}>
+                  <SelectTrigger className="w-80 h-9 border-primary font-semibold"><SelectValue placeholder="Selecione o Consultor..." /></SelectTrigger>
+                  <SelectContent>
+                    {consultores.map(c => <SelectItem key={c.id} value={c.id}>{c.nome}</SelectItem>)}
+                  </SelectContent>
+                </Select>
                 <Select value={medMes} onValueChange={setMedMes}><SelectTrigger className="w-32 h-9"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
                 <Select value={medAno} onValueChange={setMedAno}><SelectTrigger className="w-24 h-9"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
-                <Select value={medFonte} onValueChange={setMedFonte}><SelectTrigger className="w-36 h-9 border-primary/50"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">Todas (EC + ET)</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
-                <Select value={medContrato} onValueChange={setMedContrato}><SelectTrigger className="w-80 h-9 border-primary"><SelectValue placeholder="Selecione o Contrato..." /></SelectTrigger><SelectContent>{contratos.filter(c => c.status_ativo && c.tipo === 'fechado' && (medFonte === 'todas' ? true : c.fonte_pagamento === medFonte)).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent></Select>
               </div>
             </CardHeader>
             <CardContent className="pt-6 w-full">
-              {!medContrato ? <div className="text-center text-muted-foreground py-12 text-sm border border-dashed rounded-xl w-full">Selecione os filtros e o contrato acima para carregar a equipe.</div> : medLoading ? <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin" /></div> : medConsultores.length === 0 ? <p className="text-center text-muted-foreground py-6 text-xs">Nenhum engenheiro alocado nesta matriz.</p> : (
+              {!medConsultor ? (
+                <div className="text-center text-muted-foreground py-12 text-sm border border-dashed rounded-xl w-full">
+                  Selecione o consultor e o mês acima para carregar os contratos dele.
+                </div>
+              ) : medLoading ? (
+                <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>
+              ) : medContratosVinculados.length === 0 ? (
+                <p className="text-center text-muted-foreground py-12 text-sm border border-dashed rounded-xl">Este consultor não possui projetos alocados como "Preço Fechado" neste mês.</p>
+              ) : (
                 <div className="w-full space-y-4">
-                  {medConsultores.map(c => (
-                    <div key={c.id} className="flex items-center justify-between p-3 border rounded-xl bg-muted/10 shadow-sm w-full">
-                      <span className="font-semibold text-sm">{c.nome}</span>
-                      <div className="flex items-center gap-2"><div className="relative w-28"><Input type="number" className="pr-8 text-right font-bold text-primary h-9" value={medicoesInput[c.id] || ''} onChange={e => setMedicoesInput(p => ({...p, [c.id]: Number(e.target.value)}))} /><span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground font-bold text-xs">%</span></div></div>
+                  {medContratosVinculados.map(v => (
+                    <div key={v.key} className="flex items-center justify-between p-4 border rounded-xl bg-muted/10 shadow-sm w-full hover:border-primary/30 transition-colors">
+                      <div>
+                        <p className="font-bold text-sm text-foreground flex items-center gap-2">
+                          {v.codigo}
+                          {v.os_codigo && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 border-none text-[9px] uppercase">OS: {v.os_codigo}</Badge>}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground truncate max-w-75">{v.nome}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="relative w-28">
+                          <Input 
+                            type="number" 
+                            className="pr-8 text-right font-bold text-amber-600 h-9 border-amber-500/30 focus-visible:ring-amber-500/50" 
+                            value={medicoesInput[v.key] || ''} 
+                            onChange={e => setMedicoesInput(p => ({...p, [v.key]: Number(e.target.value)}))} 
+                          />
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground font-bold text-xs">%</span>
+                        </div>
+                      </div>
                     </div>
                   ))}
-                  <div className="pt-2 flex justify-end"><Button onClick={salvarMedicoes} disabled={salvando} className="bg-amber-500 hover:bg-amber-600 text-white w-40 h-9"><Save className="w-4 h-4 mr-1.5" /> Gravar Medição</Button></div>
+                  <div className="pt-4 flex justify-end">
+                    <Button onClick={salvarMedicoes} disabled={salvando} className="bg-amber-500 hover:bg-amber-600 text-white w-48 h-10 shadow-sm">
+                      <Save className="w-4 h-4 mr-2" /> Gravar Medições
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
@@ -1646,7 +2125,6 @@ export function AdminDashboard() {
                   <div className="flex justify-between items-center w-full">
                     <CardTitle className="text-sm font-bold flex items-center gap-2"><History className="w-4 h-4"/> Lançamento Direto / Importação</CardTitle>
                     <div className="relative">
-                      {/* Certifique-se de que o onChange chama a sua nova função handleImportarTimesheetExcel */}
                       <input type="file" id="excel-ts-up" className="hidden" accept=".xlsx, .xls" onChange={handleImportarTimesheetExcel} />
                       <Button variant="outline" size="sm" className="text-purple-600 border-purple-200 text-[11px] h-8 gap-1.5" onClick={() => document.getElementById('excel-ts-up')?.click()}>
                         <FileUp className="w-3.5 h-3.5" /> Importar Planilha (.xlsx)
@@ -1654,7 +2132,6 @@ export function AdminDashboard() {
                     </div>
                   </div>
                   
-                  {/* INSTRUÇÕES DE IMPORTAÇÃO MÃO DUPLA */}
                   <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3 text-[10px] text-purple-800 space-y-1">
                     <p className="font-bold uppercase tracking-wider mb-1">Como importar via Excel:</p>
                     <p>O arquivo (.xlsx) deve conter <strong>exatamente 9 colunas</strong>, na seguinte ordem (com cabeçalho na linha 1):</p>
@@ -1687,8 +2164,44 @@ export function AdminDashboard() {
                   )}
                   <div className="space-y-1"><Label>Disciplina / Escopo</Label><Select value={gestaoAtividade} onValueChange={setGestaoAtividade} disabled={!gestaoContrato}><SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent>{gestaoAtividadesDisponiveis.map((a: string) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent></Select></div>
                   <div className="grid grid-cols-2 gap-3"><div className="space-y-1"><Label>Data</Label><Input type="date" value={gestaoData} onChange={e => setGestaoData(e.target.value)} className="h-9" /></div><div className="grid grid-cols-2 gap-1"><div className="space-y-1"><Label>Início</Label><Input type="time" value={gestaoInicio} onChange={e => setGestaoInicio(e.target.value)} className="h-9 px-1" /></div><div className="space-y-1"><Label>Fim</Label><Input type="time" value={gestaoFim} onChange={e => setGestaoFim(e.target.value)} className="h-9 px-1" /></div></div></div>
-                  <div className="space-y-1"><Label>Observação Interna</Label><Input placeholder="Descreva o escopo realizado..." value={gestaoNotes} onChange={e => setGestaoNotes(e.target.value)} className="h-9" /></div>
-                  <Button onClick={salvarApontamentoAdmin} disabled={salvando} className="w-full h-9 bg-purple-600 hover:bg-purple-700 mt-2 text-xs">{salvando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />} {gestaoEditandoId ? 'Atualizar Histórico' : 'Gravar Horas'}</Button>
+                  <div className="space-y-1">
+                    <Label>Observação Interna</Label>
+                    <Input onChange={(e) => setGestaoNotes(e.target.value)} placeholder="Descreva o escopo realizado..." value={gestaoNotes} className="h-9" />
+                  </div>
+
+                  {gestaoSaldos && gestaoAtividade !== 'Sem atividade específica' && (
+                     <div className="bg-muted/30 border p-3 rounded-lg flex items-center justify-between text-xs my-3 shadow-sm">
+                        <div>
+                           <p className="font-bold text-foreground">Saldo da Disciplina / Projeto</p>
+                           <p className="text-muted-foreground mt-0.5">Orçado: {gestaoSaldos.isSemOs ? '∞' : `${gestaoSaldos.orcado.toFixed(1)}h`} | Consumido: {gestaoSaldos.gasto.toFixed(1)}h</p>
+                        </div>
+                        <div className="text-right">
+                           <Badge className={`font-mono shadow-sm text-white border-none ${gestaoSaldos.isSemOs ? 'bg-amber-500' : (gestaoSaldos.saldo < 0 ? 'bg-red-500' : 'bg-green-600')}`}>
+                             {gestaoSaldos.isSemOs && <Wrench className="w-3 h-3 mr-1"/>}
+                             {gestaoSaldos.isSemOs ? 'Ilimitado' : `${gestaoSaldos.saldo.toFixed(1)}h livres`}
+                           </Badge>
+                        </div>
+                     </div>
+                  )}
+                  
+                  <div className="flex gap-2 mt-2">
+                    
+                     <Button onClick={salvarApontamentoAdmin} disabled={salvando} className="flex-1 h-9 bg-purple-600 hover:bg-purple-700 text-xs">
+                        {salvando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />} {gestaoEditandoId ? 'Atualizar Histórico' : 'Gravar Horas'}
+                     </Button>
+                     {gestaoEditandoId && (
+                        <Button 
+                           variant="outline" 
+                           onClick={() => {
+                              setGestaoEditandoId(null);
+                              setGestaoNotes('');
+                           }} 
+                           className="h-9 text-xs border-dashed"
+                        >
+                           Cancelar Edição
+                        </Button>
+                     )}
+                  </div>
                 </CardContent>
               </Card>
 
@@ -1764,14 +2277,24 @@ export function AdminDashboard() {
           </div>
         )}
 
-        {/* 🌟 NOVO VIEW: PAINEL INDIVIDUAL DO CONSULTOR */}
+        {/* 🌟 NOVO VIEW: PAINEL POR CONSULTOR (Avatar dinâmico) */}
         {menuAtivo === 'resumo-consultor' && (
           <div className="space-y-6 animate-in fade-in-50 duration-200">
              <div className="flex flex-col md:flex-row md:items-center justify-between border-b pb-4 gap-4">
-              <div>
-                <h2 className="text-xl font-bold tracking-tight text-blue-700 flex items-center gap-2"><Contact2 className="w-5 h-5"/> Painel Individual do Consultor</h2>
+              <div className="flex-1">
+                <h2 className="text-xl font-bold tracking-tight text-blue-700 flex items-center gap-2"><Contact2 className="w-5 h-5"/> Painel por Consultor</h2>
                 <p className="text-xs text-muted-foreground mt-1">Acompanhe a performance orçamentária e a entrega de cada membro da equipe isoladamente.</p>
               </div>
+              {resConsId && resumoConsultorData && (
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <Button variant="outline" className="gap-1.5 text-green-700 border-green-500/30 hover:bg-green-500/10 text-xs h-9" onClick={() => exportarPainelConsultor('detalhada')}>
+                    <Download className="w-3.5 h-3.5" /> Exportar Detalhada
+                  </Button>
+                  <Button className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-9 shadow-sm" onClick={() => exportarPainelConsultor('consolidada')}>
+                    <Layers className="w-3.5 h-3.5" /> Exportar Consolidada
+                  </Button>
+                </div>
+              )}
               <div className="flex items-center gap-3 bg-muted/30 p-2 rounded-xl border shadow-sm">
                 <Select value={resConsId} onValueChange={setResConsId}>
                   <SelectTrigger className="w-64 h-9 bg-background font-bold text-primary"><SelectValue placeholder="Selecione o Consultor" /></SelectTrigger>
@@ -1796,9 +2319,15 @@ export function AdminDashboard() {
                        <div className="h-16 bg-linear-to-r from-blue-600 to-blue-400"></div>
                        <CardContent className="pt-0 relative px-6 pb-6">
                           <div className="flex justify-center -mt-10 mb-4">
-                             <div className="w-20 h-20 rounded-full border-4 border-background bg-blue-100 flex items-center justify-center text-blue-700 text-2xl font-black shadow-sm">
-                                {resumoConsultorData.iniciais}
-                             </div>
+                             {/* Nota de Implementação: O avatar_url vem do banco, porém o tipo Consultor precisaria ser atualizado. 
+                                 Caso não tenha mapeado avatar_url na query carregarDadosDoBanco, ele usará as iniciais. */}
+                             {consultores.find(c => c.id === resConsId)?.avatar_url ? (
+                                <img src={consultores.find(c => c.id === resConsId)?.avatar_url} alt="Avatar" className="w-20 h-20 rounded-full border-4 border-background bg-blue-100 object-cover shadow-sm" />
+                             ) : (
+                                <div className="w-20 h-20 rounded-full border-4 border-background bg-blue-100 flex items-center justify-center text-blue-700 text-2xl font-black shadow-sm">
+                                   {resumoConsultorData.iniciais}
+                                </div>
+                             )}
                           </div>
                           <div className="text-center space-y-1">
                              <h3 className="font-bold text-lg text-foreground">{resumoConsultorData.nome}</h3>
@@ -1834,7 +2363,7 @@ export function AdminDashboard() {
                                <Pie data={resumoConsultorData.pieData} innerRadius={60} outerRadius={80} paddingAngle={2} dataKey="value" stroke="none">
                                 {resumoConsultorData.pieData.map((entry, index) => {
                                   let color = "#e2e8f0"; // Cinza neutro para "Zerado"
-                                  if (entry.name === 'Gasto') color = "#e2e8f0"; // Vermelho
+                                  if (entry.name === 'Gasto') color = "#ef4444"; // Vermelho
                                   if (entry.name === 'Saldo') color = "#3b82f6"; // Azul
                                   return <Cell key={`cell-${index}`} fill={color} />;
                                 })}
@@ -1902,9 +2431,14 @@ export function AdminDashboard() {
             <CardHeader className="bg-muted/10 border-b pb-4">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
                 <div><CardTitle className="text-lg">Folha de Pagamento (Equipe)</CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por consultor.</CardDescription></div>
-                <Button onClick={() => exportarExcel(false)} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8">
-                  <Download className="w-4 h-4" /> Exportar Planilha
-                </Button>
+                <div className="flex gap-2">
+                  <Button onClick={() => exportarExcel(false)} variant="outline" className="gap-1.5 text-green-700 border-green-500/30 hover:bg-green-500/10 text-xs h-8">
+                    <Download className="w-3.5 h-3.5" /> Detalhada
+                  </Button>
+                  <Button onClick={exportarMatrizConsolidada} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8 shadow-sm">
+                    <Layers className="w-3.5 h-3.5" /> Exportar Matriz Consolidada
+                  </Button>
+                </div>
               </div>
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm w-full">
                 {renderFiltroTiposContratoMultiplos()}
@@ -1921,10 +2455,10 @@ export function AdminDashboard() {
                     <BarChart data={dashData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
                       <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
-                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => dashData.isFechadoMode ? `${v}%` : `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [dashData.isFechadoMode ? `${v}%` : `${v} horas`, dashData.isFechadoMode ? 'Medição' : 'Trabalhado']} />
+                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
+                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas`, 'Trabalhado']} />
                       <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55}>
-                        {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={dashData.isFechadoMode ? '#f59e0b' : CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
+                        {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -1934,11 +2468,11 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* VIEW: DASHBOARD GLOBAL (SAÚDE FINANCEIRA) */}
+        {/* VIEW: DASHBOARD GLOBAL (PAINEL DOS CONTRATOS) */}
         {menuAtivo === 'dash-global' && (
           <Card className="border-t-4 border-t-amber-500 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-muted/10 border-b pb-4">
-              <div><CardTitle className="text-lg">Saúde Financeira Consolidada</CardTitle><CardDescription>Visão geral de engenharia e lucratividade de custos.</CardDescription></div>
+              <div><CardTitle className="text-lg">Painel dos Contratos (Saúde Financeira)</CardTitle><CardDescription>Visão geral de engenharia e lucratividade de custos.</CardDescription></div>
               <div className="flex flex-col gap-4 mt-6 w-full">
                 <div className="flex items-center gap-4 bg-muted/30 p-2 rounded-md border w-fit">
                   <Label className="font-bold uppercase tracking-wider text-xs ml-2">Filtro de Modalidade:</Label>
@@ -1966,14 +2500,11 @@ export function AdminDashboard() {
                     </SelectContent>
                   </Select>
 
-                  {/* 🌟 REMOVIDO FILTRO DE ATIVIDADE CONFORME SOLICITADO */}
-
                   <Select value={dashMes} onValueChange={setDashMes}>
                     <SelectTrigger className="w-28 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
                     <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
                   </Select>
-                  <Select value={dashAno} onValueChange={setDashAno}>
-                    <SelectTrigger className="w-20 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
+                  <Select value={dashAno} onValueChange={setDashAno}><SelectTrigger className="w-20 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="2025">2025</SelectItem>
                       <SelectItem value="2026">2026</SelectItem>
@@ -1988,49 +2519,32 @@ export function AdminDashboard() {
                 <div className="space-y-8">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center w-full">
                     <div className="space-y-4 w-full">
-                      {!dashData.isFechadoMode ? (
-                        <>
-                          <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Budget Total Alocado</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.orcadoGlobal.toFixed(1)}h</p></div>
-                          <div className="border p-4 rounded-xl bg-red-500/5 border-red-500/10"><p className="text-[10px] font-bold text-red-600 uppercase">Horas Consumidas</p><p className="text-3xl font-bold font-mono text-red-600 mt-0.5">{dashData.gastoGlobal.toFixed(1)}h</p></div>
-                          <div className={`border p-4 rounded-xl ${dashData.saldoGlobal < 0 ? 'bg-red-500/10 border-red-500/20 text-red-600' : 'bg-green-500/5 border-green-500/10 text-green-600'}`}><p className="text-[10px] font-bold uppercase">Saldo em Conta</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.saldoGlobal.toFixed(1)}h</p></div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Rateio Distribuído Equipe</p><p className="text-3xl font-bold text-primary mt-0.5">{dashData.percentualGlobal}%</p></div>
-                          <div className="border p-4 rounded-xl bg-primary/5 border-primary/10"><p className="text-[10px] font-bold text-primary uppercase">Avanço Físico Medido</p><p className="text-3xl font-bold text-primary mt-0.5">{dashData.medidoGlobal}%</p></div>
-                        </>
-                      )}
+                      <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Budget Total Alocado</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.orcadoGlobal.toFixed(1)}h</p></div>
+                      <div className="border p-4 rounded-xl bg-red-500/5 border-red-500/10"><p className="text-[10px] font-bold text-red-600 uppercase">Horas Consumidas</p><p className="text-3xl font-bold font-mono text-red-600 mt-0.5">{dashData.gastoGlobal.toFixed(1)}h</p></div>
+                      <div className={`border p-4 rounded-xl ${dashData.saldoGlobal < 0 ? 'bg-red-500/10 border-red-500/20 text-red-600' : 'bg-green-500/5 border-green-500/10 text-green-600'}`}><p className="text-[10px] font-bold uppercase">Saldo em Conta</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.saldoGlobal.toFixed(1)}h</p></div>
                     </div>
                     <div className="h-80 w-full flex flex-col items-center justify-center relative">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie data={dashData.pieData} innerRadius={85} outerRadius={115} paddingAngle={4} dataKey="value" stroke="none">
                             {dashData.pieData.map((entry, index) => {
-                              let color = "#e2e8f0"; // Cinza neutro para "Sem Registros"
-                              if (entry.name === 'Consumido') color = "#ef4444"; // Vermelho
-                              if (entry.name === 'Saldo Restante') color = "#22c55e"; // Verde
-                              if (entry.name === '% Entregue') color = "#f59e0b"; // Âmbar
-                              if (entry.name === 'A Entregar') color = "#88888822"; // Cinza claro fundo
+                              let color = "#e2e8f0"; 
+                              if (entry.name === 'Consumido') color = "#ef4444"; 
+                              if (entry.name === 'Saldo Restante') color = "#22c55e"; 
                               return <Cell key={`cell-${index}`} fill={color} />;
                             })}
                           </Pie>
-                          <RechartsTooltip wrapperStyle={{zIndex: 100}} formatter={(v: number) => [dashData.isFechadoMode ? `${v}%` : `${v.toFixed(1)}h`, '']} />
+                          <RechartsTooltip wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v.toFixed(1)}h`, '']} />
                         </PieChart>
                       </ResponsiveContainer>
                       <div className="absolute text-center pointer-events-none z-0">
-                        <p className="text-[10px] font-bold text-muted-foreground uppercase">{dashData.isFechadoMode ? 'Avanço Físico' : 'Consumo'}</p>
-                        <p className="text-2xl font-black text-primary mt-0.5">
-                          {dashData.isFechadoMode 
-                            ? `${dashData.medidoGlobal}%` 
-                            : `${dashData.percentualGlobal}%`}
-                        </p>
+                        <p className="text-[10px] font-bold text-muted-foreground uppercase">Consumo</p>
+                        <p className="text-2xl font-black text-primary mt-0.5">{dashData.percentualGlobal}%</p>
                       </div>
                     </div>
                   </div>
 
-                  {/* 🌟 TABELAS MÁGICAS DA SAÚDE GLOBAL */}
-                  {/* Se tem 1 contrato selecionado e NÃO tem consultor -> Mostra a equipe do contrato */}
-                  {dashContratosSelecionados.length === 1 && dashConsultor === 'todos' && (
+                  {(dashContratosSelecionados.length === 1 || (dashOs !== 'todas' && dashOs !== '')) && dashConsultor === 'todos' && (
                      <Card className="shadow-sm border-primary/20">
                         <CardHeader className="bg-muted/5 pb-3">
                            <CardTitle className="text-sm flex items-center gap-2 text-primary">
@@ -2048,14 +2562,15 @@ export function AdminDashboard() {
                                  </tr>
                               </thead>
                               <tbody className="divide-y">
-                                 {/* Componente Lógico TableByConsultant Injetado aqui (Substituído o UseMemo para rodar inline e não quebrar) */}
                                  {(() => {
-                                    const cid = dashContratosSelecionados[0];
+                                    const cid = dashContratosSelecionados.length === 1 ? dashContratosSelecionados[0] : osList.find(o => o.id === dashOs)?.contract_id;
+                                    if(!cid) return null;
                                     const cObj = contratos.find(c => c.id === cid);
                                     if(!cObj) return null;
                                     const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
-                                    const fTimes = allTimesheets.filter(t => t.contract_id === cid && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-                                    const fAlocs = allAlocacoes.filter(a => a.contract_id === cid && a.mes === dashMes && a.ano === dashAno);
+                                    
+                                    const fTimes = allTimesheets.filter(t => t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                                    const fAlocs = allAlocacoes.filter(a => a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
                                     
                                     const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
                                     if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
@@ -2071,7 +2586,7 @@ export function AdminDashboard() {
 
                                       uAlocs.forEach(a => {
                                         const osObj = osList.find(o => o.id === a.os_id);
-                                        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cObj.tipo);
+                                        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
                                         if (isSuportes) {
                                            hasIlim = true;
                                            const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
@@ -2110,7 +2625,6 @@ export function AdminDashboard() {
                      </Card>
                   )}
 
-                  {/* Se tem 1 consultor selecionado -> Mostra as atividades daquele consultor de forma Hierárquica */}
                   {dashConsultor !== 'todos' && (
                      <Card className="shadow-sm border-blue-500/20">
                         <CardHeader className="bg-blue-500/5 pb-3">
@@ -2155,7 +2669,7 @@ export function AdminDashboard() {
                                       const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
                                       
                                       const osObj = osList.find(o => o.id === a.os_id);
-                                      const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(cObj.tipo);
+                                      const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
                                       
                                       let orcado = 0;
                                       if (isSuportes) orcado = gasto;
@@ -2165,20 +2679,12 @@ export function AdminDashboard() {
                                       }
                                       if (orcado === 0 && gasto === 0) return null;
 
-                                      return {
-                                        contrato: cObj.codigo,
-                                        nomeContrato: cObj.nome,
-                                        os: osObj?.codigo || '-',
-                                        atividade: a.atividade,
-                                        orcado, gasto,
-                                        ilimitado: isSuportes
-                                      };
+                                      return { contrato: cObj.codigo, nomeContrato: cObj.nome, os: osObj?.codigo || '-', atividade: a.atividade, orcado, gasto, ilimitado: isSuportes };
                                     });
 
                                     const validRows = rows.filter(r => r !== null);
                                     if(validRows.length === 0) return <tr><td colSpan={4} className="text-center py-6 text-muted-foreground text-xs">Sem atividades neste ciclo.</td></tr>;
 
-                                    // 🌟 FASE 3: Motor de Agrupamento Hierárquico
                                     const agrupado = validRows.reduce((acc: any, row: any) => {
                                        const key = `${row.contrato}|${row.os}|${row.nomeContrato}`;
                                        if (!acc[key]) acc[key] = { contrato: row.contrato, nomeContrato: row.nomeContrato, os: row.os, itens: [] };
@@ -2224,44 +2730,6 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* VIEW: RADAR DE ALERTAS */}
-        {menuAtivo === 'alertas' && (
-          <div className="space-y-6 w-full">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <Card className="border-red-500 bg-red-500/5">
-                <CardHeader><CardTitle className="text-red-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Ociosidade Crítica (&lt; 30% da Carga Mínima)</CardTitle></CardHeader>
-                <CardContent className="space-y-3">
-                  {!radarAlertas.jaPassouDaMetade ? (
-                    <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-center shadow-sm">
-                      <p className="text-amber-700 font-bold text-sm">Primeira Quinzena do Ciclo</p>
-                      <p className="text-xs text-amber-700/80 mt-1">O radar de ociosidade da equipe despertará automaticamente na metade do ciclo padrão (após o dia 10 de cada mês).</p>
-                    </div>
-                  ) : radarAlertas.ociosos.length === 0 ? (
-                    <p className="text-muted-foreground text-xs p-2">Toda a equipe está engajada no ciclo atual!</p> 
-                  ) : radarAlertas.ociosos.map((o, i) => (
-                    <div key={i} className="bg-background p-4 rounded-xl border border-red-200 flex justify-between items-center shadow-sm">
-                      <div><p className="font-bold text-sm">{o.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Mínimo: {o.meta}h | Apontou: {o.trabalhadas}h</p></div>
-                      <Badge variant="destructive" className="font-mono text-sm">{o.percentual}%</Badge>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-
-              <Card className="border-amber-500 bg-amber-500/5">
-                <CardHeader><CardTitle className="text-amber-600 flex items-center gap-2 text-base"><AlertTriangle className="w-5 h-5"/> Atenção para Aditivos (&gt; 70% Consumido)</CardTitle></CardHeader>
-                <CardContent className="space-y-3">
-                  {radarAlertas.estourados.length === 0 ? <p className="text-muted-foreground text-xs p-2">Nenhum contrato atingiu o limite crítico de consumo no ciclo.</p> : radarAlertas.estourados.map((e, i) => (
-                    <div key={i} className="bg-background p-4 rounded-xl border border-amber-200 flex justify-between items-center shadow-sm">
-                      <div className="max-w-[70%]"><p className="font-bold text-sm truncate">{e.contrato}</p><p className="text-[10px] text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded w-fit mt-1">{e.tipo.replace(/_/g, ' ').toUpperCase()}</p></div>
-                      <Badge className="bg-amber-500 text-white font-mono text-sm">{e.perc}%</Badge>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-        )}
-
         {/* VIEW: DASHBOARD DE FATURAMENTO - CLIENTES */}
         {menuAtivo === 'faturamento-cliente' && (
           <Card className="border-t-4 border-t-amber-600 shadow-sm min-h-125 w-full">
@@ -2285,10 +2753,10 @@ export function AdminDashboard() {
                     <BarChart data={fatData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
                       <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
-                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => fatData.isFechadoMode ? `${v}%` : `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number, name: string, props: any) => [fatData.isFechadoMode ? `${v}%` : `${v} horas faturáveis`, fatData.isFechadoMode ? 'Físico Medido' : 'Para Cliente']} />
+                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
+                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas faturáveis`, 'Para Cliente']} />
                       <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55}>
-                        {fatData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={fatData.isFechadoMode ? '#f59e0b' : '#d97706'} />)}
+                        {fatData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill="#d97706" />)}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -2298,9 +2766,87 @@ export function AdminDashboard() {
           </Card>
         )}
 
+        {/* VIEW: RADAR DE ALERTAS */}
+        {menuAtivo === 'alertas' && (
+          <div className="space-y-6 w-full animate-in fade-in-50">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertTriangle className="w-5 h-5 text-red-500" />
+              <h2 className="text-xl font-bold tracking-tight">Radar de Alertas</h2>
+            </div>
+            
+            {radarAlertas.ociosos.length === 0 && radarAlertas.estouradosConsultor.length === 0 && radarAlertas.estouradosAssessoria.length === 0 && radarAlertas.estouradosOS.length === 0 ? (
+               <div className="py-20 flex flex-col items-center justify-center border-2 border-dashed rounded-2xl bg-green-500/5 border-green-500/20 text-green-700">
+                  <Check className="w-12 h-12 mb-3 text-green-500 opacity-50" />
+                  <p className="font-bold text-lg">Tudo sob controle!</p>
+                  <p className="text-sm opacity-80 mt-1">Nenhum contrato, OS ou consultor em estado crítico de horas no momento.</p>
+               </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                
+                {/* 1. OCIOSIDADE */}
+                <Card className="border-red-500/50 bg-red-500/5 shadow-sm">
+                  <CardHeader className="pb-3 border-b border-red-500/10"><CardTitle className="text-red-700 flex items-center gap-2 text-sm uppercase tracking-wider"><User className="w-4 h-4"/> Ociosidade Crítica (&lt; 30% da Meta)</CardTitle></CardHeader>
+                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
+                    {!radarAlertas.jaPassouDaMetade ? (
+                      <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-center shadow-sm">
+                        <p className="text-amber-700 font-bold text-sm">Primeira Quinzena do Ciclo</p>
+                        <p className="text-xs text-amber-700/80 mt-1">O radar despertará após a metade do ciclo (dia 10).</p>
+                      </div>
+                    ) : radarAlertas.ociosos.length === 0 ? (
+                      <p className="text-muted-foreground text-xs p-2 text-center">Toda a equipe está engajada!</p> 
+                    ) : radarAlertas.ociosos.map((o, i) => (
+                      <div key={i} className="bg-background p-3 rounded-lg border border-red-200 flex justify-between items-center shadow-xs">
+                        <div><p className="font-bold text-sm">{o.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Meta: {o.meta}h | Apontou: {o.trabalhadas}h</p></div>
+                        <Badge variant="destructive" className="font-mono">{o.percentual}%</Badge>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+
+                {/* 2. CONSULTORES ESTOURANDO MÊS */}
+                <Card className="border-amber-500/50 bg-amber-500/5 shadow-sm">
+                  <CardHeader className="pb-3 border-b border-amber-500/10"><CardTitle className="text-amber-700 flex items-center gap-2 text-sm uppercase tracking-wider"><Clock className="w-4 h-4"/> Risco de Estouro Mensal (Equipe)</CardTitle></CardHeader>
+                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
+                    {radarAlertas.estouradosConsultor.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhum consultor consumiu &gt; 70% da sua alocação do mês.</p> : radarAlertas.estouradosConsultor.map((e, i) => (
+                      <div key={i} className="bg-background p-3 rounded-lg border border-amber-200 flex justify-between items-center shadow-xs">
+                        <div><p className="font-bold text-sm truncate">{e.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Mês: {e.orcado}h | Gastou: {e.consumido}h</p></div>
+                        <Badge className="bg-amber-500 text-white font-mono">{e.perc}%</Badge>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+
+                {/* 3. ASSESSORIA GLOBAL ESTOURANDO */}
+                <Card className="border-orange-500/50 bg-orange-500/5 shadow-sm">
+                  <CardHeader className="pb-3 border-b border-orange-500/10"><CardTitle className="text-orange-700 flex items-center gap-2 text-sm uppercase tracking-wider"><Briefcase className="w-4 h-4"/> Assessoria: Aditivo Global (&gt; 70%)</CardTitle></CardHeader>
+                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
+                    {radarAlertas.estouradosAssessoria.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhuma Assessoria atingiu o limite crítico global.</p> : radarAlertas.estouradosAssessoria.map((e, i) => (
+                      <div key={i} className="bg-background p-3 rounded-lg border border-orange-200 flex justify-between items-center shadow-xs">
+                        <div><p className="font-bold text-sm truncate">{e.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">Teto Vida Útil: {e.orcado}h | Gastou: {e.consumido}h</p></div>
+                        <Badge className="bg-orange-500 text-white font-mono">{e.perc}%</Badge>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+
+                {/* 4. OS ESTOURANDO */}
+                <Card className="border-purple-500/50 bg-purple-500/5 shadow-sm">
+                  <CardHeader className="pb-3 border-b border-purple-500/10"><CardTitle className="text-purple-700 flex items-center gap-2 text-sm uppercase tracking-wider"><FolderTree className="w-4 h-4"/> Ordens de Serviço Críticas (&gt; 70%)</CardTitle></CardHeader>
+                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
+                    {radarAlertas.estouradosOS.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhuma OS específica atingiu o limite crítico da matriz.</p> : radarAlertas.estouradosOS.map((e, i) => (
+                      <div key={i} className="bg-background p-3 rounded-lg border border-purple-200 flex justify-between items-center shadow-xs">
+                        <div><p className="font-bold text-sm truncate text-purple-700">{e.contrato} - OS: {e.os}</p><p className="text-xs text-muted-foreground mt-0.5">Teto da Base: {e.orcado}h | Gastou: {e.consumido}h</p></div>
+                        <Badge className="bg-purple-500 text-white font-mono">{e.perc}%</Badge>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   )
 }
-// Import de Ícone que não estava presente na barra de ferramentas do Admin, para a nova aba do Resumo
-import { Users } from 'lucide-react';

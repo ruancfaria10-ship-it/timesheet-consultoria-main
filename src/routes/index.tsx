@@ -1,7 +1,7 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo } from "react";
-import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download } from "lucide-react";
+import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -92,7 +92,6 @@ const getCycleMonthYear = (date: Date, cInicio: number, cFim: number) => {
   return { month: String(m), year: String(y) };
 }
 
-// Tiramos a "foto" da URL na largada
 let urlOriginal = typeof window !== 'undefined' ? window.location.href : '';
 
 function TimesheetPage() {
@@ -129,6 +128,9 @@ function TimesheetPage() {
   const [authorizedDates, setAuthorizedDates] = useState<string[]>([]);
   const [horasMinimasMes, setHorasMinimasMes] = useState<number>(0);
 
+  // Estado para controlar a edição retroativa
+  const [editingRetroId, setEditingRetroId] = useState<string | null>(null);
+
   const [panelMes, setPanelMes] = useState<string>(() => {
     const now = new Date();
     const refMonth = now.getDate() >= 25 ? (now.getMonth() === 11 ? 0 : now.getMonth() + 1) : now.getMonth();
@@ -163,10 +165,9 @@ function TimesheetPage() {
 
   useEffect(() => {
     const checkHashAndTokens = () => {
-      // 🌟 Verifica a URL e o carimbo do SessionStorage
       if ((urlOriginal.includes('type=invite') || urlOriginal.includes('type=recovery')) && !sessionStorage.getItem('senha_redefinida')) {
         setShowUpdatePassword(true);
-        sessionStorage.setItem('senha_redefinida', 'true'); // Carimba que já mostrou!
+        sessionStorage.setItem('senha_redefinida', 'true');
         urlOriginal = ''; 
       }
     };
@@ -189,7 +190,6 @@ function TimesheetPage() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
       
-      // 🌟 Reforço: Se o Supabase tentar forçar a barra, bloqueamos com o carimbo também
       if (event === 'PASSWORD_RECOVERY' && !sessionStorage.getItem('senha_redefinida')) {
         setShowUpdatePassword(true);
         sessionStorage.setItem('senha_redefinida', 'true');
@@ -226,9 +226,15 @@ function TimesheetPage() {
 
     if (error) return console.error("Erro ao carregar alocações:", error);
     if (data) {
-      const typedData = data as unknown as AllocationRow[];
-      setAllocations(typedData);
-      const activeAllocations = typedData.filter(a => a.contratos?.status_ativo);
+      const rawData = data as unknown as AllocationRow[];
+      
+      // --- NOVA TRAVA: FILTRA ALOCAÇÕES ZERADAS ---
+      // Como Overhead e Pequenos Suportes salvam 9999 no banco, eles passam automaticamente no > 0.
+      const validAllocations = rawData.filter(a => a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)');
+
+      setAllocations(validAllocations);
+      
+      const activeAllocations = validAllocations.filter(a => a.contratos?.status_ativo);
       if (activeAllocations.length > 0) {
         const savedContract = localStorage.getItem("engeprice_contractId");
         const isValidSaved = activeAllocations.some(a => a.contract_id === savedContract);
@@ -263,7 +269,9 @@ function TimesheetPage() {
   };
 
   const contractsList = Array.from(new Map(
-    allocations.filter(a => a.contratos?.status_ativo).map(a => [
+    allocations
+      .filter(a => a.contratos?.status_ativo && a.atividade !== 'Preço Fechado (Medição)')
+      .map(a => [
       a.contract_id, 
       { 
         id: a.contract_id, 
@@ -293,6 +301,14 @@ function TimesheetPage() {
     return getCycleMonthYear(daySelectionDate, cIni, cFim);
   }, [currentContractObjFull, daySelectionDate]);
 
+  const filteredOsList = useMemo(() => {
+      return osList.filter(os => {
+        // Oculta a OS se o consultor estiver nela como Preço Fechado no mês atual
+        const isFechado = allocations.some(a => a.os_id === os.id && a.atividade === 'Preço Fechado (Medição)' && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
+        return !isFechado;
+      });
+    }, [osList, allocations, activeCycleForInput]);
+
   const availableActivities = Array.from(new Set(
     allocations.filter(a => 
       a.contract_id === contractId && 
@@ -305,7 +321,7 @@ function TimesheetPage() {
   useEffect(() => {
     const cObj = contractsList.find((x) => x.id === contractId);
     if (cObj?.tipo === 'continuado_com_os') {
-      const osDoContrato = osList.filter(o => o.contract_id === contractId);
+      const osDoContrato = filteredOsList.filter(o => o.contract_id === contractId);
       if (osDoContrato.length > 0 && !osDoContrato.find(o => o.id === osId)) {
         setOsId(osDoContrato[0].id);
       } else if (osDoContrato.length === 0) setOsId("");
@@ -363,7 +379,7 @@ function TimesheetPage() {
   }, [currentContractObjFull, daySelectionDate]);
 
   const currentOsObj = osList.find(o => o.id === osId);
-  const isIlimitado = ['continuado_sem_os', 'fechado'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
+  const isIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
 
   const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId) && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
   const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
@@ -427,13 +443,13 @@ function TimesheetPage() {
     let totalOrcadoNesteCiclo = 0;
     let hasIlimitado = false;
 
-    const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
+    const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno && a.atividade !== 'Preço Fechado (Medição)');
 
     alocsDoMes.forEach(alloc => {
        const cb = getCycleBoundsForContract(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim, panelMes, panelAno);
        const isComOsCheck = alloc.contratos!.tipo === 'continuado_com_os';
        const osObjCheck = isComOsCheck && alloc.os_id ? osList.find(o => o.id === alloc.os_id) : null;
-       const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(alloc.contratos!.tipo);
+       const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(alloc.contratos!.tipo);
        
        if (isSuportesCheck) {
           hasIlimitado = true;
@@ -502,7 +518,7 @@ function TimesheetPage() {
       const cb = getCycleBoundsForContract(contract.inicio, contract.fim, panelMes, panelAno);
 
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
-        const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado'].includes(contract.tipo);
+        const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(contract.tipo);
         if (isSuportes) hasIlimitado = true;
 
         const atividadesProcessadas = osGroup.atividades.map((a: any) => {
@@ -599,6 +615,44 @@ function TimesheetPage() {
     }
   };
 
+  const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
+    const entryToEdit = entries.find(e => e.id === id);
+    if (entryToEdit) {
+       const activeCb = getContractCycleBounds(entryToEdit.contractId);
+       const pastCycleStart = new Date(activeCb.start);
+       const m = pastCycleStart.getMonth();
+       pastCycleStart.setMonth(m === 0 ? 11 : m - 1);
+       if (m === 0) pastCycleStart.setFullYear(pastCycleStart.getFullYear() - 1);
+
+       const now = new Date();
+       const isDia25 = now.getDate() === 25;
+
+       if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
+           if (!(isDia25 && entryToEdit.start >= pastCycleStart.getTime() && newStart >= pastCycleStart.getTime())) {
+               return toast.error("🚫 Régua Passada! Edição bloqueada pois o ciclo passado já foi liquidado.");
+           }
+       }
+
+       const entryDateStr = new Date(entryToEdit.start).toISOString().split('T')[0];
+       if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
+          return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
+       }
+    }
+
+    if (newEnd <= newStart) return toast.error("A hora de fim deve ser posterior à hora de início.");
+    if (newNotes.trim().length === 0) return toast.error("A observação é obrigatória.");
+
+    setEntries((p) => p.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd, notes: newNotes.trim(), edited: true } : e)));
+    toast.success("Apontamento atualizado");
+
+    if (user) {
+      await supabase.from('timesheets').update({
+        start_at: new Date(newStart).toISOString(), end_at: new Date(newEnd).toISOString(),
+        notes: newNotes.trim(), edited: true
+      }).eq('id', id);
+    }
+  };
+
   const executeLaunch = async (dateStr: string) => {
     if (!contractId || contractId === "" || contractId === "none" || !activity) return toast.error("Selecione contrato e atividade válidos.");
     if (currentContractType === 'continuado_com_os' && !osId) return toast.error("Selecione uma Ordem de Serviço (OS) para este contrato.");
@@ -608,13 +662,25 @@ function TimesheetPage() {
     const endMs = getTimestampFromTimeFields(endTime, dateStr);
 
     const activeCb = getContractCycleBounds(contractId);
+    const pastCycleStart = new Date(activeCb.start);
+    const m = pastCycleStart.getMonth();
+    pastCycleStart.setMonth(m === 0 ? 11 : m - 1);
+    if (m === 0) pastCycleStart.setFullYear(pastCycleStart.getFullYear() - 1);
+
+    const now = new Date();
+    const isDia25 = now.getDate() === 25;
+
     if (startMs < activeCb.start) {
-        return toast.error("🚫 Ciclo Fechado! Não é possível registrar horas em um ciclo já encerrado para este contrato.");
+        if (!(isDia25 && startMs >= pastCycleStart.getTime())) {
+            return toast.error("🚫 Régua Passada! O dia 26 chegou e este ciclo foi liquidado e travado para pagamentos.");
+        }
     }
 
     if (endMs <= startMs) return toast.error("A hora de fim deve ser posterior à hora de início.");
 
     const hasOverlap = entries.some(entry => {
+      // Ignora o próprio card sendo editado no painel retroativo
+      if (editingRetroId && entry.id === editingRetroId) return false;
       if (!entry.end) return false;
       return (startMs < entry.end) && (endMs > entry.start);
     });
@@ -622,13 +688,18 @@ function TimesheetPage() {
     if (hasOverlap) return toast.error("Conflito de horário! Você já possui horas nesse período.");
 
     const durationMs = endMs - startMs;
+    
+    // Se estivermos editando, subtraímos a duração antiga do consumo antes de testar os limites
+    const oldEntry = editingRetroId ? entries.find(e => e.id === editingRetroId) : null;
+    const oldDurationMs = oldEntry ? ((oldEntry.end ?? Date.now()) - oldEntry.start) : 0;
+    
     if (!isIlimitado) {
-      if (activityBudgetMs > 0 && (activityUsedMs + durationMs > activityBudgetMs)) {
-        const remaining = Math.max(0, activityBudgetMs - activityUsedMs);
+      if (activityBudgetMs > 0 && ((activityUsedMs - oldDurationMs) + durationMs > activityBudgetMs)) {
+        const remaining = Math.max(0, activityBudgetMs - (activityUsedMs - oldDurationMs));
         return toast.error(`⚠️ Saldo insuficiente na disciplina! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
       }
-      if (contractBudgetMs > 0 && (contractUsedMs + durationMs > contractBudgetMs)) {
-        const remaining = Math.max(0, contractBudgetMs - contractUsedMs);
+      if (contractBudgetMs > 0 && ((contractUsedMs - oldDurationMs) + durationMs > contractBudgetMs)) {
+        const remaining = Math.max(0, contractBudgetMs - (contractUsedMs - oldDurationMs));
         return toast.error(`⚠️ Saldo global insuficiente no contrato! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
       }
     }
@@ -637,8 +708,16 @@ function TimesheetPage() {
     if (!currentContract) return toast.error("Contrato inválido ou inativo.");
     
     const label = `${currentContract.code} — ${currentContract.name}`;
-    const newEntryId = crypto.randomUUID();
 
+    if (editingRetroId) {
+      await handleEditEntry(editingRetroId, startMs, endMs, notes);
+      setEditingRetroId(null);
+      setNotes("");
+      setStartTime(endTime);
+      return;
+    }
+
+    const newEntryId = crypto.randomUUID();
     const newEntry: TimeEntry = {
       id: newEntryId, contractId: contractId, contractName: label, activity: activity,
       notes: notes.trim(), start: startMs, end: endMs, os_id: isComOs ? osId : undefined
@@ -664,40 +743,35 @@ function TimesheetPage() {
   const handleAddEntry = () => executeLaunch(daySelection === "hoje" ? getTodayStr() : getYesterdayStr());
   const handleAddPanelEntry = () => executeLaunch(panelDate);
 
-  const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
-    const entryToEdit = entries.find(e => e.id === id);
-    if (entryToEdit) {
-       const activeCb = getContractCycleBounds(entryToEdit.contractId);
-       if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
-           return toast.error("🚫 Ciclo Fechado! Não é possível alterar apontamentos em um ciclo encerrado.");
-       }
-
-       const entryDateStr = new Date(entryToEdit.start).toISOString().split('T')[0];
-       if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
-          return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
-       }
-    }
-
-    if (newEnd <= newStart) return toast.error("A hora de fim deve ser posterior à hora de início.");
-    if (newNotes.trim().length === 0) return toast.error("A observação é obrigatória.");
-
-    setEntries((p) => p.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd, notes: newNotes.trim(), edited: true } : e)));
-    toast.success("Apontamento atualizado");
-
-    if (user) {
-      await supabase.from('timesheets').update({
-        start_at: new Date(newStart).toISOString(), end_at: new Date(newEnd).toISOString(),
-        notes: newNotes.trim(), edited: true
-      }).eq('id', id);
-    }
+  const handleEditRetro = (entry: TimeEntry) => {
+    setContractId(entry.contractId);
+    if (entry.os_id) setOsId(entry.os_id);
+    setActivity(entry.activity);
+    setNotes(entry.notes || "");
+    const s = new Date(entry.start);
+    const e = entry.end ? new Date(entry.end) : new Date();
+    setStartTime(`${String(s.getHours()).padStart(2,'0')}:${String(s.getMinutes()).padStart(2,'0')}`);
+    setEndTime(`${String(e.getHours()).padStart(2,'0')}:${String(e.getMinutes()).padStart(2,'0')}`);
+    setEditingRetroId(entry.id);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleDeleteEntry = async (id: string) => {
     const entryToDel = entries.find(e => e.id === id);
     if (entryToDel) {
        const activeCb = getContractCycleBounds(entryToDel.contractId);
+       const pastCycleStart = new Date(activeCb.start);
+       const m = pastCycleStart.getMonth();
+       pastCycleStart.setMonth(m === 0 ? 11 : m - 1);
+       if (m === 0) pastCycleStart.setFullYear(pastCycleStart.getFullYear() - 1);
+
+       const now = new Date();
+       const isDia25 = now.getDate() === 25;
+
        if (entryToDel.start < activeCb.start) {
-           return toast.error("🚫 Ciclo Fechado! Não é possível excluir apontamentos de um ciclo já encerrado.");
+           if (!(isDia25 && entryToDel.start >= pastCycleStart.getTime())) {
+               return toast.error("🚫 Régua Passada! Exclusão bloqueada pois o ciclo passado já foi liquidado.");
+           }
        }
 
        const entryDateStr = new Date(entryToDel.start).toISOString().split('T')[0];
@@ -721,20 +795,28 @@ function TimesheetPage() {
   yesterdayStart.setDate(yesterdayStart.getDate() - 1);
   const targetHistoryEntries = entries.filter(e => e.start >= yesterdayStart.getTime());
 
-  if (authLoading) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Carregando sistema...</div>;
+  // 🌟 LOADING LIMPO (FASE 1)
+  if (authLoading) return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-background text-foreground animate-in fade-in duration-500">
+      <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-primary shadow-lg mb-6 animate-pulse">
+         <img src="/favicon.ico" alt="Logo Engeprice" className="w-12 h-12 object-contain dark:bg-white dark:p-1.5 dark:rounded-xl" />
+      </div>
+      <h2 className="text-xl font-bold tracking-tight mb-2 text-primary">Engeprice Timesheet</h2>
+      <p className="text-sm text-muted-foreground flex items-center gap-2">
+        <Loader2 className="w-4 h-4 animate-spin" /> Autenticando e carregando dados...
+      </p>
+    </div>
+  );
+
   if (!user) return <Login onLoginSuccess={() => {}} />;
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background text-foreground w-full relative">
       
-      {/* 🌟 TELA DE DEFINIR SENHA (Modal Flutuante de Convite/Recuperação) */}
       {showUpdatePassword && (
         <UpdatePassword 
           onUpdateSuccess={() => {
             setShowUpdatePassword(false);
-            // 🌟 A SUA IDEIA APLICADA AQUI: 
-            // window.location.href força o navegador a dar um F5 automático e limpo,
-            // matando qualquer "fantasma" do TanStack Router de uma vez por todas.
             window.location.href = window.location.pathname; 
           }} 
         />
@@ -796,7 +878,7 @@ function TimesheetPage() {
                   contracts={contractsList}
                   contractId={contractId}
                   contractType={currentContractType}
-                  osList={osList}
+                  osList={filteredOsList}
                   osId={osId}
                   activity={activity}
                   notes={notes}
@@ -1110,7 +1192,7 @@ function TimesheetPage() {
                             contracts={contractsList}
                             contractId={contractId}
                             contractType={currentContractType}
-                            osList={osList}
+                            osList={filteredOsList}
                             osId={osId}
                             activity={activity}
                             notes={notes}
@@ -1139,8 +1221,21 @@ function TimesheetPage() {
                           </div>
 
                           <Button onClick={handleAddPanelEntry} disabled={!notesValid || contractId === ""} className="w-full h-12 bg-primary">
-                            <Check className="w-4 h-4 mr-2" /> Gravar Registro no Dia {panelDate.split('-').reverse().join('/')}
+                            {editingRetroId ? (
+                              <><Check className="w-4 h-4 mr-2" /> Atualizar Registro</>
+                            ) : (
+                              <><Check className="w-4 h-4 mr-2" /> Gravar Registro no Dia {panelDate.split('-').reverse().join('/')}</>
+                            )}
                           </Button>
+
+                          {editingRetroId && (
+                            <Button onClick={() => {
+                               setEditingRetroId(null);
+                               setNotes("");
+                            }} variant="outline" className="w-full h-10 mt-2 border-dashed hover:bg-muted/50">
+                              Cancelar Edição
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ) : (
@@ -1174,9 +1269,10 @@ function TimesheetPage() {
                       const s = new Date(entry.start);
                       const e = entry.end ? new Date(entry.end) : new Date();
                       const hours = ((e.getTime() - s.getTime()) / 3600000).toFixed(1);
+                      const isBeingEdited = editingRetroId === entry.id;
                       
                       return (
-                        <div key={entry.id} className="p-3.5 bg-card border rounded-xl shadow-xs space-y-2 text-xs">
+                        <div key={entry.id} className={`p-3.5 bg-card border rounded-xl shadow-xs space-y-2 text-xs transition-colors ${isBeingEdited ? 'border-primary bg-primary/5' : ''}`}>
                           <div className="flex justify-between items-start gap-2">
                             <div>
                               <p className="font-bold text-foreground leading-tight">{entry.contractName}</p>
@@ -1192,6 +1288,9 @@ function TimesheetPage() {
                           
                           {isPanelDateUnlocked && (
                             <div className="flex justify-end gap-1.5 pt-1 border-t border-dashed mt-2">
+                              <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-primary hover:bg-primary/10" onClick={() => handleEditRetro(entry)}>
+                                <Pencil className="w-3 h-3 mr-1" /> Editar
+                              </Button>
                               <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-red-500 hover:bg-red-500/10" onClick={() => handleDeleteEntry(entry.id)}>
                                 <Trash2 className="w-3 h-3 mr-1" /> Excluir
                               </Button>
