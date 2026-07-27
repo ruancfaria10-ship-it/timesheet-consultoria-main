@@ -1393,6 +1393,145 @@ export function AdminDashboard() {
     saveAs(blob, `Matriz_Consolidada_${MESES_NOME[parseInt(dashMes)]}_${dashAno}.xlsx`);
   };
 
+  const exportarMatrizGestao = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Matriz Executiva');
+
+    const consultoresAtivos = consultores.filter(c => c.status_ativo !== false);
+
+    // Linha 1: Mês
+    sheet.getCell('A1').value = 'Mês:';
+    sheet.getCell('A1').font = { bold: true };
+    sheet.getCell('B1').value = `${MESES_NOME[parseInt(dashMes)]}/${dashAno}`;
+    
+    // Linha 2: Cabeçalhos Mestres (Mesclando 3 colunas por consultor)
+    sheet.mergeCells('A2:D2');
+    sheet.getCell('A2').value = 'CONTRATOS';
+    sheet.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('A2').font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+
+    consultoresAtivos.forEach((c, i) => {
+      const startCol = 5 + (i * 3); // Calcula as colunas dinamicamente (E, H, K...)
+      sheet.mergeCells(2, startCol, 2, startCol + 2);
+      const cell = sheet.getCell(2, startCol);
+      cell.value = c.nome;
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
+    });
+
+    // Linha 3: Sub-cabeçalhos
+    sheet.getCell('A3').value = 'Nº do Contrato';
+    sheet.getCell('B3').value = 'Descrição do Contrato';
+    sheet.getCell('C3').value = 'Contratada Pela';
+    sheet.getCell('D3').value = 'OS';
+    
+    consultoresAtivos.forEach((c, i) => {
+      const startCol = 5 + (i * 3);
+      sheet.getCell(3, startCol).value = 'Previsto';
+      sheet.getCell(3, startCol + 1).value = 'Medido / Entregue';
+      sheet.getCell(3, startCol + 2).value = 'Saldo';
+    });
+
+    sheet.getRow(3).font = { bold: true };
+    sheet.getColumn('A').width = 15;
+    sheet.getColumn('B').width = 35;
+    sheet.getColumn('C').width = 15;
+    sheet.getColumn('D').width = 20;
+    
+    consultoresAtivos.forEach((_, i) => {
+       const startCol = 5 + (i * 3);
+       sheet.getColumn(startCol).width = 12;
+       sheet.getColumn(startCol + 1).width = 18;
+       sheet.getColumn(startCol + 2).width = 12;
+    });
+
+    const processarLinhaConsultores = (cont: Contrato, os: OrdemServico | null, rowValues: any[]) => {
+      consultoresAtivos.forEach(cons => {
+         const cb = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
+         const isFechado = allAlocacoes.some(a => a.user_id === cons.id && a.contract_id === cont.id && a.mes === dashMes && a.ano === dashAno && a.atividade === 'Preço Fechado (Medição)') || cont.tipo === 'fechado';
+         const isSuportes = os?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cont.tipo);
+
+         if (isFechado) {
+            const pM = parseInt(dashMes); 
+            const pA = parseInt(dashAno);
+            
+            // Previsto: O que está medindo AGORA neste mês
+            const previsto = allMedicoes.find(m => m.user_id === cons.id && m.contract_id === cont.id && (os ? m.os_id === os.id : true) && m.mes === dashMes && m.ano === dashAno)?.percentual || 0;
+            
+            // Medido: O que foi medido no PASSADO
+            const medidoHistorico = allMedicoes.filter(m => {
+                if (m.user_id !== cons.id || m.contract_id !== cont.id) return false;
+                if (os && m.os_id !== os.id) return false;
+                const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                return mA < pA || (mA === pA && mM < pM);
+            }).reduce((sum, m) => sum + m.percentual, 0);
+            
+            const saldo = 100 - previsto - medidoHistorico;
+
+            if (previsto > 0 || medidoHistorico > 0) {
+               rowValues.push(`${previsto}%`, `${medidoHistorico}%`, `${saldo}%`);
+            } else {
+               rowValues.push('-', '-', '-');
+            }
+         } else {
+            // Lógica para Contratos em Horas
+            const tAtiv = allTimesheets.filter(t => t.user_id === cons.id && t.contract_id === cont.id && (os ? t.os_id === os.id : true) && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+            const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+            
+            const aloc = allAlocacoes.filter(a => a.user_id === cons.id && a.contract_id === cont.id && (os ? a.os_id === os.id : true) && a.mes === dashMes && a.ano === dashAno);
+            const previsto = aloc.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+
+            if (isSuportes) {
+               if (gasto > 0) rowValues.push(`${gasto.toFixed(1)}h`, `${gasto.toFixed(1)}h`, `0.0h`);
+               else rowValues.push('-', '-', '-');
+            } else {
+               if (previsto > 0 || gasto > 0) {
+                 const saldo = previsto - gasto;
+                 rowValues.push(
+                    previsto > 0 ? `${previsto.toFixed(1)}h` : '-',
+                    gasto > 0 ? `${gasto.toFixed(1)}h` : '-',
+                    `${saldo.toFixed(1)}h`
+                 );
+               } else {
+                 rowValues.push('-', '-', '-');
+               }
+            }
+         }
+      });
+    };
+
+    contratosVisao.forEach(cont => {
+       const osDoContrato = osList.filter(o => o.contract_id === cont.id);
+       if (osDoContrato.length > 0) {
+          osDoContrato.forEach(os => {
+             const rowValues: any[] = [cont.codigo, cont.nome, cont.fonte_pagamento, os.codigo];
+             processarLinhaConsultores(cont, os, rowValues);
+             sheet.addRow(rowValues);
+          });
+       } else {
+          const rowValues: any[] = [cont.codigo, cont.nome, cont.fonte_pagamento, '-'];
+          processarLinhaConsultores(cont, null, rowValues);
+          sheet.addRow(rowValues);
+       }
+    });
+
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber > 3) {
+         row.alignment = { vertical: 'middle', horizontal: 'center' };
+         row.getCell(2).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }; 
+      }
+      row.eachCell((cell) => {
+         cell.border = { top: {style:'thin', color: {argb:'FFE2E8F0'}}, left: {style:'thin', color: {argb:'FFE2E8F0'}}, bottom: {style:'thin', color: {argb:'FFE2E8F0'}}, right: {style:'thin', color: {argb:'FFE2E8F0'}} };
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, `Matriz_Executiva_Painel_${MESES_NOME[parseInt(dashMes)]}_${dashAno}.xlsx`);
+  };
+
   const exportarExcel = async (isFaturamento: boolean = false) => {
     let registros = allTimesheets.filter(t => {
       const cont = contratos.find(c => c.id === t.contract_id);
@@ -2556,7 +2695,15 @@ export function AdminDashboard() {
         {menuAtivo === 'dash-global' && (
           <Card className="border-t-4 border-t-amber-500 shadow-sm min-h-125 w-full">
             <CardHeader className="bg-muted/10 border-b pb-4">
-              <div><CardTitle className="text-lg">Painel dos Contratos (Saúde Financeira)</CardTitle><CardDescription>Visão geral de engenharia e lucratividade de custos.</CardDescription></div>
+              <div className="flex flex-wrap items-center justify-between gap-4 w-full">
+                <div>
+                  <CardTitle className="text-lg">Painel dos Contratos (Saúde Financeira)</CardTitle>
+                  <CardDescription>Visão geral de engenharia e custos dos contratos.</CardDescription>
+                </div>
+                <Button onClick={exportarMatrizGestao} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8 shadow-sm">
+                  <Download className="w-3.5 h-3.5" /> Exportar Visão Executiva (3 Colunas)
+                </Button>
+              </div>
               <div className="flex flex-col gap-4 mt-6 w-full">
                 <div className="flex items-center gap-4 bg-muted/30 p-2 rounded-md border w-fit">
                   <Label className="font-bold uppercase tracking-wider text-xs ml-2">Filtro de Modalidade:</Label>
