@@ -127,6 +127,7 @@ function TimesheetPage() {
   const [panelDate, setPanelDate] = useState<string>(getTodayStr());
   const [authorizedDates, setAuthorizedDates] = useState<string[]>([]);
   const [horasMinimasMes, setHorasMinimasMes] = useState<number>(0);
+  const [medicoesPainel, setMedicoesPainel] = useState<any[]>([]);
 
   // Estado para controlar a edição retroativa
   const [editingRetroId, setEditingRetroId] = useState<string | null>(null);
@@ -217,6 +218,16 @@ function TimesheetPage() {
     const { data, error } = await supabase.from('autorizacoes_edicao').select('data_liberada').eq('user_id', userId);
     if (!error && data) setAuthorizedDates(data.map(d => d.data_liberada));
   };
+
+  const fetchMedicoesPainel = async () => {
+    if (!user?.id) return;
+    const { data, error } = await supabase.from('medicoes').select('*').eq('user_id', user.id);
+    if (!error && data) setMedicoesPainel(data);
+  };
+
+  useEffect(() => {
+    if (user?.id) fetchMedicoesPainel();
+  }, [user?.id]);
 
   const fetchAllocations = async (userId: string) => {
     const { data, error } = await supabase
@@ -512,16 +523,36 @@ function TimesheetPage() {
       }
       cData.osGroups.get(osKey).atividades.push(alloc);
     });
-
+    
     return Array.from(map.values()).map(contract => {
-      let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false;
+      let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false; let hasFechado = false;
       const cb = getCycleBoundsForContract(contract.inicio, contract.fim, panelMes, panelAno);
 
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
-        const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(contract.tipo);
+        const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(contract.tipo);
         if (isSuportes) hasIlimitado = true;
 
         const atividadesProcessadas = osGroup.atividades.map((a: any) => {
+          const isFechadoAtiv = a.atividade === 'Preço Fechado (Medição)' || contract.tipo === 'fechado';
+          
+          if (isFechadoAtiv) {
+             hasFechado = true; // Avisa o contrato que ele tem medição em %
+             const pM = parseInt(panelMes); const pA = parseInt(panelAno);
+             const medidoMes = medicoesPainel.find(m => m.contract_id === contract.id && (osGroup.id !== 'sem_os' ? m.os_id === osGroup.id : true) && m.mes === panelMes && m.ano === panelAno)?.percentual || 0;
+             const medidoPassado = medicoesPainel.filter(m => {
+                 if (m.contract_id !== contract.id) return false;
+                 if (osGroup.id !== 'sem_os' && m.os_id !== osGroup.id) return false;
+                 const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                 return mA < pA || (mA === pA && mM < pM);
+             }).reduce((sum, m) => sum + m.percentual, 0);
+             
+             // Soma os percentuais no cabeçalho mestre do contrato
+             totalOrcadoNum += medidoMes;
+             totalGastoContrato += medidoPassado;
+             
+             return { nome: a.atividade, orcado: medidoMes, gasto: medidoPassado, saldo: 100 - (medidoMes + medidoPassado), isSuportes: false, isFechado: true };
+          }
+
           let filterCycle = entries.filter(e => e.contractId === contract.id && e.activity === a.atividade && e.start >= cb.start && e.start <= cb.end);
           if (contract.tipo === 'continuado_com_os' && osGroup.id !== 'sem_os') {
              filterCycle = filterCycle.filter(e => e.os_id === osGroup.id);
@@ -534,17 +565,19 @@ function TimesheetPage() {
           totalGastoContrato += gastoCicloH;
           totalOrcadoNum += orcadoCicloH;
 
-          return { nome: a.atividade, orcado: orcadoCicloH, gasto: gastoCicloH, saldo: saldoH, isSuportes };
+          return { nome: a.atividade, orcado: orcadoCicloH, gasto: gastoCicloH, saldo: saldoH, isSuportes, isFechado: false };
         });
         return { ...osGroup, isSuportes, atividades: atividadesProcessadas };
       });
 
       return {
         ...contract, osGroups: osGroupsProcessed, hasIlimitado, totalOrcado: totalOrcadoNum,
-        totalGasto: totalGastoContrato, totalSaldo: hasIlimitado ? 0 : (totalOrcadoNum - totalGastoContrato)
+        totalGasto: totalGastoContrato, 
+        totalSaldo: hasFechado ? (100 - (totalOrcadoNum + totalGastoContrato)) : (hasIlimitado ? 0 : (totalOrcadoNum - totalGastoContrato)),
+        hasFechado
       };
     });
-  }, [allocations, entries, panelMes, panelAno, osList]);
+  }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel]);
 
   const handleExportarExcelConsultor = async () => {
     try {
@@ -1078,23 +1111,25 @@ function TimesheetPage() {
                       <div className="flex flex-col md:flex-row md:items-center justify-between w-full text-left gap-4 pr-4">
                         <div>
                           <p className="text-sm font-bold text-primary">{contract.codigo} - {contract.nome}</p>
-                          <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">{contract.tipo.replace(/_/g, ' ')}</p>
+                          <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">
+                            {contract.hasFechado ? 'PREÇO FECHADO' : contract.tipo.replace(/_/g, ' ')}
+                          </p>
                         </div>
                         <div className="flex items-center gap-6 text-xs">
                           <div className="text-right">
                             <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
                             <p className="font-mono font-bold text-foreground">
-                              {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}h`}
+                              {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
                             </p>
                           </div>
                           <div className="text-right">
                             <p className="text-[10px] text-muted-foreground uppercase">Consumido</p>
-                            <p className="font-mono font-bold text-primary">{contract.totalGasto.toFixed(1)}h</p>
+                            <p className="font-mono font-bold text-primary">{contract.totalGasto.toFixed(1)}{contract.hasFechado ? '%' : 'h'}</p>
                           </div>
                           <div className="text-right">
                             <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
                             <p className={`font-mono font-bold ${contract.totalSaldo < 0 && !contract.hasIlimitado ? 'text-red-500' : 'text-green-600'}`}>
-                              {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}h`}
+                              {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
                             </p>
                           </div>
                         </div>
@@ -1120,19 +1155,34 @@ function TimesheetPage() {
                                   <th className="pb-2 font-medium text-right w-20">Saldo</th>
                                 </tr>
                               </thead>
-                              <tbody>
-                                {osGroup.atividades.map((ativ: any, idx: number) => (
-                                  <tr key={idx} className="border-t border-muted/50 hover:bg-muted/20">
-                                    <td className="py-2.5 font-medium">{ativ.nome}</td>
-                                    <td className="py-2.5 text-right text-muted-foreground font-mono">
-                                      {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
-                                    </td>
-                                    <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto.toFixed(1)}h</td>
-                                    <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
-                                      {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
-                                    </td>
-                                  </tr>
-                                ))}
+                              <tbody className="divide-y">
+                                {osGroup.atividades.map((ativ: any, idx: number) => {
+                                  const isFechado = ativ.nome === 'Preço Fechado (Medição)';
+                                  
+                                  if (ativ.isFechado) {
+                                     return (
+                                        <tr key={idx} className="border-t border-green-500/20 bg-green-500/5 hover:bg-green-500/10">
+                                          <td className="py-2.5 font-medium text-green-700 flex items-center gap-1.5 pl-2"><Check className="w-3.5 h-3.5"/> Medição de Avanço (%)</td>
+                                          <td className="py-2.5 text-right font-mono text-green-700">{ativ.orcado}%</td>
+                                          <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto}%</td>
+                                          <td className="py-2.5 text-right font-bold font-mono text-green-700">{ativ.saldo}%</td>
+                                        </tr>
+                                     );
+                                  }
+
+                                  return (
+                                    <tr key={idx} className="border-t border-muted/50 hover:bg-muted/20">
+                                      <td className="py-2.5 font-medium">{ativ.nome}</td>
+                                      <td className="py-2.5 text-right text-muted-foreground font-mono">
+                                        {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
+                                      </td>
+                                      <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto.toFixed(1)}h</td>
+                                      <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
+                                        {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           </div>
@@ -1143,23 +1193,14 @@ function TimesheetPage() {
                 ))}
               </Accordion>
 
-              <div className="grid grid-cols-2 gap-4 pt-2">
+              <div className="w-full pt-2">
                 <Card className="shadow-sm bg-muted/10 border-dashed">
                   <CardContent className="p-4 flex items-center justify-between">
                     <div>
                       <p className="text-[10px] uppercase font-bold text-muted-foreground">Horas Entregues no Ciclo</p>
-                      <p className="text-sm font-bold text-primary">Contratos por Hora</p>
+                      <p className="text-sm font-bold text-primary">Contratos por Hora e Dinâmicos</p>
                     </div>
-                    <p className="text-xl font-mono font-black">{resumoPorTipo.horas.toFixed(1)}h</p>
-                  </CardContent>
-                </Card>
-                <Card className="shadow-sm bg-muted/10 border-dashed">
-                  <CardContent className="p-4 flex items-center justify-between">
-                    <div>
-                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Horas Entregues no Ciclo</p>
-                      <p className="text-sm font-bold text-primary">Preços Fechados</p>
-                    </div>
-                    <p className="text-xl font-mono font-black">{resumoPorTipo.fechado.toFixed(1)}h</p>
+                    <p className="text-2xl font-mono font-black text-primary">{resumoPorTipo.horas.toFixed(1)}h</p>
                   </CardContent>
                 </Card>
               </div>

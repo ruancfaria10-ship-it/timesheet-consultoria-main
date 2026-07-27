@@ -545,6 +545,7 @@ export function AdminDashboard() {
       if (inserts.length > 0) await supabase.from('alocacoes').insert(inserts)
       if (deletes.length > 0) await supabase.from('alocacoes').delete().in('id', deletes)
       toast.success("Distribuição mensal salva com sucesso!"); 
+      await carregarTudoParaDash();
       carregarAlocacoesMensais(contratoAtivo, alocacaoOsId)
     } catch (e) { alert("Erro ao salvar.") }
     setSalvando(false)
@@ -564,6 +565,13 @@ export function AdminDashboard() {
       if (temHoras) {
         alert("❌ BLOQUEIO: Este consultor já possui horas registradas neste projeto.\nNão é possível alterar para Preço Fechado para não corromper o histórico.\nSe necessário, inative a alocação e crie um novo contrato/OS.");
         return;
+      }
+
+      // NOVO BLOQUEIO DE LIXO NO BANCO (JUNK DATA)
+      const temAlocacao = allAlocacoes.some(a => a.user_id === id && a.contract_id === contratoAtivo && (idOsValido ? a.os_id === idOsValido : true) && a.horas_disponiveis > 0 && a.atividade !== 'Preço Fechado (Medição)');
+      if (temAlocacao) {
+         alert("❌ BLOQUEIO DE SEGURANÇA (DADOS FANTASMAS):\n\nEste consultor possui horas já distribuídas no sistema para este projeto.\nPara evitar corromper o painel, vá na aba 'Distribuição Mensal', zere as horas dele e Salve. Só então retorne aqui na Matriz e mude para Preço Fechado.");
+         return;
       }
     }
     // Se mudou pra fechado, varre e apaga as atividades (pois preço fechado não usa escopo de horas)
@@ -888,31 +896,27 @@ export function AdminDashboard() {
   
   async function carregarMedicoes() {
     setMedLoading(true)
-    // Busca TODOS os contratos que esse consultor tem alocação no mês, ou que o tipo seja preço fechado na matriz
-    const { data: alocs } = await supabase.from('alocacoes').select('contract_id, os_id, atividade').eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno)
-    const { data: matrizFechado } = await supabase.from('linha_base_items').select('contract_id, os_id').eq('user_id', medConsultor).eq('tipo_pagamento', 'fechado')
+    
+    // 1. Busca diretamente da Matriz Global quem é Preço Fechado (Garante que aparece em qualquer mês!)
+    const { data: matrizFechado } = await supabase.from('linha_base_items').select('contract_id, os_id').eq('user_id', medConsultor).eq('tipo_pagamento', 'fechado');
+    
+    // 2. Busca as alocações (caso haja algum resquício ou contrato híbrido)
+    const { data: alocs } = await supabase.from('alocacoes').select('contract_id, os_id').eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno).eq('atividade', 'Preço Fechado (Medição)');
     
     const vinculados: any[] = [];
     
-    // 1. Adiciona contratos e OS que nasceram puramente como Preço Fechado
-    (matrizFechado || []).forEach(m => {
-       const c = contratos.find(x => x.id === m.contract_id);
-       const o = osList.find(x => x.id === m.os_id);
+    const addVinculo = (cid: string, osid: string | null) => {
+       const c = contratos.find(x => x.id === cid);
+       const o = osList.find(x => x.id === osid);
        if (c) {
-          const key = m.os_id ? `${c.id}_${m.os_id}` : c.id;
-          if (!vinculados.find(v => v.key === key)) vinculados.push({ key, contract_id: c.id, os_id: m.os_id, codigo: c.codigo, nome: c.nome, os_codigo: o?.codigo });
+          const key = osid ? `${c.id}_${osid}` : c.id;
+          if (!vinculados.find(v => v.key === key)) vinculados.push({ key, contract_id: c.id, os_id: osid, codigo: c.codigo, nome: c.nome, os_codigo: o?.codigo });
        }
-    });
+    };
 
-    // 2. Adiciona as alocações híbridas de OS que têm a atividade mágica
-    (alocs || []).filter(a => a.atividade === 'Preço Fechado (Medição)').forEach(a => {
-       const c = contratos.find(x => x.id === a.contract_id);
-       const o = osList.find(x => x.id === a.os_id);
-       if (c) {
-          const key = a.os_id ? `${c.id}_${a.os_id}` : c.id;
-          if (!vinculados.find(v => v.key === key)) vinculados.push({ key, contract_id: c.id, os_id: a.os_id, codigo: c.codigo, nome: c.nome, os_codigo: o?.codigo });
-       }
-    });
+    (matrizFechado || []).forEach(m => addVinculo(m.contract_id, m.os_id));
+    (alocs || []).forEach(a => addVinculo(a.contract_id, a.os_id));
+    
     setMedContratosVinculados(vinculados);
     
     const { data: meds } = await supabase.from('medicoes').select('*').eq('user_id', medConsultor).eq('mes', medMes).eq('ano', medAno)
@@ -981,23 +985,29 @@ export function AdminDashboard() {
       if (cont.ciclo_inicio > cont.ciclo_fim && currentDay >= cont.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
       const dM = parseInt(dashMes); const dA = parseInt(dashAno);
       const isPast = (dA < y) || (dA === y && dM < m);
-      const isCurrent = (dA === y && dM === m);
 
       let orcadoAtual = 0;
-      const alocsContrato = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)');
       
-      alocsContrato.forEach(a => {
-        const os = osList.find(o => o.id === a.os_id);
-        if (os?.codigo === '🛠️ Pequenos Suportes' || cont.tipo === 'overhead') {
-           const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-           orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-        } else {
-           if (isPast) {
-             const tAtiv = timesContrato.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-             orcadoAtual += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-           } else if (isCurrent) orcadoAtual += a.horas_disponiveis;
-        }
-      });
+      if (cont.tipo === 'overhead' || cont.tipo === 'fechado') {
+         // Overhead e Preço Fechado não usam horas alocadas no painel de horas. O orçamento dinâmico iguala o gasto para não distorcer.
+         orcadoAtual = gastoAtual; 
+      } else {
+         // Para Contratos Normais: Soma as horas dos Pequenos Suportes ou de Meses já passados direto do timesheet (sem duplicar)
+         const tDinamicoPassado = timesContrato.filter(t => {
+             const isSup = osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes';
+             return isSup || isPast;
+         });
+         const gastoDinamicoPassado = tDinamicoPassado.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+         
+         // Soma apenas as horas alocadas explicitamente no mês atual/futuro (Ignorando Suportes e Fechados)
+         let alocadoFixo = 0;
+         if (!isPast) {
+             const alocsFixas = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes');
+             alocadoFixo = alocsFixas.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+         }
+         
+         orcadoAtual = gastoDinamicoPassado + alocadoFixo;
+      }
 
       orcadoGlobal += orcadoAtual;
       gastoGlobal += gastoAtual;
@@ -1094,46 +1104,88 @@ export function AdminDashboard() {
      if (!consObj) return null;
 
      let orcadoTotal = 0; let gastoTotal = 0;
-     const alocsMes = allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo);
-     
      const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
      const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
 
-     const contratosListados: Array<{id: string, codigo: string, nome: string, orcado: number, gasto: number, ilimitado: boolean}> = [];
+     const contratosListados: Array<{id: string, codigo: string, nome: string, orcado: number, gasto: number, ilimitado: boolean, isFechado?: boolean}> = [];
+     const cEnvolvidos = new Set<string>();
 
-     alocsMes.forEach(a => {
-        const cObj = contratos.find(c => c.id === a.contract_id);
+     // Puxa do que foi alocado E do que foi apontado (para garantir que meses passados, atuais e futuros apareçam)
+     allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo).forEach(a => cEnvolvidos.add(a.contract_id));
+     allTimesheets.filter(t => t.user_id === resConsId).forEach(t => {
+        const cObj = contratos.find(c => c.id === t.contract_id);
+        if (cObj?.status_ativo) {
+           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
+           if (new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end) cEnvolvidos.add(cObj.id);
+        }
+     });
+
+     cEnvolvidos.forEach(cid => {
+        const cObj = contratos.find(c => c.id === cid);
         if (!cObj) return;
         const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
         
-        let isPast = false; let isCurrent = false; let mm = m; let yy = y;
+        let isPast = false; let mm = m; let yy = y;
         if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
         isPast = (pA < yy) || (pA === yy && pM < mm);
-        isCurrent = (pA === yy && pM === mm);
 
-        let tAtiv = allTimesheets.filter(t => t.user_id === resConsId && t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-        if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
+        // Agrupa as OSs envolvidas
+        const tContrato = allTimesheets.filter(t => t.user_id === resConsId && t.contract_id === cid && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+        const aContrato = allAlocacoes.filter(a => a.user_id === resConsId && a.contract_id === cid && a.mes === resConsMes && a.ano === resConsAno);
         
-        const gastoH = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-        const osObj = osList.find(o => o.id === a.os_id);
-        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
-        
-        let orcadoH = 0;
-        if (isSuportes) orcadoH = gastoH;
-        else {
-           if (isPast) orcadoH = gastoH;
-           else if (isCurrent) orcadoH = a.horas_disponiveis;
-        }
+        const osEnvolvidas = new Set<string | null>();
+        tContrato.forEach(t => osEnvolvidas.add(t.os_id || null));
+        aContrato.forEach(a => osEnvolvidas.add(a.os_id || null));
 
-        orcadoTotal += orcadoH; gastoTotal += gastoH;
+        osEnvolvidas.forEach(osid => {
+           let tOs = tContrato; let aOs = aContrato;
+           if (cObj.tipo === 'continuado_com_os') {
+              tOs = tContrato.filter(t => t.os_id === osid);
+              aOs = aContrato.filter(a => a.os_id === osid);
+           }
+           
+           const gastoH = tOs.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+           const osObj = osList.find(o => o.id === osid);
+           const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
+           const isFechado = cObj.tipo === 'fechado' || aOs.some(a => a.atividade === 'Preço Fechado (Medição)');
+           
+           if (isFechado) {
+               const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
+               const orcadoPerc = allMedicoes.find(m => m.user_id === resConsId && m.contract_id === cid && (osid ? m.os_id === osid : true) && m.mes === resConsMes && m.ano === resConsAno)?.percentual || 0;
+               const gastoPerc = allMedicoes.filter(m => {
+                   if (m.user_id !== resConsId || m.contract_id !== cid) return false;
+                   if (osid && m.os_id !== osid) return false;
+                   const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                   return mA < pA || (mA === pA && mM < pM);
+               }).reduce((sum, m) => sum + m.percentual, 0);
+               
+               const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
+               if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoPerc, gasto: gastoPerc, ilimitado: false, isFechado: true });
+               else {
+                  contratosListados[extIdx].orcado += orcadoPerc;
+                  contratosListados[extIdx].gasto += gastoPerc;
+                  contratosListados[extIdx].isFechado = true;
+               }
+           } else {
+               let orcadoH = 0;
+               if (isSuportes) orcadoH = gastoH;
+               else {
+                  if (isPast) orcadoH = gastoH;
+                  else orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+               }
 
-        const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
-        if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoH, gasto: gastoH, ilimitado: isSuportes });
-        else {
-           contratosListados[extIdx].orcado += orcadoH;
-           contratosListados[extIdx].gasto += gastoH;
-           if(isSuportes) contratosListados[extIdx].ilimitado = true;
-        }
+               if (orcadoH > 0 || gastoH > 0) {
+                  orcadoTotal += orcadoH; gastoTotal += gastoH; // Adiciona apenas HORAS na sumário global
+                  const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
+                  if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoH, gasto: gastoH, ilimitado: isSuportes });
+                  else {
+                     contratosListados[extIdx].orcado += orcadoH;
+                     contratosListados[extIdx].gasto += gastoH;
+                     if(isSuportes) contratosListados[extIdx].ilimitado = true;
+                  }
+               }
+           }
+        });
      });
 
      const saldoTotal = orcadoTotal - gastoTotal;
@@ -1944,20 +1996,40 @@ export function AdminDashboard() {
                          <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2 bg-muted/10">Nenhum consultor encontrado na Linha de Base.<br/>Volte para a aba <b>"Linha de Base (Matriz)"</b> e configure a equipe e os tetos primeiro.</div>
                       ) : (
                         Object.values(alocacoes).map(aloc => {
-                           // Traz a referência da Matriz para mostrar o Teto
                            const matrizRef = baseItems[aloc.consultorId];
-                           
                            const isFechado = aloc.tipo_pagamento === 'fechado';
+                           const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+
+                           // Soma o que está no banco (outros meses) + o que está digitado no input agora
+                           const alocadoOutrosMeses = allAlocacoes.filter(a => a.user_id === aloc.consultorId && a.contract_id === contratoAtivo && (idOsValido ? a.os_id === idOsValido : true) && !(a.mes === alocMes && a.ano === alocAno) && a.atividade !== 'Preço Fechado (Medição)').reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+                           const alocadoVidaLive = alocadoOutrosMeses + aloc.horasTotais;
+                           
+                           const medidoVida = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                           const saldoAAlocar = matrizRef ? matrizRef.horas_teto - alocadoVidaLive : 0;
+                           
+                           const cObj = contratos.find(c => c.id === contratoAtivo);
+                           const tetoContrato = cObj?.teto_global_horas || 0;
+                           const medidoContratoGlobal = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
                            
                            return (
                              <div key={aloc.consultorId} className={`border rounded-xl p-4 shadow-sm w-full transition-all hover:border-primary/50 ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
-                               <div className={`flex justify-between items-center ${(!isSemOsType && !isFechado) ? 'border-b pb-3 mb-3' : ''}`}>
-                                 <div>
+                               <div className={`flex flex-col xl:flex-row xl:justify-between xl:items-start gap-4 ${(!isSemOsType && !isFechado && !isOverheadType && aloc.atividades.length > 0) ? 'border-b pb-4 mb-4' : ''}`}>
+                                 <div className="flex-1">
                                     <h4 className="font-bold text-sm text-foreground flex items-center gap-2">
                                        {consultores.find(c => c.id === aloc.consultorId)?.nome}
-                                       {!isSemOsType && !isFechado && matrizRef && <Badge variant="outline" className="text-[9px] h-5 px-1.5 font-mono bg-muted/40">Teto da Base: {matrizRef.horas_teto}h</Badge>}
-                                       {isFechado && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none">Preço Fechado</Badge>}
+                                       {isFechado && <Badge className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none ml-2" variant="secondary">Preço Fechado</Badge>}
                                     </h4>
+                                    
+                                    {!isSemOsType && !isFechado && !isOverheadType && matrizRef && (
+                                       <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider">
+                                          <span className="bg-primary/10 text-primary px-2 py-1 rounded font-bold border border-primary/20">Teto Matriz (OS): {matrizRef.horas_teto.toFixed(1)}h</span>
+                                          <span className="text-muted-foreground border border-dashed px-2 py-1 rounded">Global Alocado: {alocadoVidaLive.toFixed(1)}h</span>
+                                          <span className="text-muted-foreground border border-dashed px-2 py-1 rounded">Global Medido: {medidoVida.toFixed(1)}h</span>
+                                          <span className={`px-2 py-1 rounded font-bold shadow-sm ${saldoAAlocar < 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>Saldo Matriz: {saldoAAlocar.toFixed(1)}h</span>
+                                          {tetoContrato > 0 && <span className="bg-orange-500/10 text-orange-700 border border-orange-500/20 px-2 py-1 rounded font-bold ml-auto">Medido no Contrato (Todas OS): {medidoContratoGlobal.toFixed(1)}h / {tetoContrato}h</span>}
+                                       </div>
+                                    )}
+                                    {(isSemOsType || isOverheadType) && <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Horas Ilimitadas (Escopo Dinâmico)</p>}
                                  </div>
                                  <div className="flex items-center gap-2">
                                    {isFechado ? null : (isSemOsType || isOverheadType) ? (
@@ -1977,19 +2049,27 @@ export function AdminDashboard() {
                                       <span className="font-medium text-muted-foreground">{isOverheadType ? "Disciplinas do Overhead" : "Horas do Mês por Disciplina"}</span>
                                       <span className="text-[9px] text-muted-foreground/60 italic">(Adicione novas disciplinas via Linha de Base)</span>
                                    </div>
-                                   {aloc.atividades.map(a => (
-                                     <div key={a.id} className="flex justify-between items-center bg-muted/10 p-2 rounded-lg text-xs w-full border border-dashed border-transparent hover:border-muted-foreground/30">
-                                       <span className="font-medium">{a.nome}</span>
-                                       {isOverheadType ? (
-                                         <Badge className="bg-transparent text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Livre</Badge>
-                                       ) : (
-                                         <div className="relative w-24">
-                                            <Input type="number" className="h-7 text-right font-bold pr-5 border-primary/20 focus-visible:ring-primary/50 bg-background" value={a.horas || ''} onChange={(e) => updateAtivMensal(aloc.consultorId, a.id, Number(e.target.value))} />
-                                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span>
-                                         </div>
-                                       )}
-                                     </div>
-                                   ))}
+                                   {aloc.atividades.map(a => {
+                                        const ativOutrosMeses = allAlocacoes.filter(x => x.user_id === aloc.consultorId && x.contract_id === contratoAtivo && (idOsValido ? x.os_id === idOsValido : true) && x.atividade === a.nome && !(x.mes === alocMes && x.ano === alocAno)).reduce((sum, x) => sum + Number(x.horas_disponiveis), 0);
+                                        const ativMedido = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true) && t.activity === a.nome).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                        
+                                        return (
+                                          <div key={a.id} className="flex justify-between items-center bg-muted/10 p-3 rounded-lg text-xs w-full border border-dashed border-transparent hover:border-muted-foreground/30">
+                                            <div className="flex flex-col">
+                                               <span className="font-medium text-sm">{a.nome}</span>
+                                               {!isOverheadType && <span className="text-[9px] text-muted-foreground font-mono mt-1 uppercase tracking-wider">Histórico: {ativOutrosMeses.toFixed(1)}h Aloc. Anterior | {ativMedido.toFixed(1)}h Medido na vida</span>}
+                                            </div>
+                                            {isOverheadType ? (
+                                              <Badge className="bg-transparent text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Livre</Badge>
+                                            ) : (
+                                              <div className="relative w-24">
+                                                 <Input type="number" className="h-7 text-right font-bold pr-5 border-primary/20 focus-visible:ring-primary/50 bg-background" value={a.horas || ''} onChange={(e) => updateAtivMensal(aloc.consultorId, a.id, Number(e.target.value))} />
+                                                 <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span>
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                   })}
                                  </div>
                                )}
                              </div>
@@ -2008,8 +2088,10 @@ export function AdminDashboard() {
         {menuAtivo === 'equipe' && (
           <Card className="border-t-4 border-t-emerald-500 w-full shadow-sm">
             <CardHeader className="border-b pb-4 bg-muted/5">
-              <CardTitle className="flex items-center gap-2 text-emerald-700"><Users className="w-5 h-5"/> Gestão de Equipe e Acessos</CardTitle>
-              <CardDescription>Gerencie quem tem acesso ao aplicativo (Ativos) e crie usuários de controle interno (Convidados/Fantasmas).</CardDescription>
+              <div>
+                <CardTitle className="flex items-center gap-2 text-emerald-700"><Users className="w-5 h-5"/> Gestão de Equipe e Acessos</CardTitle>
+                <CardDescription className="mt-1">Gerencie quem tem acesso ao aplicativo (Ativos/Inativos).</CardDescription>
+              </div>
             </CardHeader>
             <CardContent className="pt-6">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
@@ -2406,11 +2488,13 @@ export function AdminDashboard() {
                                           <p className="text-[10px] text-muted-foreground mt-0.5 truncate max-w-50">{ct.nome}</p>
                                        </td>
                                        <td className="px-4 py-4 text-right font-mono text-muted-foreground">
-                                          {ct.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${ct.orcado.toFixed(1)}h`}
+                                          {ct?.isFechado ? `${ct.orcado.toFixed(1)}%` : (ct.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${ct.orcado.toFixed(1)}h`)}
                                        </td>
-                                       <td className="px-4 py-4 text-right font-mono font-bold text-red-500">{ct.gasto.toFixed(1)}h</td>
-                                       <td className={`px-4 py-4 text-right font-mono font-bold ${ct.ilimitado ? 'text-amber-500' : (ct.orcado - ct.gasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
-                                          {ct.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(ct.orcado - ct.gasto).toFixed(1)}h`}
+                                       <td className={`px-4 py-4 text-right font-mono font-bold ${ct?.isFechado ? 'text-primary' : 'text-red-500'}`}>
+                                          {ct?.isFechado ? `${ct.gasto.toFixed(1)}%` : `${ct.gasto.toFixed(1)}h`}
+                                       </td>
+                                       <td className={`px-4 py-4 text-right font-mono font-bold ${ct.ilimitado ? 'text-amber-500' : (ct?.isFechado ? (100 - ct.orcado - ct.gasto < 0 ? 'text-red-500' : 'text-blue-600') : (ct.orcado - ct.gasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
+                                          {ct?.isFechado ? `${(100 - ct.orcado - ct.gasto).toFixed(1)}%` : (ct.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(ct.orcado - ct.gasto).toFixed(1)}h`)}
                                        </td>
                                     </tr>
                                  ))}
@@ -2581,38 +2665,55 @@ export function AdminDashboard() {
                                     const rows = consultores.map(c => {
                                       const uTimes = fTimes.filter(t => t.user_id === c.id);
                                       const uAlocs = fAlocs.filter(a => a.user_id === c.id);
-                                      let uGasto = uTimes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                      let uOrcado = 0; let hasIlim = false;
+                                      
+                                      const isFechado = cObj.tipo === 'fechado' || uAlocs.some(a => a.atividade === 'Preço Fechado (Medição)');
+                                      
+                                      let uGasto = 0; let uOrcado = 0; let hasIlim = false;
 
-                                      uAlocs.forEach(a => {
-                                        const osObj = osList.find(o => o.id === a.os_id);
-                                        const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
-                                        if (isSuportes) {
-                                           hasIlim = true;
-                                           const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                           uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                        } else {
-                                           if (isPast) {
-                                             const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                             uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                           } else if (isCurrent) uOrcado += a.horas_disponiveis;
-                                        }
-                                      });
-                                      if (uAlocs.length === 0) {
-                                         const tSup = uTimes.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
-                                         if (tSup.length > 0) {
-                                            hasIlim = true;
-                                            uOrcado += tSup.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                         }
+                                      if (isFechado) {
+                                          const pM = parseInt(dashMes); const pA = parseInt(dashAno);
+                                          uOrcado = allMedicoes.find(m => m.user_id === c.id && m.contract_id === cid && (dashOs !== 'todas' ? m.os_id === dashOs : true) && m.mes === dashMes && m.ano === dashAno)?.percentual || 0;
+                                          uGasto = allMedicoes.filter(m => {
+                                              if (m.user_id !== c.id || m.contract_id !== cid) return false;
+                                              if (dashOs !== 'todas' && m.os_id !== dashOs) return false;
+                                              const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                                              return mA < pA || (mA === pA && mM < pM);
+                                          }).reduce((sum, m) => sum + m.percentual, 0);
+                                      } else {
+                                          uGasto = uTimes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                          uAlocs.forEach(a => {
+                                            const osObj = osList.find(o => o.id === a.os_id);
+                                            const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
+                                            if (isSuportes) {
+                                               hasIlim = true;
+                                               const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+                                               uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                            } else {
+                                               if (isPast) {
+                                                 const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+                                                 uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                               } else {
+                                                 uOrcado += Number(a.horas_disponiveis);
+                                               }
+                                            }
+                                          });
+                                          if (uAlocs.length === 0) {
+                                             const tSup = uTimes.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
+                                             if (tSup.length > 0) {
+                                                hasIlim = true;
+                                                uOrcado += tSup.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                             }
+                                          }
                                       }
-                                      if (uOrcado === 0 && uGasto === 0) return null;
+                                      
+                                      if (uOrcado === 0 && uGasto === 0 && uAlocs.length === 0) return null;
                                       return (
                                         <tr key={c.id} className="hover:bg-muted/10 transition-colors">
                                           <td className="px-4 py-3 font-semibold">{c.nome}</td>
-                                          <td className="px-4 py-3 text-right font-mono text-muted-foreground">{hasIlim ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${uOrcado.toFixed(1)}h`}</td>
-                                          <td className="px-4 py-3 text-right font-mono font-bold text-red-500">{uGasto.toFixed(1)}h</td>
-                                          <td className={`px-4 py-3 text-right font-mono font-bold ${hasIlim ? 'text-amber-500' : (uOrcado-uGasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
-                                            {hasIlim ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(uOrcado-uGasto).toFixed(1)}h`}
+                                          <td className="px-4 py-3 text-right font-mono text-muted-foreground">{isFechado ? `${uOrcado.toFixed(1)}%` : (hasIlim ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${uOrcado.toFixed(1)}h`)}</td>
+                                          <td className={`px-4 py-3 text-right font-mono font-bold ${isFechado ? 'text-primary' : 'text-red-500'}`}>{isFechado ? `${uGasto.toFixed(1)}%` : `${uGasto.toFixed(1)}h`}</td>
+                                          <td className={`px-4 py-3 text-right font-mono font-bold ${hasIlim ? 'text-amber-500' : (isFechado ? (100 - uOrcado - uGasto < 0 ? 'text-red-500' : 'text-blue-600') : (uOrcado - uGasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
+                                            {isFechado ? `${(100 - uOrcado - uGasto).toFixed(1)}%` : (hasIlim ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(uOrcado-uGasto).toFixed(1)}h`)}
                                           </td>
                                         </tr>
                                       );
@@ -2645,8 +2746,8 @@ export function AdminDashboard() {
                               <tbody className="divide-y text-xs">
                                  {(() => {
                                     const uid = dashConsultor;
-                                    let fTimes = allTimesheets.filter(t => t.user_id === uid);
-                                    let fAlocs = allAlocacoes.filter(a => a.user_id === uid && a.mes === dashMes && a.ano === dashAno);
+                                    let fTimes = allTimesheets.filter(t => t.user_id === uid && contratosVisao.some(cv => cv.id === t.contract_id));
+                                    let fAlocs = allAlocacoes.filter(a => a.user_id === uid && a.mes === dashMes && a.ano === dashAno && contratosVisao.some(cv => cv.id === a.contract_id));
                                     if (dashContratosSelecionados.length > 0) {
                                       fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id));
                                       fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id));
@@ -2662,24 +2763,37 @@ export function AdminDashboard() {
                                       let mm = m; let yy = y;
                                       if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
                                       const cIsPast = (dA < yy) || (dA === yy && dM < mm);
-                                      const cIsCurrent = (dA === yy && dM === mm);
 
-                                      let tAtiv = fTimes.filter(t => t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-                                      if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
-                                      const gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                      
                                       const osObj = osList.find(o => o.id === a.os_id);
-                                      const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(cObj.tipo);
+                                      const isFechado = a.atividade === 'Preço Fechado (Medição)' || cObj.tipo === 'fechado';
                                       
-                                      let orcado = 0;
-                                      if (isSuportes) orcado = gasto;
-                                      else {
-                                        if (cIsPast) orcado = gasto;
-                                        else if (cIsCurrent) orcado = a.horas_disponiveis;
+                                      let orcado = 0; let gasto = 0; let isSuportes = false;
+
+                                      if (isFechado) {
+                                          const pM = parseInt(dashMes); const pA = parseInt(dashAno);
+                                          orcado = allMedicoes.find(med => med.user_id === uid && med.contract_id === a.contract_id && (a.os_id ? med.os_id === a.os_id : true) && med.mes === dashMes && med.ano === dashAno)?.percentual || 0;
+                                          gasto = allMedicoes.filter(med => {
+                                              if (med.user_id !== uid || med.contract_id !== a.contract_id) return false;
+                                              if (a.os_id && med.os_id !== a.os_id) return false;
+                                              const mA = parseInt(med.ano); const mM = parseInt(med.mes);
+                                              return mA < pA || (mA === pA && mM < pM);
+                                          }).reduce((sum, med) => sum + med.percentual, 0);
+                                      } else {
+                                          let tAtiv = fTimes.filter(t => t.contract_id === a.contract_id && t.activity === a.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                                          if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
+                                          gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                          
+                                          isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
+                                          if (isSuportes) orcado = gasto;
+                                          else {
+                                            if (cIsPast) orcado = gasto;
+                                            else orcado = Number(a.horas_disponiveis);
+                                          }
                                       }
+
                                       if (orcado === 0 && gasto === 0) return null;
 
-                                      return { contrato: cObj.codigo, nomeContrato: cObj.nome, os: osObj?.codigo || '-', atividade: a.atividade, orcado, gasto, ilimitado: isSuportes };
+                                      return { contrato: cObj.codigo, nomeContrato: cObj.nome, os: osObj?.codigo || '-', atividade: a.atividade, orcado, gasto, ilimitado: isSuportes, isFechado };
                                     });
 
                                     const validRows = rows.filter(r => r !== null);
@@ -2705,14 +2819,19 @@ export function AdminDashboard() {
                                              </td>
                                           </tr>
                                           {grupo.itens.map((item: any, j: number) => (
-                                             <tr key={`${i}-${j}`} className="hover:bg-muted/10 transition-colors border-l-2 border-l-transparent hover:border-l-blue-500">
-                                                <td className="px-4 py-2 pl-10 font-medium text-xs text-foreground/80">{item.atividade}</td>
-                                                <td className="px-4 py-2 text-right font-mono text-muted-foreground">
-                                                   {item.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${item.orcado.toFixed(1)}h`}
+                                             <tr key={`${i}-${j}`} className={`hover:bg-muted/10 transition-colors border-l-2 border-l-transparent hover:border-l-blue-500 ${item.isFechado ? 'bg-green-500/5' : ''}`}>
+                                                <td className={`px-4 py-2 pl-10 font-medium text-xs ${item.isFechado ? 'text-green-700 flex items-center gap-1.5' : 'text-foreground/80'}`}>
+                                                   {item.isFechado && <Check className="w-3.5 h-3.5"/>}
+                                                   {item.isFechado ? 'Medição de Avanço (%)' : item.atividade}
                                                 </td>
-                                                <td className="px-4 py-2 text-right font-mono font-bold text-red-500">{item.gasto.toFixed(1)}h</td>
-                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.ilimitado ? 'text-amber-500' : (item.orcado-item.gasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
-                                                   {item.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(item.orcado-item.gasto).toFixed(1)}h`}
+                                                <td className="px-4 py-2 text-right font-mono text-muted-foreground">
+                                                   {item.isFechado ? `${item.orcado.toFixed(1)}%` : (item.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${item.orcado.toFixed(1)}h`)}
+                                                </td>
+                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.isFechado ? 'text-primary' : 'text-red-500'}`}>
+                                                   {item.isFechado ? `${item.gasto.toFixed(1)}%` : `${item.gasto.toFixed(1)}h`}
+                                                </td>
+                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.ilimitado ? 'text-amber-500' : (item.isFechado ? (100 - item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600') : (item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
+                                                   {item.isFechado ? `${(100 - item.orcado - item.gasto).toFixed(1)}%` : (item.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(item.orcado - item.gasto).toFixed(1)}h`)}
                                                 </td>
                                              </tr>
                                           ))}

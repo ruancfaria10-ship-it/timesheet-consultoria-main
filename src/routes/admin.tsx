@@ -1,15 +1,22 @@
 // src/routes/admin.tsx
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Navigate } from '@tanstack/react-router'
 import { AdminDashboard } from '@/components/admin/AdminDashboard'
+import { usePerfil } from '@/hooks/use-perfil'
 
 export const Route = createFileRoute('/admin')({
   component: AdminComponent,
 })
 
 function AdminComponent() {
+  const { isAdmin, loading } = usePerfil();
+
+  // Enquanto carrega as permissões do Supabase
+  if (loading) return <div className="h-screen flex items-center justify-center bg-background text-primary">Verificando credenciais...</div>;
+  
+  // Se não for Admin, expulsa para a tela do consultor (ou login)
+  if (!isAdmin) return <Navigate to="/" />;
+
   return (
-    // Trocamos o 'fixed inset-0 z-50' por um contêiner flexível que respeita a barra mestre do __root,
-    // mas que trava a altura no limite do monitor para o rodapé interno nunca mais cortar!
     <div className="w-full h-screen max-h-screen flex flex-col min-h-0 overflow-hidden bg-muted/20 dark:bg-background m-0 p-0">
       <AdminDashboard />
     </div>
