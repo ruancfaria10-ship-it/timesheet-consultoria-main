@@ -1,7 +1,7 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo } from "react";
-import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2 } from "lucide-react";
+import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -142,6 +142,19 @@ function TimesheetPage() {
     const refYear = now.getDate() >= 25 && now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
     return refYear.toString();
   });
+
+  // 🌟 ETAPA 4: Modo de visualização no Painel do Consultor ('ciclo' ou 'intervalo')
+  const [panelModoData, setPanelModoData] = useState<'ciclo' | 'intervalo'>('ciclo');
+  const [panelDataInicio, setPanelDataInicio] = useState<string>(getTodayStr());
+  const [panelDataFim, setPanelDataFim] = useState<string>(getTodayStr());
+
+  // 🌟 BLINDAGEM: Reseta para 'ciclo' sempre que o consultor fechar/voltar do painel
+  useEffect(() => {
+    if (viewMode === 'timesheet') {
+      setPanelModoData('ciclo');
+    }
+  }, [viewMode]);
+
 
   useEffect(() => { localStorage.setItem("engeprice_contractId", contractId); }, [contractId]);
   useEffect(() => { localStorage.setItem("engeprice_osId", osId); }, [osId]);
@@ -333,21 +346,33 @@ function TimesheetPage() {
     const cObj = contractsList.find((x) => x.id === contractId);
     if (cObj?.tipo === 'continuado_com_os') {
       const osDoContrato = filteredOsList.filter(o => o.contract_id === contractId);
-      if (osDoContrato.length > 0 && !osDoContrato.find(o => o.id === osId)) {
+      const savedOs = localStorage.getItem("engeprice_osId");
+      const savedOsValida = osDoContrato.some(o => o.id === savedOs);
+
+      if (savedOsValida && savedOs) {
+        setOsId(savedOs);
+      } else if (osDoContrato.length > 0 && !osDoContrato.find(o => o.id === osId)) {
         setOsId(osDoContrato[0].id);
-      } else if (osDoContrato.length === 0) setOsId("");
+      } else if (osDoContrato.length === 0) {
+        setOsId("");
+      }
     } else {
-        setOsId(""); 
+      setOsId(""); 
     }
   }, [contractId, allocations, osList]);
 
   useEffect(() => {
-    if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
+    const savedActivity = localStorage.getItem("engeprice_activity");
+    const isSavedValid = availableActivities.includes(savedActivity || "");
+
+    if (isSavedValid && savedActivity) {
+      if (activity !== savedActivity) setActivity(savedActivity);
+    } else if (availableActivities.length > 0 && !availableActivities.includes(activity)) {
       setActivity(availableActivities[0]);
     } else if (availableActivities.length === 0 && activity !== "") {
       setActivity("");
     }
-  }, [availableActivities, activity]);
+  }, [availableActivities]);
 
   const getContractCycleBounds = (cid: string) => {
     const c = contractsList.find(x => x.id === cid);
@@ -408,6 +433,30 @@ function TimesheetPage() {
   
   const activityUsedMs = entries.filter(e => e.contractId === contractId && e.activity === activity && (!isComOs || e.os_id === osId) && e.start >= cycleBounds.start && e.start <= cycleBounds.end).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
 
+  // 🌟 MOTOR INTELIGENTE: Retorna a janela do Ciclo OU o Intervalo Personalizado (De/Até)
+  const getEffectivePanelBounds = (cInicio: number, cFim: number) => {
+    if (panelModoData === 'intervalo') {
+      const start = new Date(panelDataInicio + 'T00:00:00').getTime();
+      const end = new Date(panelDataFim + 'T23:59:59').getTime();
+      return { start, end };
+    }
+    const month = parseInt(panelMes);
+    const year = parseInt(panelAno);
+    const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
+    let start, end;
+    if (cInicio > cFim) {
+      const startMonth = month === 0 ? 11 : month - 1;
+      const startYear = month === 0 ? year - 1 : year;
+      start = new Date(startYear, startMonth, getValidDay(startYear, startMonth, cInicio), 0, 0, 0).getTime();
+      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59, 999).getTime();
+    } else {
+      start = new Date(year, month, getValidDay(year, month, cInicio), 0, 0, 0).getTime();
+      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59, 999).getTime();
+    }
+    return { start, end };
+  };
+
+
   const panelCycleBounds = useMemo(() => {
     const month = parseInt(panelMes);
     const year = parseInt(panelAno);
@@ -427,7 +476,7 @@ function TimesheetPage() {
     entries.forEach(e => {
        const cObj = contractsList.find(c => c.id === e.contractId);
        if (cObj) {
-           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+           const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
            if (e.start >= cb.start && e.start <= cb.end) sum += ((e.end ?? Date.now()) - e.start) / 3600000;
        }
     });
@@ -439,7 +488,7 @@ function TimesheetPage() {
     entries.forEach(e => {
       const cObj = contractsList.find(c => c.id === e.contractId);
       if (cObj) {
-        const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+        const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
         if (e.start >= cb.start && e.start <= cb.end) {
           const duration = ((e.end ?? Date.now()) - e.start);
           if (cObj.tipo === 'fechado') fechado += duration;
@@ -457,7 +506,7 @@ function TimesheetPage() {
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno && a.atividade !== 'Preço Fechado (Medição)');
 
     alocsDoMes.forEach(alloc => {
-       const cb = getCycleBoundsForContract(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim, panelMes, panelAno);
+       const cb = getEffectivePanelBounds(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim);
        const isComOsCheck = alloc.contratos!.tipo === 'continuado_com_os';
        const osObjCheck = isComOsCheck && alloc.os_id ? osList.find(o => o.id === alloc.os_id) : null;
        const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(alloc.contratos!.tipo);
@@ -526,7 +575,8 @@ function TimesheetPage() {
     
     return Array.from(map.values()).map(contract => {
       let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false; let hasFechado = false;
-      const cb = getCycleBoundsForContract(contract.inicio, contract.fim, panelMes, panelAno);
+      // 🌟 USA O MOTOR INTELIGENTE: Responde instantaneamente às datas do calendário de intervalo!
+      const cb = getEffectivePanelBounds(contract.inicio, contract.fim);
 
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
         const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(contract.tipo);
@@ -536,7 +586,7 @@ function TimesheetPage() {
           const isFechadoAtiv = a.atividade === 'Preço Fechado (Medição)' || contract.tipo === 'fechado';
           
           if (isFechadoAtiv) {
-             hasFechado = true; // Avisa o contrato que ele tem medição em %
+             hasFechado = true;
              const pM = parseInt(panelMes); const pA = parseInt(panelAno);
              const medidoMes = medicoesPainel.find(m => m.contract_id === contract.id && (osGroup.id !== 'sem_os' ? m.os_id === osGroup.id : true) && m.mes === panelMes && m.ano === panelAno)?.percentual || 0;
              const medidoPassado = medicoesPainel.filter(m => {
@@ -546,7 +596,6 @@ function TimesheetPage() {
                  return mA < pA || (mA === pA && mM < pM);
              }).reduce((sum, m) => sum + m.percentual, 0);
              
-             // Soma os percentuais no cabeçalho mestre do contrato
              totalOrcadoNum += medidoMes;
              totalGastoContrato += medidoPassado;
              
@@ -577,7 +626,8 @@ function TimesheetPage() {
         hasFechado
       };
     });
-  }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel]);
+    // 🌟 BLINDAGEM DO USEMEMO: Adicionadas as 3 variáveis do intervalo no array de dependências!
+  }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel, panelModoData, panelDataInicio, panelDataFim]);
 
   const handleExportarExcelConsultor = async () => {
     try {
@@ -604,7 +654,7 @@ function TimesheetPage() {
       entries.forEach(t => {
         const cObj = contractsList.find(c => c.id === t.contractId);
         if (cObj) {
-           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, panelMes, panelAno);
+           const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
            if (t.start >= cb.start && t.start <= cb.end) {
               hasData = true;
               const s = new Date(t.start);
@@ -666,7 +716,7 @@ function TimesheetPage() {
            }
        }
 
-       const entryDateStr = new Date(entryToEdit.start).toISOString().split('T')[0];
+       const entryDateStr = getLocalISODate(new Date(entryToEdit.start));
        if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
           return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
        }
@@ -727,13 +777,12 @@ function TimesheetPage() {
     const oldDurationMs = oldEntry ? ((oldEntry.end ?? Date.now()) - oldEntry.start) : 0;
     
     if (!isIlimitado) {
-      if (activityBudgetMs > 0 && ((activityUsedMs - oldDurationMs) + durationMs > activityBudgetMs)) {
-        const remaining = Math.max(0, activityBudgetMs - (activityUsedMs - oldDurationMs));
-        return toast.error(`⚠️ Saldo insuficiente na disciplina! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
-      }
+      // 🌟 ITEM 10: Trava de saldo removida da Disciplina/Atividade.
+      // O bloqueio agora ocorre APENAS quando o somatório estourar o orçamento global do Contrato ou da OS (Demanda).
       if (contractBudgetMs > 0 && ((contractUsedMs - oldDurationMs) + durationMs > contractBudgetMs)) {
         const remaining = Math.max(0, contractBudgetMs - (contractUsedMs - oldDurationMs));
-        return toast.error(`⚠️ Saldo global insuficiente no contrato! Restam apenas ${(remaining / 3600000).toFixed(1)}h.`);
+        const rotuloTrava = isComOs ? "na Demanda (OS)" : "no contrato";
+        return toast.error(`⚠️ Saldo insuficiente ${rotuloTrava}! Restam apenas ${(remaining / 3600000).toFixed(1)}h livres.`);
       }
     }
 
@@ -807,7 +856,7 @@ function TimesheetPage() {
            }
        }
 
-       const entryDateStr = new Date(entryToDel.start).toISOString().split('T')[0];
+       const entryDateStr = getLocalISODate(new Date(entryToDel.start));
        if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
           return toast.error("Sem autorização para excluir lançamentos passados. Fale com seu gestor.");
        }
@@ -888,6 +937,20 @@ function TimesheetPage() {
           )}
 
           <div className="flex items-center gap-3 z-10 relative">
+            {/* --- NOVO: BOTÃO ATUALIZAR APP (CACHE BUSTER) --- */}
+            <Button 
+              size="icon" 
+              variant="outline" 
+              onClick={() => {
+                toast.info("Buscando última versão do aplicativo...");
+                setTimeout(() => window.location.reload(), 300);
+              }} 
+              title="Atualizar Aplicativo (Ctrl + Shift + R)"
+              className="w-10 h-10 rounded-full shadow-sm bg-background hover:bg-primary/10 hover:text-primary"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+
             <Button size="icon" variant="outline" onClick={toggle} aria-label="Alternar tema" className="w-10 h-10 rounded-full shadow-sm bg-background">
               {mounted ? (theme === "dark" ? <Sun className="h-5 w-5 text-amber-500" /> : <Moon className="h-5 w-5" />) : <Moon className="h-5 w-5" />}
             </Button>
@@ -902,9 +965,16 @@ function TimesheetPage() {
         </div>
       </header>
 
-      <main className="w-full max-w-none px-4 md:px-8 py-6 overflow-x-hidden">
-        {viewMode === "timesheet" ? (
-          <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
+      {/* 🌟 SPRINT 4: max-w-7xl mx-auto centraliza e harmoniza em telas ultrawide */}
+      {/* 1. O MAIN se estica na tela inteira para jogar o scroll no canto direito */}
+      <main className="flex-1 w-full overflow-y-auto overflow-x-hidden">
+        
+        {/* 2. A DIV INTERNA mantém todo o nosso trabalho da SPRINT 4 intacto! */}
+        <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
+          
+          {viewMode === "timesheet" ? (
+            /* 3. Nosso grid anti-achatamento (1 coluna em notebooks, 2 em ultrawide) continua aqui dentro */
+            <div className="grid gap-8 grid-cols-1 xl:grid-cols-[1.3fr_1fr] items-start">
             <section className="space-y-6">
               <div className="rounded-2xl border bg-card p-6 space-y-6 shadow-sm">
                 <TaskSelector
@@ -986,28 +1056,71 @@ function TimesheetPage() {
                 <h2 className="text-xl font-bold tracking-tight">Painel de Performance e Histórico</h2>
                 <p className="text-xs text-muted-foreground">Consulte seu andamento, saldos de contratos e preencha horas autorizadas.</p>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2 bg-muted/40 p-1.5 rounded-lg border">
-                  <Label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground pl-2">Ciclo:</Label>
-                  <Select value={panelMes} onValueChange={setPanelMes}>
-                    <SelectTrigger className="w-28 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Select value={panelAno} onValueChange={setPanelAno}>
-                    <SelectTrigger className="w-20 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="2025">2025</SelectItem>
-                      <SelectItem value="2026">2026</SelectItem>
-                    </SelectContent>
-                  </Select>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Botões de alternância: Por Ciclo | Por Intervalo */}
+                <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={panelModoData === 'ciclo' ? 'default' : 'ghost'}
+                    onClick={() => setPanelModoData('ciclo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Ciclo
+                  </Button>
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={panelModoData === 'intervalo' ? 'default' : 'ghost'}
+                    onClick={() => setPanelModoData('intervalo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Intervalo
+                  </Button>
                 </div>
-                <Button onClick={() => setViewMode("timesheet")} variant="ghost" size="sm" className="gap-1.5 text-xs h-11 border bg-card hover:bg-muted">
+
+                {panelModoData === 'ciclo' ? (
+                  <div className="flex items-center gap-2 bg-muted/40 p-1.5 rounded-lg border">
+                    <Label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground pl-2">Ciclo:</Label>
+                    <Select value={panelMes} onValueChange={setPanelMes}>
+                      <SelectTrigger className="w-28 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Select value={panelAno} onValueChange={setPanelAno}>
+                      <SelectTrigger className="w-20 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="2025">2025</SelectItem>
+                        <SelectItem value="2026">2026</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 bg-muted/40 p-1.5 rounded-lg border animate-in fade-in-50">
+                    <Label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground pl-1">Período:</Label>
+                    <Input
+                      type="date"
+                      value={panelDataInicio}
+                      onChange={e => setPanelDataInicio(e.target.value)}
+                      className="h-8 text-xs w-32 px-2 font-mono bg-background shadow-xs"
+                    />
+                    <span className="text-xs text-muted-foreground font-medium">até</span>
+                    <Input
+                      type="date"
+                      value={panelDataFim}
+                      onChange={e => setPanelDataFim(e.target.value)}
+                      className="h-8 text-xs w-32 px-2 font-mono bg-background shadow-xs"
+                    />
+                  </div>
+                )}
+
+                <Button onClick={() => setViewMode("timesheet")} variant="ghost" size="sm" className="gap-1.5 text-xs h-10 border bg-card hover:bg-muted ml-1">
                   <ArrowLeft className="w-4 h-4" /> Voltar
                 </Button>
               </div>
             </div>
+          
 
             <div className="grid gap-4 md:grid-cols-3">
               <Card className="md:col-span-2 shadow-sm">
@@ -1098,7 +1211,7 @@ function TimesheetPage() {
                 </CardContent>
               </Card>
             </div>
-
+          
             <div className="space-y-4 pt-4">
               <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
                 <Briefcase className="w-4 h-4" /> Detalhamento de Saldo por Contrato
@@ -1117,7 +1230,9 @@ function TimesheetPage() {
                         </div>
                         <div className="flex items-center gap-6 text-xs">
                           <div className="text-right">
-                            <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
+                            <p className="text-[10px] text-muted-foreground uppercase">
+                              Orçado no {panelModoData === 'intervalo' ? 'Período' : 'Ciclo'}
+                            </p>
                             <p className="font-mono font-bold text-foreground">
                               {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
                             </p>
@@ -1145,8 +1260,8 @@ function TimesheetPage() {
                               <span className={osGroup.isSuportes ? "text-amber-700" : ""}>OS: {osGroup.codigo} {osGroup.nome ? `- ${osGroup.nome}` : ''}</span>
                             </div>
                           )}
-                          <div className="px-4 py-2 overflow-x-auto">
-                            <table className="w-full text-xs text-left min-w-72">
+                          <div className="px-4 py-2 w-full overflow-x-auto">
+                            <table className="w-full text-xs text-left min-w-150">
                               <thead>
                                 <tr className="text-muted-foreground/70">
                                   <th className="pb-2 font-medium">Disciplina / Escopo</th>
@@ -1342,10 +1457,12 @@ function TimesheetPage() {
                     })}
                   </div>
                 )}
+                
               </div>
             </div>
           </div>
         )}
+        </div>
       </main>
     </div>
   );

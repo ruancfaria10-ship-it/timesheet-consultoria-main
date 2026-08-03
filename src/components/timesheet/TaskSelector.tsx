@@ -81,8 +81,9 @@ export function TaskSelector({
   const availableOs = osList ? osList.filter(os => os.contract_id === contractId) : [];
 
   return (
-    <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-2">
+    <div className="space-y-5">
+      {/* 🌟 SPRINT 4: Quebra suave para 1 coluna em telas estreitas, 2 colunas em telas amplas */}
+      <div className="grid gap-5 grid-cols-1 sm:grid-cols-2">
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Contrato / Cliente</Label>
           <Select value={contractId} onValueChange={onContractChange}>
@@ -157,8 +158,8 @@ export function TaskSelector({
         </div>
       )}
 
-      {/* PAINEL DE PROGRESSÃO DE HORAS ATUALIZADO */}
-      <div className="grid gap-4 md:grid-cols-2 pt-1 pb-2">
+      {/* 🌟 SPRINT 4: Painel de saldos responsivo com quebra limpa */}
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 pt-1 pb-2">
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-[10px] uppercase tracking-wider text-muted-foreground">
             <span>{topLabel}</span>

@@ -15,7 +15,7 @@ import {
   PlusCircle, ArrowRight, Trash2, 
   Loader2, Pencil, Check, X, Save, Sun, Moon, User, Layers, 
   CalendarDays, Download, Percent, History, 
-  FileUp, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2, Users, GripVertical
+  FileUp, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2, Users, GripVertical, RefreshCw
 } from 'lucide-react'
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
@@ -40,6 +40,13 @@ type Medicao = { id?: string, contract_id: string, os_id?: string | null, user_i
 
 const MESES_NOME = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
 const CORES_GRAFICO = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f43f5e']
+
+const getLocalISODate = (d: Date) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const getCycleBoundsForContract = (cInicio: number, cFim: number, monthStr: string, yearStr: string) => {
   const month = parseInt(monthStr);
@@ -140,7 +147,13 @@ export function AdminDashboard() {
   const [dashOs, setDashOs] = useState<string>('todas') 
   const [dashConsultor, setDashConsultor] = useState<string>('todos')
   const [dashFonte, setDashFonte] = useState<string>('todas')
+  // 🌟 SPRINT 3 - ITEM 7: Estado para Drill-down nos gráficos (armazena o ID do consultor clicado)
+  const [drilldownConsultorId, setDrilldownConsultorId] = useState<string | null>(null);
 
+  // 🌟 SPRINT 3 - ITEM 13: Modo de visualização de datas (por 'ciclo' padrão ou 'intervalo' customizado)
+  const [modoDataFiltro, setModoDataFiltro] = useState<'ciclo' | 'intervalo'>('ciclo');
+  const [dataInicioCustom, setDataInicioCustom] = useState<string>(getLocalISODate(new Date()));
+  const [dataFimCustom, setDataFimCustom] = useState<string>(getLocalISODate(new Date()));
   // Estados Painel do Consultor
   const [resConsId, setResConsId] = useState<string>('')
   const [resConsMes, setResConsMes] = useState<string>(getSavedMes)
@@ -164,13 +177,15 @@ export function AdminDashboard() {
   const [allAlocacoes, setAllAlocacoes] = useState<any[]>([])
   const [allMedicoes, setAllMedicoes] = useState<Medicao[]>([])
   const [loadingDash, setLoadingDash] = useState(false)
+  const [allLinhasBase, setAllLinhasBase] = useState<any[]>([])
+  const [allLinhaBaseItems, setAllLinhaBaseItems] = useState<any[]>([])
 
   // Estados Gestão Retroativa
   const [gestaoConsultor, setGestaoConsultor] = useState<string>('')
   const [gestaoContrato, setGestaoContrato] = useState<string>('')
   const [gestaoOs, setGestaoOs] = useState<string>('')
   const [gestaoAtividade, setGestaoAtividade] = useState<string>('')
-  const [gestaoData, setGestaoData] = useState<string>(new Date().toISOString().split('T')[0])
+  const [gestaoData, setGestaoData] = useState<string>(getLocalISODate(new Date()))
   const [gestaoInicio, setGestaoInicio] = useState<string>('08:00')
   const [gestaoFim, setGestaoFim] = useState<string>('12:00')
   const [gestaoNotes, setGestaoNotes] = useState<string>('')
@@ -179,7 +194,7 @@ export function AdminDashboard() {
   // Estados Liberação
   const [authList, setAuthList] = useState<any[]>([])
   const [liberarConsultor, setLiberarConsultor] = useState<string>('')
-  const [liberarData, setLiberarData] = useState<string>(new Date().toISOString().split('T')[0])
+  const [liberarData, setLiberarData] = useState<string>(getLocalISODate(new Date()))
   const [loadingAuth, setLoadingAuth] = useState(false)
 
   async function carregarDadosDoBanco() {
@@ -503,10 +518,35 @@ export function AdminDashboard() {
       const isFechado = matrizConsultor?.tipo_pagamento === 'fechado';
 
       if (isFechado) {
-         // Salva uma linha "fantasma" de controle para os gráficos de medição, mas com 0h.
+         const medidoAnteriorPerc = (allMedicoes || [])
+           .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (targetOsId ? m.os_id === targetOsId : true) && !(m.mes === alocMes && m.ano === alocAno))
+           .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
+
+         const keyPerc = targetOsId ? `${contratoAtivo}_${targetOsId}` : contratoAtivo;
+         const valAtualPerc = Number(medicoesInput[keyPerc] || 0);
+
+         if (medidoAnteriorPerc + valAtualPerc > 100) {
+            alert(`❌ LIMITE DE 100% EXCEDIDO!\n\nConsultor: ${nomeCons}\nJá medido em outros meses: ${medidoAnteriorPerc.toFixed(1)}%\nSaldo restante: ${(100 - medidoAnteriorPerc).toFixed(1)}%\n\nVocê tentou medir ${valAtualPerc}% neste mês. Reduza para salvar.`);
+            bloqueio = true; break;
+         }
+
+         // Salva ou atualiza a medição de % na tabela medicoes do banco de dados
+         await supabase.from('medicoes').delete().eq('user_id', aloc.consultorId).eq('contract_id', contratoAtivo).eq('mes', alocMes).eq('ano', alocAno);
+         if (valAtualPerc > 0) {
+            await supabase.from('medicoes').insert([{
+               user_id: aloc.consultorId,
+               contract_id: contratoAtivo,
+               os_id: targetOsId,
+               mes: alocMes,
+               ano: alocAno,
+               percentual: valAtualPerc
+            }]);
+         }
+
+         // Salva linha fantasma para controle visual de alocação (0h)
          if (aloc.geralId) upserts.push({ id: aloc.geralId, user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: 0, atividade: 'Preço Fechado (Medição)', mes: alocMes, ano: alocAno });
          else inserts.push({ user_id: aloc.consultorId, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: 0, atividade: 'Preço Fechado (Medição)', mes: alocMes, ano: alocAno });
-         continue; // Pula as validações de horas
+         continue;
       }
 
       // Calcula o quanto já foi alocado em TODOS OS OUTROS MESES para este consultor
@@ -556,6 +596,78 @@ export function AdminDashboard() {
     if (!baseItems[id]) setBaseItems(p => ({ ...p, [id]: { id: crypto.randomUUID(), base_id: '', user_id: id, horas_teto: 0, atividades: [], tipo_pagamento: 'horas' } }));
   }
   const removeConsultorBase = (id: string) => { setBaseItems(p => { const n = {...p}; delete n[id]; return n; }); }
+
+  // 🌟 ITEM 14: Catálogo Mestre de Atividades do Projeto
+  // Extrai todas as atividades únicas já cadastradas na matriz atual para formar a "lista mestre"
+  const catalogoMestreAtividades = useMemo(() => {
+    const setAtiv = new Set<string>();
+    Object.values(baseItems).forEach(item => {
+      item.atividades.forEach(a => setAtiv.add(a));
+    });
+    return Array.from(setAtiv);
+  }, [baseItems]);
+
+  // Função para adicionar uma nova atividade mestre que fica disponível para toda a equipe
+  const addAtividadeMestre = () => {
+    const nome = prompt("Nome da Nova Atividade Padrão do Projeto:");
+    if (!nome || !nome.trim()) return;
+    const n = nome.trim();
+    // Adiciona ao primeiro consultor apenas para persistir no array mestre se ainda não existir
+    const keys = Object.keys(baseItems);
+    if (keys.length > 0) {
+      const firstId = keys[0];
+      if (!baseItems[firstId].atividades.includes(n)) {
+        setBaseItems(p => ({
+          ...p,
+          [firstId]: { ...p[firstId], atividades: [...p[firstId].atividades, n] }
+        }));
+      }
+    } else {
+      toast.info("Adicione pelo menos um consultor na matriz antes de cadastrar disciplinas.");
+    }
+  };
+
+  // 🌟 ETAPA 2: Remove uma disciplina do Catálogo Mestre com validação de histórico
+  const removerAtividadeMestre = (ativNome: string) => {
+    // 1. Verificação de segurança no histórico do banco (timesheets ou alocações passadas)
+    const emUsoNoTimesheet = allTimesheets.some(t => t.contract_id === contratoAtivo && t.activity === ativNome);
+    const emUsoAlocacao = allAlocacoes.some(a => a.contract_id === contratoAtivo && a.atividade === ativNome && Number(a.horas_disponiveis) > 0);
+
+    if (emUsoNoTimesheet || emUsoAlocacao) {
+      if (!window.confirm(`⚠️ ATENÇÃO: A disciplina "${ativNome}" já possui horas alocadas ou apontadas na equipe deste contrato.\n\nRemover da Linha de Base não apaga os apontamentos passados no banco, mas removerá a disciplina da matriz atual.\n\nDeseja remover do catálogo do projeto mesmo assim?`)) {
+        return;
+      }
+    } else {
+      if (!window.confirm(`Remover a disciplina "${ativNome}" do catálogo padrão deste projeto?`)) {
+        return;
+      }
+    }
+
+    // 2. Remove a disciplina do array de atividades de TODOS os consultores na matriz atual
+    setBaseItems(prev => {
+      const updated: Record<string, LinhaBaseItem> = {};
+      Object.entries(prev).forEach(([userId, item]) => {
+        updated[userId] = {
+          ...item,
+          atividades: item.atividades.filter(a => a !== ativNome)
+        };
+      });
+      return updated;
+    });
+
+    toast.success(`Disciplina "${ativNome}" removida da Matriz. Clique em 'Salvar Versão da Matriz' para gravar no banco.`);
+  };
+
+  // Toggle prático: marca ou desmarca a atividade mestre no perfil do consultor selecionado
+  const toggleAtividadeConsultor = (userId: string, ativName: string) => {
+    setBaseItems(p => {
+      const atuais = p[userId].atividades;
+      const existe = atuais.includes(ativName);
+      const novas = existe ? atuais.filter(a => a !== ativName) : [...atuais, ativName];
+      return { ...p, [userId]: { ...p[userId], atividades: novas } };
+    });
+  };
+  
   const updateTetoBase = (id: string, h: number) => { setBaseItems(p => ({ ...p, [id]: { ...p[id], horas_teto: h } })); }
   
   const updateTipoPagamentoBase = (id: string, tipo: 'horas' | 'fechado') => { 
@@ -615,7 +727,10 @@ export function AdminDashboard() {
   // AUTORIZAÇÕES RETROATIVAS E CARREGAMENTOS GLOBAIS
   // ==========================================
   useEffect(() => { 
-    if (['dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor'].includes(menuAtivo)) carregarTudoParaDash() 
+    if (['dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor'].includes(menuAtivo)) {
+      carregarTudoParaDash();
+      setModoDataFiltro('ciclo'); // 🌟 BLINDAGEM: Sempre volta para o Ciclo Mensal ao trocar de aba!
+    }
     if (menuAtivo === 'gestao') carregarAutorizacoes();
   }, [menuAtivo])
 
@@ -624,10 +739,36 @@ export function AdminDashboard() {
     const { data: times } = await supabase.from('timesheets').select('*').not('end_at', 'is', null)
     const { data: orcs } = await supabase.from('alocacoes').select('*')
     const { data: meds } = await supabase.from('medicoes').select('*')
+    // 🌟 NOVO: Carrega as linhas de base para cálculo de Teto Vida Útil
+    const { data: lb } = await supabase.from('linha_base').select('*')
+    const { data: lbi } = await supabase.from('linha_base_items').select('*')
+
     setAllTimesheets(times || []); setAllAlocacoes(orcs || []); setAllMedicoes(meds || [])
+    setAllLinhasBase(lb || []); setAllLinhaBaseItems(lbi || []);
     setLoadingDash(false)
   }
 
+  // 🌟 MOTOR INTELIGENTE: Calcula o Teto da Linha de Base (última versão) do Contrato ou do Consultor
+  const getTetoBaseContrato = (contractId: string, userId?: string) => {
+    const basesDoContrato = allLinhasBase.filter(b => b.contract_id === contractId);
+    if (basesDoContrato.length === 0) return 0;
+
+    // Mapeia apenas a versão mais recente de cada OS (ou global)
+    const latestBasesMap = new Map();
+    basesDoContrato.forEach(b => {
+      const key = b.os_id || 'global';
+      if (!latestBasesMap.has(key) || latestBasesMap.get(key).versao < b.versao) {
+        latestBasesMap.set(key, b);
+      }
+    });
+
+    const latestBaseIds = Array.from(latestBasesMap.values()).map(b => b.id);
+    if (latestBaseIds.length === 0) return 0;
+
+    return allLinhaBaseItems
+      .filter(item => latestBaseIds.includes(item.base_id) && (userId ? item.user_id === userId : true))
+      .reduce((sum, item) => sum + Number(item.horas_teto || 0), 0);
+  };
   async function carregarAutorizacoes() {
     setLoadingAuth(true);
     const { data } = await supabase.from('autorizacoes_edicao').select('*').order('created_at', { ascending: false });
@@ -646,7 +787,7 @@ export function AdminDashboard() {
 
     if (error) return alert("Erro ao liberar data: " + error.message);
     toast.success("Acesso retroativo liberado com sucesso!");
-    setLiberarData(new Date().toISOString().split('T')[0]);
+    setLiberarData(getLocalISODate(new Date()));
     carregarAutorizacoes();
   }
 
@@ -659,23 +800,37 @@ export function AdminDashboard() {
   // ==========================================
   // DASHBOARDS, CÁLCULOS E GESTÃO
   // ==========================================
-  const isWithinCycle = (dateStr: string, monthStr: string, yearStr: string, cInicio: number, cFim: number) => {
-    const date = new Date(dateStr).getTime(); 
-    const month = parseInt(monthStr); 
+  const getEffectiveBounds = (cInicio: number, cFim: number, monthStr: string, yearStr: string) => {
+    // 1. Se o usuário ativou "Por Intervalo", usa as datas do calendário
+    if (modoDataFiltro === 'intervalo') {
+      const start = new Date(dataInicioCustom + 'T00:00:00').getTime();
+      const end = new Date(dataFimCustom + 'T23:59:59').getTime();
+      return { start, end };
+    }
+
+    // 2. Se está "Por Ciclo", mantém 100% do seu cálculo original com proteção de meses curtos (getValidDay)
+    const month = parseInt(monthStr);
     const year = parseInt(yearStr);
     const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
     let start, end;
+    
     if (cInicio > cFim) {
       const startMonth = month === 0 ? 11 : month - 1;
       const startYear = month === 0 ? year - 1 : year;
       start = new Date(startYear, startMonth, getValidDay(startYear, startMonth, cInicio), 0, 0, 0).getTime();
-      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59).getTime();
+      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59, 999).getTime();
     } else {
       start = new Date(year, month, getValidDay(year, month, cInicio), 0, 0, 0).getTime();
-      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59).getTime();
+      end = new Date(year, month, getValidDay(year, month, cFim), 23, 59, 59, 999).getTime();
     }
-    return date >= start && date <= end;
-  }
+    return { start, end };
+  };
+
+  const isWithinCycle = (dateStr: string, monthStr: string, yearStr: string, cInicio: number, cFim: number) => {
+    const date = new Date(dateStr).getTime();
+    const bounds = getEffectiveBounds(cInicio, cFim, monthStr, yearStr);
+    return date >= bounds.start && date <= bounds.end;
+  };
 
   const contratosVisao = contratos.filter(c => c.status_ativo && dashVisaoTipos.includes(c.tipo) && (dashFonte === 'todas' ? true : c.fonte_pagamento === dashFonte))
   
@@ -871,7 +1026,7 @@ export function AdminDashboard() {
     setGestaoAtividade(t.activity); setGestaoNotes(t.notes || '');
     setGestaoOs(t.os_id || '');
     const startDate = new Date(t.start_at); const endDate = t.end_at ? new Date(t.end_at) : new Date();
-    setGestaoData(startDate.toISOString().split('T')[0]);
+    setGestaoData(getLocalISODate(startDate));
     setGestaoInicio(`${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}`);
     setGestaoFim(`${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}`);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -977,7 +1132,7 @@ export function AdminDashboard() {
     let orcadoGlobal = 0; let gastoGlobal = 0;
 
     contratosVisao.forEach(cont => {
-      const cycle = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
+      const cycle = getEffectiveBounds(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
       const timesContrato = fTimes.filter(t => t.contract_id === cont.id && new Date(t.start_at).getTime() >= cycle.start && new Date(t.start_at).getTime() <= cycle.end);
       const gastoAtual = timesContrato.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
       
@@ -1115,7 +1270,7 @@ export function AdminDashboard() {
      allTimesheets.filter(t => t.user_id === resConsId).forEach(t => {
         const cObj = contratos.find(c => c.id === t.contract_id);
         if (cObj?.status_ativo) {
-           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
+           const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
            if (new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end) cEnvolvidos.add(cObj.id);
         }
      });
@@ -1123,7 +1278,7 @@ export function AdminDashboard() {
      cEnvolvidos.forEach(cid => {
         const cObj = contratos.find(c => c.id === cid);
         if (!cObj) return;
-        const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
+        const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
         
         let isPast = false; let mm = m; let yy = y;
         if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
@@ -1194,7 +1349,7 @@ export function AdminDashboard() {
      if (pieData.length===0) pieData.push({name:'Zerado', value:1});
 
      return { nome: consObj.nome, iniciais: consObj.nome.substring(0,2).toUpperCase(), meta: consObj.horas_minimas_mes, orcadoTotal, gastoTotal, saldoTotal: Math.max(0, saldoTotal), percGasto, pieData, contratosListados }
-  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores]);
+  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores, modoDataFiltro, dataInicioCustom, dataFimCustom]);
 
   const fatContratosVisao = contratos.filter(c => c.status_ativo && fatVisaoTipos.includes(c.tipo) && (fatFonte === 'todas' ? true : c.fonte_pagamento === fatFonte))
   
@@ -1685,7 +1840,6 @@ export function AdminDashboard() {
             <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Operação & Lançamentos</p>
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('alocacoes')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'alocacoes' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Clock className="w-4 h-4"/> Alocação & Linha Base</button>
-              <button onClick={() => setMenuAtivo('medicoes')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'medicoes' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><Percent className="w-4 h-4"/> Medições Preços Fechados (%)</button>
               <button onClick={() => setMenuAtivo('gestao')} className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg flex items-center gap-2.5 transition-colors ${menuAtivo === 'gestao' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`}><History className="w-4 h-4"/> Ajustes de Horas (Admin)</button>
             </div>
           </div>
@@ -1712,15 +1866,35 @@ export function AdminDashboard() {
         </nav>
         
         <div className="p-4 border-t flex items-center justify-between bg-muted/40 shrink-0">
-          <Button variant="ghost" size="icon" onClick={toggle} className="rounded-full">{theme === 'dark' ? <Sun className="w-4 h-4 text-yellow-500" /> : <Moon className="w-4 h-4" />}</Button>
+          
           <div className="flex items-center gap-2 bg-primary/10 p-1.5 px-3 rounded-xl border border-primary/20">
             <UserCog className="w-4 h-4 text-primary animate-pulse" />
             <span className="text-[11px] font-black text-primary uppercase tracking-wider">Admin</span>
           </div>
+
+          <div className="flex items-center gap-1.5">
+            {/* 🌟 ETAPA 1: Botão Atualizar App (Limpeza Rápida de Cache na Central de Comando) */}
+            <Button 
+              size="icon" 
+              variant="outline" 
+              onClick={() => {
+                toast.info("Atualizando painel administrativo...");
+                setTimeout(() => window.location.reload(), 300);
+              }} 
+              title="Atualizar Aplicativo (Ctrl + Shift + R)"
+              className="w-8 h-8 rounded-full shadow-sm bg-background hover:bg-primary/10 hover:text-primary"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={toggle} className="rounded-full w-8 h-8">
+              {theme === 'dark' ? <Sun className="w-4 h-4 text-yellow-500" /> : <Moon className="w-4 h-4" />}
+            </Button>
+          </div>
         </div>
       </aside>
 
-      <main className="flex-1 p-8 lg:p-10 overflow-y-auto overflow-x-hidden h-full relative w-full max-w-none">
+      {/* 🌟 BLINDAGEM SPRINT 4: Padding responsivo (p-4 sm:p-6 md:p-8 lg:p-10) para não espremer em telas menores/zoom */}
+      <main className="flex-1 p-4 sm:p-6 md:p-8 lg:p-10 overflow-y-auto overflow-x-hidden h-full relative w-full max-w-none">
         
         {/* VIEW: CONTRATOS */}
         {menuAtivo === 'contratos' && (
@@ -2073,25 +2247,58 @@ export function AdminDashboard() {
                               </div>
                               
                               {(!isSemOsType && !isFechado) && (
-                                <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
+                                <div className="pl-3 border-l-2 border-primary/20 space-y-3 mt-3 w-full">
                                   <div className="flex justify-between items-center text-xs">
-                                      <span className="font-semibold text-muted-foreground">Atividades Permanentes (Escopo)</span>
-                                      <Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10" onClick={() => addAtividadeBase(item.user_id)}><PlusCircle className="w-3 h-3 mr-1" /> Adicionar Atividade</Button>
+                                      <span className="font-semibold text-muted-foreground">Disciplinas / Escopo Atribuído</span>
+                                      <Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10" onClick={addAtividadeMestre}>
+                                        <PlusCircle className="w-3 h-3 mr-1" /> Nova Disciplina Padrão
+                                      </Button>
                                   </div>
-                                  {item.atividades.length === 0 ? (
-                                      <p className="text-[10px] italic text-muted-foreground py-1">Nenhuma atividade específica definida. O consultor poderá alocar na categoria "Geral".</p>
+
+                                  {/* 🌟 ITEM 14: Catálogo Mestre com Toggle e Exclusão Segura */}
+                                  {catalogoMestreAtividades.length === 0 ? (
+                                      <p className="text-[10px] italic text-muted-foreground py-1">Nenhuma disciplina cadastrada no projeto. Clique em "Nova Disciplina Padrão" acima.</p>
                                   ) : (
-                                      item.atividades.map((ativNome, idx) => (
-                                        <div key={idx} className="flex gap-2 items-center bg-muted/20 p-2 rounded-lg text-xs w-full group">
-                                          <GripVertical className="w-4 h-4 text-muted-foreground/30 cursor-move" />
-                                          <span className="flex-1 font-medium">{ativNome}</span>
-                                          <div className="flex opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'up')} disabled={idx === 0}>↑</Button>
-                                            <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'down')} disabled={idx === item.atividades.length - 1}>↓</Button>
-                                          </div>
-                                          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => removeAtividadeBase(item.user_id, ativNome)}><X className="w-3.5 h-3.5" /></Button>
-                                        </div>
-                                      ))
+                                      <div className="flex flex-wrap gap-2 pt-1">
+                                        {catalogoMestreAtividades.map((ativNome, idx) => {
+                                          const selecionado = item.atividades.includes(ativNome);
+                                          return (
+                                            <div
+                                              key={idx}
+                                              className={`group flex items-center rounded-lg border transition-all ${
+                                                selecionado 
+                                                  ? 'bg-primary/10 border-primary text-primary shadow-xs' 
+                                                  : 'bg-muted/30 border-dashed border-muted-foreground/30 text-muted-foreground hover:bg-muted/50'
+                                              }`}
+                                            >
+                                              {/* Botão da Esquerda: Marca / Desmarca para o consultor */}
+                                              <button
+                                                type="button"
+                                                onClick={() => toggleAtividadeConsultor(item.user_id, ativNome)}
+                                                className="px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                                              >
+                                                <div className={`w-3 h-3 rounded-xs border flex items-center justify-center ${selecionado ? 'bg-primary border-primary text-white' : 'border-muted-foreground/40'}`}>
+                                                  {selecionado && <Check className="w-2.5 h-2.5 stroke-3" />}
+                                                </div>
+                                                <span>{ativNome}</span>
+                                              </button>
+
+                                              {/* Botão da Direita: Remove a disciplina do projeto inteiro */}
+                                              <button
+                                                type="button"
+                                                title="Excluir Disciplina do Projeto"
+                                                onClick={(e) => {
+                                                  e.stopPropagation(); // Impede de ativar/desativar o toggle ao clicar na lixeira
+                                                  removerAtividadeMestre(ativNome);
+                                                }}
+                                                className="pr-2.5 pl-1 py-1.5 text-muted-foreground/50 hover:text-red-500 transition-colors cursor-pointer"
+                                              >
+                                                <Trash2 className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
                                   )}
                                 </div>
                               )}
@@ -2168,10 +2375,60 @@ export function AdminDashboard() {
                                           {tetoContrato > 0 && <span className="bg-orange-500/10 text-orange-700 border border-orange-500/20 px-2 py-1 rounded font-bold ml-auto">Medido no Contrato (Todas OS): {medidoContratoGlobal.toFixed(1)}h / {tetoContrato}h</span>}
                                        </div>
                                     )}
+
+                                    {/* 🌟 NOVO: INFORMATIVO E SALDO % PARA PREÇO FECHADO */}
+                                    {isFechado && (() => {
+                                       const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                                       const medidoOutrosMesesPerc = (allMedicoes || [])
+                                         .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (idOsValido ? m.os_id === idOsValido : true) && !(m.mes === alocMes && m.ano === alocAno))
+                                         .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
+                                       const saldoPerc = Math.max(0, 100 - medidoOutrosMesesPerc);
+
+                                       return (
+                                         <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider">
+                                            <span className="bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1 rounded font-bold border border-amber-500/20">
+                                              Já Medido: {medidoOutrosMesesPerc.toFixed(1)}%
+                                            </span>
+                                            <span className={`px-2 py-1 rounded font-bold shadow-sm ${saldoPerc <= 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>
+                                              Saldo: {saldoPerc.toFixed(1)}%
+                                            </span>
+                                         </div>
+                                       );
+                                    })()}
+
                                     {(isSemOsType || isOverheadType) && <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Horas Ilimitadas (Escopo Dinâmico)</p>}
                                  </div>
                                  <div className="flex items-center gap-2">
-                                   {isFechado ? null : (isSemOsType || isOverheadType) ? (
+                                   {isFechado ? (() => {
+                                     const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                                     const medidoOutrosMesesPerc = (allMedicoes || [])
+                                       .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (idOsValido ? m.os_id === idOsValido : true) && !(m.mes === alocMes && m.ano === alocAno))
+                                       .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
+                                     const saldoPerc = Math.max(0, 100 - medidoOutrosMesesPerc);
+                                     const key = alocacaoOsId ? `${contratoAtivo}_${alocacaoOsId}` : contratoAtivo;
+
+                                     return (
+                                       <div className="relative flex items-center">
+                                         <Input
+                                           type="number"
+                                           min={0}
+                                           max={saldoPerc}
+                                           placeholder="0"
+                                           value={medicoesInput[key] || ''}
+                                           onChange={(e) => {
+                                             let val = Number(e.target.value);
+                                             if (medidoOutrosMesesPerc + val > 100) {
+                                               toast.error(`⚠️ Limite de 100% excedido! Saldo livre para medir: ${saldoPerc.toFixed(1)}%`);
+                                               val = saldoPerc; // 🌟 AQUI: Trava automaticamente no máximo permitido!
+                                             }
+                                             setMedicoesInput(p => ({ ...p, [key]: val }));
+                                           }}
+                                           className="w-24 h-8 pr-6 font-bold text-right text-amber-600 bg-amber-500/10 border-amber-500/30 focus-visible:ring-amber-500/50"
+                                         />
+                                         <span className="absolute right-2 text-xs font-bold text-amber-600">%</span>
+                                       </div>
+                                     );
+                                   })() : (isSemOsType || isOverheadType) ? (
                                      <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Dinâmico</Badge>
                                    ) : (
                                      <div className="relative flex items-center">
@@ -2522,8 +2779,56 @@ export function AdminDashboard() {
                   <SelectContent>{consultores.map(c => <SelectItem key={c.id} value={c.id}>{c.nome}</SelectItem>)}</SelectContent>
                 </Select>
                 <div className="h-6 w-px bg-border mx-1"></div>
-                <Select value={resConsMes} onValueChange={setResConsMes}><SelectTrigger className="w-32 h-9 bg-background"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
-                <Select value={resConsAno} onValueChange={setResConsAno}><SelectTrigger className="w-24 h-9 bg-background"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
+                {/* 🌟 ITEM 13: Opção para alternar entre Ciclo Mensal ou Intervalo Personalizado (Consultor) */}
+                <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'ciclo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('ciclo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Ciclo
+                  </Button>
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'intervalo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('intervalo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Intervalo
+                  </Button>
+                </div>
+
+                {modoDataFiltro === 'ciclo' ? (
+                  <>
+                    <Select value={resConsMes} onValueChange={setResConsMes}>
+                      <SelectTrigger className="w-32 h-9 bg-background"><SelectValue /></SelectTrigger>
+                      <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Select value={resConsAno} onValueChange={setResConsAno}>
+                      <SelectTrigger className="w-24 h-9 bg-background"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+                    </Select>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-1.5 animate-in fade-in-50">
+                    <Input 
+                      type="date" 
+                      value={dataInicioCustom} 
+                      onChange={e => setDataInicioCustom(e.target.value)} 
+                      className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                    />
+                    <span className="text-xs text-muted-foreground font-medium">até</span>
+                    <Input 
+                      type="date" 
+                      value={dataFimCustom} 
+                      onChange={e => setDataFimCustom(e.target.value)} 
+                      className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                    />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2556,13 +2861,11 @@ export function AdminDashboard() {
                           </div>
                           
                           <div className="mt-8 space-y-4">
+                             {/* 🌟 ITEM 4: Meta Contratual removida desta visualização */}
                              <div className="flex justify-between items-center text-sm border-b border-blue-200/50 pb-2">
-                                <span className="text-muted-foreground font-medium">Meta Contratual (Mês)</span>
-                                <span className="font-mono font-bold">{resumoConsultorData.meta}h</span>
-                             </div>
-                             <div className="flex justify-between items-center text-sm border-b border-blue-200/50 pb-2">
-                                <span className="text-muted-foreground font-medium">Budget Alocado</span>
-                                <span className="font-mono font-bold text-blue-700">{resumoConsultorData.orcadoTotal.toFixed(1)}h</span>
+                                {/* 🌟 ITEM 12: Texto e Número padronizados no tom azul com suporte perfeito ao Modo Escuro */}
+                                <span className="text-blue-600/80 dark:text-blue-400/80 font-medium">Budget Alocado</span>
+                                <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{resumoConsultorData.orcadoTotal.toFixed(1)}h</span>
                              </div>
                              <div className="flex justify-between items-center text-sm border-b border-blue-200/50 pb-2">
                                 <span className="text-red-600/80 font-medium">Horas Consumidas</span>
@@ -2667,25 +2970,159 @@ export function AdminDashboard() {
                 {renderFiltroTiposContratoMultiplos()}
                 <Select value={dashFonte} onValueChange={setDashFonte}><SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
                 <div className="w-44">{renderFiltroContratosMultiplos()}</div>
-                <Select value={dashMes} onValueChange={setDashMes}><SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
-                <Select value={dashAno} onValueChange={setDashAno}><SelectTrigger className="w-20 h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
+                {/* 🌟 ITEM 13: Opção para alternar entre Ciclo Mensal ou Intervalo Personalizado */}
+                <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'ciclo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('ciclo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Ciclo
+                  </Button>
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'intervalo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('intervalo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Intervalo
+                  </Button>
+                </div>
+
+                {modoDataFiltro === 'ciclo' ? (
+                  <>
+                    <Select value={dashMes} onValueChange={setDashMes}>
+                      <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Select value={dashAno} onValueChange={setDashAno}>
+                      <SelectTrigger className="w-20 h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+                    </Select>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-1.5 animate-in fade-in-50">
+                    <Input 
+                      type="date" 
+                      value={dataInicioCustom} 
+                      onChange={e => setDataInicioCustom(e.target.value)} 
+                      className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                    />
+                    <span className="text-xs text-muted-foreground font-medium">até</span>
+                    <Input 
+                      type="date" 
+                      value={dataFimCustom} 
+                      onChange={e => setDataFimCustom(e.target.value)} 
+                      className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                    />
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent className="pt-6 w-full">
-              {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div> : dashData.consultoresPagamento.length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro encontrado no ciclo para esse filtro.</div> : (
-                <div className="w-full h-95">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={dashData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
-                      <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
-                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas`, 'Trabalhado']} />
-                      <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55}>
-                        {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+              {loadingDash ? (
+                <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
+              ) : dashData.consultoresPagamento.length === 0 ? (
+                <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro encontrado no ciclo para esse filtro.</div>
+              ) : (
+                <>
+                  <div className="w-full h-95">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={dashData.consultoresPagamento}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                        onClick={(state) => {
+                          const clickedId = state?.activePayload?.[0]?.payload?.id;
+                          if (clickedId) {
+                            setDrilldownConsultorId(prev => prev === clickedId ? null : clickedId);
+                          }
+                        }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
+                        <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
+                        <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
+                        <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas`, 'Trabalhado']} />
+                        <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55} cursor="pointer">
+                          {dashData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill={CORES_GRAFICO[index % CORES_GRAFICO.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* 🌟 DRILL-DOWN CONSOLIDADO POR CONTRATO */}
+                  {drilldownConsultorId && (() => {
+                    const consNome = consultores.find(c => c.id === drilldownConsultorId)?.nome || 'Consultor';
+                    const logsDrilldown = allTimesheets.filter(t => {
+                      if (t.user_id !== drilldownConsultorId) return false;
+                      const cont = contratos.find(c => c.id === t.contract_id);
+                      if (!cont) return false;
+                      return isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim);
+                    });
+
+                    // Agrupamento consolidado por Contrato Mestre
+                    const contratosMap = new Map<string, { codigo: string; nome: string; totalHoras: number }>();
+
+                    logsDrilldown.forEach(t => {
+                      const cont = contratos.find(c => c.id === t.contract_id);
+                      if (!cont) return;
+                      
+                      const duration = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
+                      
+                      if (!contratosMap.has(cont.id)) {
+                        contratosMap.set(cont.id, {
+                          codigo: cont.codigo,
+                          nome: cont.nome,
+                          totalHoras: 0
+                        });
+                      }
+                      
+                      const item = contratosMap.get(cont.id)!;
+                      item.totalHoras += duration;
+                    });
+
+                    const listaConsolidada = Array.from(contratosMap.values()).sort((a, b) => b.totalHoras - a.totalHoras);
+
+                    return (
+                      <div className="mt-6 border-t pt-4 animate-in fade-in-50">
+                        <div className="flex justify-between items-center mb-3">
+                          <h4 className="font-bold text-sm text-primary flex items-center gap-2">
+                            <History className="w-4 h-4" /> Consolidado por Contrato: {consNome}
+                          </h4>
+                          <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => setDrilldownConsultorId(null)}>
+                            Fechar Detalhamento ✕
+                          </Button>
+                        </div>
+                        <div className="border rounded-xl overflow-hidden bg-card max-h-60 overflow-y-auto w-full overflow-x-auto">
+                          <table className="w-full text-xs text-left min-w-120">
+                            <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0">
+                              <tr>
+                                <th className="p-2.5 w-28">Código</th>
+                                <th className="p-2.5">Nome do Contrato</th>
+                                <th className="p-2.5 text-right w-28">Horas Totais</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {listaConsolidada.length === 0 ? (
+                                <tr>
+                                  <td colSpan={3} className="p-4 text-center text-muted-foreground">Nenhum apontamento consolidado neste ciclo.</td>
+                                </tr>
+                              ) : listaConsolidada.map((item, idx) => (
+                                <tr key={idx} className="hover:bg-muted/20">
+                                  <td className="p-2.5 font-bold text-primary font-mono">{item.codigo}</td>
+                                  <td className="p-2.5 font-medium text-foreground">{item.nome}</td>
+                                  <td className="p-2.5 text-right font-mono font-bold text-primary">{item.totalHoras.toFixed(1)}h</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
               )}
             </CardContent>
           </Card>
@@ -2731,16 +3168,56 @@ export function AdminDashboard() {
                     </SelectContent>
                   </Select>
 
-                  <Select value={dashMes} onValueChange={setDashMes}>
-                    <SelectTrigger className="w-28 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
-                    <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
-                  </Select>
-                  <Select value={dashAno} onValueChange={setDashAno}><SelectTrigger className="w-20 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="2025">2025</SelectItem>
-                      <SelectItem value="2026">2026</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  {/* 🌟 ITEM 13: Opção para alternar entre Ciclo Mensal ou Intervalo Personalizado (Contratos) */}
+                  <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
+                    <Button
+                      size="sm"
+                      type="button"
+                      variant={modoDataFiltro === 'ciclo' ? 'default' : 'ghost'}
+                      onClick={() => setModoDataFiltro('ciclo')}
+                      className="h-7 text-xs px-2.5"
+                    >
+                      Por Ciclo
+                    </Button>
+                    <Button
+                      size="sm"
+                      type="button"
+                      variant={modoDataFiltro === 'intervalo' ? 'default' : 'ghost'}
+                      onClick={() => setModoDataFiltro('intervalo')}
+                      className="h-7 text-xs px-2.5"
+                    >
+                      Por Intervalo
+                    </Button>
+                  </div>
+
+                  {modoDataFiltro === 'ciclo' ? (
+                    <>
+                      <Select value={dashMes} onValueChange={setDashMes}>
+                        <SelectTrigger className="w-28 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
+                        <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <Select value={dashAno} onValueChange={setDashAno}>
+                        <SelectTrigger className="w-20 h-9 text-xs border-primary/50"><SelectValue /></SelectTrigger>
+                        <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+                      </Select>
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-1.5 animate-in fade-in-50">
+                      <Input 
+                        type="date" 
+                        value={dataInicioCustom} 
+                        onChange={e => setDataInicioCustom(e.target.value)} 
+                        className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                      />
+                      <span className="text-xs text-muted-foreground font-medium">até</span>
+                      <Input 
+                        type="date" 
+                        value={dataFimCustom} 
+                        onChange={e => setDataFimCustom(e.target.value)} 
+                        className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                      />
+                    </div>
+                  )}
 
                 </div>
               </div>
@@ -2748,6 +3225,162 @@ export function AdminDashboard() {
             <CardContent className="pt-6 w-full">
               {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div> : (
                 <div className="space-y-8">
+                  {/* 🌟 ITENS 5 & 6: PAINEL EXECUTIVO CORPORATIVO — VISÃO GLOBAL (VIDA ÚTIL + CICLO) */}
+                  {dashContratosSelecionados.length === 1 && (() => {
+                    const cObj = contratos.find(c => c.id === dashContratosSelecionados[0]);
+                    if (!cObj) return null;
+                    
+                    const isOverhead = cObj.tipo === 'overhead';
+
+                    // 1. Teto Base do Contrato: usa teto_global_horas SE cadastrado; se <= 0, usa a Linha de Base (Matriz)
+                    const tetoLinhaBase = getTetoBaseContrato(cObj.id);
+                    const tetoContratoBase = Number(cObj.teto_global_horas > 0 ? cObj.teto_global_horas : tetoLinhaBase);
+
+                    // 2. Total Alocado (Vida Útil) — ignora somatório fantasma se for Overhead
+                    const totalAlocadoVida = isOverhead ? 0 : (allAlocacoes || [])
+                      .filter(a => a.contract_id === cObj.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes')
+                      .reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
+
+                    // 3. Indicadores da VIDA ÚTIL
+                    const gastoVidaUtil = allTimesheets
+                      .filter(t => t.contract_id === cObj.id)
+                      .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+                    
+                    const saldoVidaUtil = (isOverhead || tetoContratoBase <= 0) ? 0 : (tetoContratoBase - gastoVidaUtil);
+                    const percVidaUtil = isOverhead ? '100' : (tetoContratoBase > 0 ? ((gastoVidaUtil / tetoContratoBase) * 100).toFixed(1) : '0.0');
+
+                    // 4. CÁLCULO DO CICLO (Tratando OS Ilimitada, Suportes e Overhead)
+                    const cycleBounds = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
+                    const fTimesCiclo = allTimesheets.filter(t => t.contract_id === cObj.id && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cycleBounds.start && new Date(t.start_at).getTime() <= cycleBounds.end);
+                    const fAlocsCiclo = allAlocacoes.filter(a => a.contract_id === cObj.id && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
+                    
+                    const gastoCiclo = fTimesCiclo.reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+                    
+                    const osSelecionadaObj = osList.find(o => o.id === dashOs);
+                    const isOsIlimitada = osSelecionadaObj?.codigo === '🛠️ Pequenos Suportes';
+                    const isCicloTotalmenteIlimitado = isOverhead || isOsIlimitada;
+
+                    let orcadoCiclo = 0;
+                    if (isCicloTotalmenteIlimitado) {
+                      orcadoCiclo = gastoCiclo;
+                    } else {
+                      const alocadoFixoCiclo = fAlocsCiclo
+                        .filter(a => a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes')
+                        .reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
+                      
+                      const gastoEmSuportesCiclo = fTimesCiclo
+                        .filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes')
+                        .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+
+                      orcadoCiclo = alocadoFixoCiclo + gastoEmSuportesCiclo;
+                    }
+
+                    const saldoCiclo = isCicloTotalmenteIlimitado ? 0 : (orcadoCiclo - gastoCiclo);
+                    const percCiclo = orcadoCiclo > 0 ? ((gastoCiclo / orcadoCiclo) * 100).toFixed(1) : '0.0';
+
+                    return (
+                      <div className="bg-linear-to-r from-blue-600/15 via-blue-600/5 to-transparent border border-blue-500/30 dark:border-blue-500/20 rounded-2xl p-6 mb-6 shadow-sm animate-in fade-in-50">
+                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-border/60 pb-4 mb-5">
+                          <div>
+                            <Badge className="bg-blue-600 text-white hover:bg-blue-700 font-mono uppercase text-[10px] mb-1.5 shadow-xs border-none">
+                              VISÃO GLOBAL
+                            </Badge>
+                            <h3 className="font-bold text-lg text-foreground flex items-center gap-2">
+                              <span>Contrato: <span className="text-blue-600 dark:text-blue-400 font-mono">{cObj.codigo}</span></span>
+                              <span className="text-muted-foreground font-normal text-sm">— {cObj.nome}</span>
+                            </h3>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              {isOverhead
+                                ? "Contrato institucional do tipo Overhead (Sem controle de teto ou limite de horas)."
+                                : (cObj.teto_global_horas > 0 
+                                  ? "Teto Global fixado em cadastro de contrato." 
+                                  : "Teto Global balizado pela última versão da Linha de Base (Matriz).")}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-4 bg-background/60 dark:bg-muted/30 px-4 py-2.5 rounded-xl border border-blue-500/20 shadow-xs">
+                            <div className="text-right">
+                              <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Avanço Vida Útil</span>
+                              <span className="font-black text-blue-600 dark:text-blue-400 text-xl font-mono">
+                                {isOverhead ? '100%' : `${percVidaUtil}%`}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* GRID EXECUTIVO DE 8 INDICADORES */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-1">
+                          {/* BLOCO VIDA ÚTIL */}
+                          <div className="bg-background/50 dark:bg-muted/20 p-3 rounded-xl border border-border/40">
+                            <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Total Contrato (Base)</span>
+                            <span className="font-bold text-foreground text-base font-mono mt-0.5 block">
+                              {isOverhead ? (
+                                <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
+                              ) : (tetoContratoBase > 0 ? `${tetoContratoBase.toFixed(1)}h` : "0.0h")}
+                            </span>
+                          </div>
+
+                          <div className="bg-background/50 dark:bg-muted/20 p-3 rounded-xl border border-border/40">
+                            <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Total Alocado (Vida)</span>
+                            <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
+                              {isOverhead ? (
+                                <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
+                              ) : (totalAlocadoVida > 0 ? `${totalAlocadoVida.toFixed(1)}h` : "0.0h")}
+                            </span>
+                          </div>
+
+                          <div className="bg-red-500/5 p-3 rounded-xl border border-red-500/15">
+                            <span className="text-[10px] text-red-600/80 dark:text-red-400 uppercase block font-semibold">Consumido (Vida Útil)</span>
+                            <span className="font-bold text-red-600 dark:text-red-400 text-base font-mono mt-0.5 block">
+                              {gastoVidaUtil.toFixed(1)}h
+                            </span>
+                          </div>
+
+                          <div className="bg-green-500/5 p-3 rounded-xl border border-green-500/15">
+                            <span className="text-[10px] text-green-700 dark:text-green-400 uppercase block font-semibold">Saldo (Vida Útil)</span>
+                            <span className={`font-bold text-base font-mono mt-0.5 block ${isOverhead ? 'text-amber-500' : (saldoVidaUtil < 0 ? 'text-red-500' : 'text-green-600 dark:text-green-400')}`}>
+                              {isOverhead ? (
+                                <span className="flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Livre</span>
+                              ) : `${saldoVidaUtil.toFixed(1)}h`}
+                            </span>
+                          </div>
+
+                          {/* BLOCO DO CICLO SELECIONADO */}
+                          <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
+                            <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Orçado no Ciclo</span>
+                            <span className="font-bold text-foreground/90 text-base font-mono mt-0.5 flex items-center gap-1">
+                              {isCicloTotalmenteIlimitado ? (
+                                <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
+                              ) : `${orcadoCiclo.toFixed(1)}h`}
+                            </span>
+                          </div>
+
+                          <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
+                            <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Consumido no Ciclo</span>
+                            <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
+                              {gastoCiclo.toFixed(1)}h
+                            </span>
+                          </div>
+
+                          <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
+                            <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Saldo no Ciclo (Mês)</span>
+                            <span className={`font-bold text-base font-mono mt-0.5 block ${isCicloTotalmenteIlimitado ? 'text-amber-500' : (saldoCiclo < 0 ? 'text-red-500' : 'text-blue-600 dark:text-blue-400')}`}>
+                              {isCicloTotalmenteIlimitado ? (
+                                <span className="flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Livre</span>
+                              ) : `${saldoCiclo.toFixed(1)}h`}
+                            </span>
+                          </div>
+
+                          <div className="bg-blue-500/5 p-3 rounded-xl border border-blue-500/15">
+                            <span className="text-[10px] text-blue-600/80 dark:text-blue-400 uppercase block font-semibold">Avanço no Ciclo (%)</span>
+                            <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
+                              {isCicloTotalmenteIlimitado ? '100%' : `${percCiclo}%`}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center w-full">
                     <div className="space-y-4 w-full">
                       <div className="border p-4 rounded-xl bg-muted/10"><p className="text-[10px] font-bold text-muted-foreground uppercase">Budget Total Alocado</p><p className="text-3xl font-bold font-mono mt-0.5">{dashData.orcadoGlobal.toFixed(1)}h</p></div>
@@ -2775,100 +3408,135 @@ export function AdminDashboard() {
                     </div>
                   </div>
 
+                  {/* 🌟 TABELA EXECUTIVA DE SAÚDE POR CONSULTOR (VIDA ÚTIL + CICLO) */}
                   {(dashContratosSelecionados.length === 1 || (dashOs !== 'todas' && dashOs !== '')) && dashConsultor === 'todos' && (
-                     <Card className="shadow-sm border-primary/20">
-                        <CardHeader className="bg-muted/5 pb-3">
-                           <CardTitle className="text-sm flex items-center gap-2 text-primary">
-                             <Users className="w-4 h-4" /> Equipe Alocada no Projeto {contratos.find(c=>c.id === dashContratosSelecionados[0])?.codigo}
+                     <Card className="shadow-sm border-border/80 dark:border-slate-800">
+                        <CardHeader className="bg-muted/30 pb-3 border-b border-border/60">
+                           <CardTitle className="text-sm flex items-center gap-2 text-foreground font-bold">
+                             <Users className="w-4 h-4 text-primary" /> Equipe Alocada no Projeto {contratos.find(c=>c.id === dashContratosSelecionados[0])?.codigo} — Desempenho Completo
                            </CardTitle>
                         </CardHeader>
                         <CardContent className="p-0">
-                           <table className="w-full text-sm text-left">
-                              <thead className="bg-muted/30 text-xs uppercase text-muted-foreground">
-                                 <tr>
-                                    <th className="px-4 py-3">Engenheiro(a)</th>
-                                    <th className="px-4 py-3 text-right">Orçado (Ciclo)</th>
-                                    <th className="px-4 py-3 text-right">Consumido</th>
-                                    <th className="px-4 py-3 text-right">Saldo Restante</th>
-                                 </tr>
-                              </thead>
-                              <tbody className="divide-y">
-                                 {(() => {
-                                    const cid = dashContratosSelecionados.length === 1 ? dashContratosSelecionados[0] : osList.find(o => o.id === dashOs)?.contract_id;
-                                    if(!cid) return null;
-                                    const cObj = contratos.find(c => c.id === cid);
-                                    if(!cObj) return null;
-                                    const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
-                                    
-                                    const fTimes = allTimesheets.filter(t => t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-                                    const fAlocs = allAlocacoes.filter(a => a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
-                                    
-                                    const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-                                    if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
-                                    const dM = parseInt(dashMes); const dA = parseInt(dashAno);
-                                    const isPast = (dA < y) || (dA === y && dM < m);
-                                    const isCurrent = (dA === y && dM === m);
-
-                                    const rows = consultores.map(c => {
-                                      const uTimes = fTimes.filter(t => t.user_id === c.id);
-                                      const uAlocs = fAlocs.filter(a => a.user_id === c.id);
+                           <div className="w-full overflow-x-auto">
+                             <table className="w-full text-xs text-left min-w-190">
+                                <thead className="bg-muted/40 text-[10px] uppercase text-muted-foreground font-semibold border-b">
+                                   <tr>
+                                      <th className="px-4 py-3">Engenheiro(a)</th>
+                                      <th className="px-3 py-3 text-right">Teto Base (Vida)</th>
+                                      <th className="px-3 py-3 text-right">Consumido (Vida)</th>
+                                      <th className="px-3 py-3 text-right">Saldo (Vida)</th>
+                                      <th className="px-3 py-3 text-right">% Avanço</th>
+                                      <th className="px-3 py-3 text-right bg-muted/30">Orçado (Ciclo)</th>
+                                      <th className="px-3 py-3 text-right bg-muted/30">Consumido (Ciclo)</th>
+                                      <th className="px-4 py-3 text-right bg-muted/30">Saldo (Ciclo)</th>
+                                   </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border/60">
+                                   {(() => {
+                                      const cid = dashContratosSelecionados.length === 1 ? dashContratosSelecionados[0] : osList.find(o => o.id === dashOs)?.contract_id;
+                                      if(!cid) return null;
+                                      const cObj = contratos.find(c => c.id === cid);
+                                      if(!cObj) return null;
+                                      const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
                                       
-                                      const isFechado = cObj.tipo === 'fechado' || uAlocs.some(a => a.atividade === 'Preço Fechado (Medição)');
+                                      const fTimesCiclo = allTimesheets.filter(t => t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                                      const fAlocsCiclo = allAlocacoes.filter(a => a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
                                       
-                                      let uGasto = 0; let uOrcado = 0; let hasIlim = false;
+                                      const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
+                                      if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
+                                      const dM = parseInt(dashMes); const dA = parseInt(dashAno);
+                                      const isPast = (dA < y) || (dA === y && dM < m);
 
-                                      if (isFechado) {
-                                          const pM = parseInt(dashMes); const pA = parseInt(dashAno);
-                                          uOrcado = allMedicoes.find(m => m.user_id === c.id && m.contract_id === cid && (dashOs !== 'todas' ? m.os_id === dashOs : true) && m.mes === dashMes && m.ano === dashAno)?.percentual || 0;
-                                          uGasto = allMedicoes.filter(m => {
-                                              if (m.user_id !== c.id || m.contract_id !== cid) return false;
-                                              if (dashOs !== 'todas' && m.os_id !== dashOs) return false;
-                                              const mA = parseInt(m.ano); const mM = parseInt(m.mes);
-                                              return mA < pA || (mA === pA && mM < pM);
-                                          }).reduce((sum, m) => sum + m.percentual, 0);
-                                      } else {
-                                          uGasto = uTimes.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                          uAlocs.forEach(a => {
-                                            const osObj = osList.find(o => o.id === a.os_id);
-                                            const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
-                                            if (isSuportes) {
-                                               hasIlim = true;
-                                               const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                               uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                            } else {
-                                               if (isPast) {
-                                                 const tAtiv = uTimes.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                                 uOrcado += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                               } else {
-                                                 uOrcado += Number(a.horas_disponiveis);
+                                      const rows = consultores.map(c => {
+                                        const uTimesCiclo = fTimesCiclo.filter(t => t.user_id === c.id);
+                                        const uAlocsCiclo = fAlocsCiclo.filter(a => a.user_id === c.id);
+                                        
+                                        const isFechado = cObj.tipo === 'fechado' || uAlocsCiclo.some(a => a.atividade === 'Preço Fechado (Medição)');
+                                        
+                                        // --- 1. INDICADORES DA VIDA ÚTIL DO CONSULTOR ---
+                                        const uTetoBase = getTetoBaseContrato(cid, c.id);
+                                        const uGastoVida = allTimesheets
+                                          .filter(t => t.user_id === c.id && t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true))
+                                          .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+                                        const uSaldoVida = uTetoBase > 0 ? (uTetoBase - uGastoVida) : 0;
+                                        const uPercVida = uTetoBase > 0 ? ((uGastoVida / uTetoBase) * 100).toFixed(1) : '0.0';
+
+                                        // --- 2. INDICADORES DO CICLO SELECIONADO ---
+                                        let uGastoCiclo = 0; let uOrcadoCiclo = 0; let hasIlim = false;
+
+                                        if (isFechado) {
+                                            const pM = parseInt(dashMes); const pA = parseInt(dashAno);
+                                            uOrcadoCiclo = allMedicoes.find(m => m.user_id === c.id && m.contract_id === cid && (dashOs !== 'todas' ? m.os_id === dashOs : true) && m.mes === dashMes && m.ano === dashAno)?.percentual || 0;
+                                            uGastoCiclo = allMedicoes.filter(m => {
+                                                if (m.user_id !== c.id || m.contract_id !== cid) return false;
+                                                if (dashOs !== 'todas' && m.os_id !== dashOs) return false;
+                                                const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                                                return mA < pA || (mA === pA && mM < pM);
+                                            }).reduce((sum, m) => sum + m.percentual, 0);
+                                        } else {
+                                            uGastoCiclo = uTimesCiclo.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                            uAlocsCiclo.forEach(a => {
+                                              const osObj = osList.find(o => o.id === a.os_id);
+                                              const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
+                                              if (isSuportes) {
+                                                 hasIlim = true;
+                                                 const tAtiv = uTimesCiclo.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+                                                 uOrcadoCiclo += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                              } else {
+                                                 if (isPast) {
+                                                   const tAtiv = uTimesCiclo.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
+                                                   uOrcadoCiclo += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                                 } else {
+                                                   uOrcadoCiclo += Number(a.horas_disponiveis);
+                                                 }
+                                              }
+                                            });
+                                            if (uAlocsCiclo.length === 0) {
+                                               const tSup = uTimesCiclo.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
+                                               if (tSup.length > 0) {
+                                                  hasIlim = true;
+                                                  uOrcadoCiclo += tSup.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
                                                }
                                             }
-                                          });
-                                          if (uAlocs.length === 0) {
-                                             const tSup = uTimes.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
-                                             if (tSup.length > 0) {
-                                                hasIlim = true;
-                                                uOrcado += tSup.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                             }
-                                          }
-                                      }
-                                      
-                                      if (uOrcado === 0 && uGasto === 0 && uAlocs.length === 0) return null;
-                                      return (
-                                        <tr key={c.id} className="hover:bg-muted/10 transition-colors">
-                                          <td className="px-4 py-3 font-semibold">{c.nome}</td>
-                                          <td className="px-4 py-3 text-right font-mono text-muted-foreground">{isFechado ? `${uOrcado.toFixed(1)}%` : (hasIlim ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${uOrcado.toFixed(1)}h`)}</td>
-                                          <td className={`px-4 py-3 text-right font-mono font-bold ${isFechado ? 'text-primary' : 'text-red-500'}`}>{isFechado ? `${uGasto.toFixed(1)}%` : `${uGasto.toFixed(1)}h`}</td>
-                                          <td className={`px-4 py-3 text-right font-mono font-bold ${hasIlim ? 'text-amber-500' : (isFechado ? (100 - uOrcado - uGasto < 0 ? 'text-red-500' : 'text-blue-600') : (uOrcado - uGasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
-                                            {isFechado ? `${(100 - uOrcado - uGasto).toFixed(1)}%` : (hasIlim ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(uOrcado-uGasto).toFixed(1)}h`)}
-                                          </td>
-                                        </tr>
-                                      );
-                                    });
-                                    return rows.every(r=>r===null) ? <tr><td colSpan={4} className="text-center py-6 text-muted-foreground text-xs">Nenhum consultor registrou horas ou foi alocado.</td></tr> : rows;
-                                 })()}
-                              </tbody>
-                           </table>
+                                        }
+                                        
+                                        // Esconde o consultor apenas se não tiver absolutamente nenhum número (nem vida, nem ciclo)
+                                        if (uTetoBase === 0 && uGastoVida === 0 && uOrcadoCiclo === 0 && uGastoCiclo === 0) return null;
+
+                                        return (
+                                          <tr key={c.id} className="hover:bg-muted/20 transition-colors font-mono">
+                                            <td className="px-4 py-3 font-semibold font-sans text-foreground">{c.nome}</td>
+                                            
+                                            {/* VIDA ÚTIL */}
+                                            <td className="px-3 py-3 text-right text-foreground/80">
+                                              {cObj.tipo === 'overhead' ? (
+                                                <span className="flex justify-end text-amber-500"><Wrench className="w-3.5 h-3.5"/></span>
+                                              ) : (uTetoBase > 0 ? `${uTetoBase.toFixed(1)}h` : "-")}
+                                            </td>
+                                            <td className="px-3 py-3 text-right text-red-600 font-bold">{uGastoVida.toFixed(1)}h</td>
+                                            <td className={`px-3 py-3 text-right font-bold ${uSaldoVida < 0 ? 'text-red-500' : 'text-green-600'}`}>
+                                              {cObj.tipo === 'overhead' ? (
+                                                <span className="flex justify-end text-amber-500"><Wrench className="w-3.5 h-3.5"/></span>
+                                              ) : (uTetoBase > 0 ? `${uSaldoVida.toFixed(1)}h` : "-")}
+                                            </td>
+                                            <td className="px-3 py-3 text-right font-black text-primary">
+                                              {cObj.tipo === 'overhead' ? '-' : `${uPercVida}%`}
+                                            </td>
+
+                                            {/* CICLO SELECIONADO */}
+                                            <td className="px-3 py-3 text-right text-muted-foreground bg-muted/10">{isFechado ? `${uOrcadoCiclo.toFixed(1)}%` : (hasIlim ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${uOrcadoCiclo.toFixed(1)}h`)}</td>
+                                            <td className={`px-3 py-3 text-right font-bold bg-muted/10 ${isFechado ? 'text-primary' : 'text-red-500'}`}>{isFechado ? `${uGastoCiclo.toFixed(1)}%` : `${uGastoCiclo.toFixed(1)}h`}</td>
+                                            <td className={`px-4 py-3 text-right font-bold bg-muted/10 ${hasIlim ? 'text-amber-500' : (isFechado ? (100 - uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600') : (uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
+                                              {isFechado ? `${(100 - uOrcadoCiclo - uGastoCiclo).toFixed(1)}%` : (hasIlim ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(uOrcadoCiclo - uGastoCiclo).toFixed(1)}h`)}
+                                            </td>
+                                          </tr>
+                                        );
+                                      });
+                                      return rows.every(r=>r===null) ? <tr><td colSpan={8} className="text-center py-6 text-muted-foreground text-xs font-sans">Nenhum consultor alocado na Linha de Base ou com apontamentos neste contrato.</td></tr> : rows;
+                                   })()}
+                                </tbody>
+                             </table>
+                           </div>
                         </CardContent>
                      </Card>
                   )}
@@ -3008,110 +3676,384 @@ export function AdminDashboard() {
                 {renderFiltroTiposContratoMultiplos(true)}
                 <Select value={fatFonte} onValueChange={setFatFonte}><SelectTrigger className="w-32 h-8 text-xs bg-muted/40"><SelectValue placeholder="Divisão" /></SelectTrigger><SelectContent><SelectItem value="todas">EC + ET</SelectItem><SelectItem value="EC">Apenas EC</SelectItem><SelectItem value="ET">Apenas ET</SelectItem></SelectContent></Select>
                 <div className="w-44">{renderFiltroContratosMultiplos(true)}</div>
-                <Select value={fatMes} onValueChange={setFatMes}><SelectTrigger className="w-28 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger><SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent></Select>
-                <Select value={fatAno} onValueChange={setFatAno}><SelectTrigger className="w-20 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent></Select>
+                {/* 🌟 ITEM 13: Opção para alternar entre Ciclo Mensal ou Intervalo Personalizado (Faturamento) */}
+                <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'ciclo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('ciclo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Ciclo
+                  </Button>
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant={modoDataFiltro === 'intervalo' ? 'default' : 'ghost'}
+                    onClick={() => setModoDataFiltro('intervalo')}
+                    className="h-7 text-xs px-2.5"
+                  >
+                    Por Intervalo
+                  </Button>
+                </div>
+
+                {modoDataFiltro === 'ciclo' ? (
+                  <>
+                    <Select value={fatMes} onValueChange={setFatMes}>
+                      <SelectTrigger className="w-28 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger>
+                      <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Select value={fatAno} onValueChange={setFatAno}>
+                      <SelectTrigger className="w-20 h-8 text-xs border-amber-500/50"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
+                    </Select>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-1.5 animate-in fade-in-50">
+                    <Input 
+                        type="date" 
+                        value={dataInicioCustom} 
+                        onChange={e => setDataInicioCustom(e.target.value)} 
+                        className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                      />
+                      <span className="text-xs text-muted-foreground font-medium">até</span>
+                      <Input 
+                        type="date" 
+                        value={dataFimCustom} 
+                        onChange={e => setDataFimCustom(e.target.value)} 
+                        className="h-9 text-xs w-32 sm:w-40 px-2.5 font-mono bg-background shadow-xs" 
+                      />
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent className="pt-6 w-full">
-              {loadingDash ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-amber-600" /></div> : fatData.consultoresPagamento.length === 0 ? <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro faturável neste ciclo.</div> : (
-                <div className="w-full h-95">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={fatData.consultoresPagamento} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
-                      <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
-                      <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
-                      <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas faturáveis`, 'Para Cliente']} />
-                      <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55}>
-                        {fatData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill="#d97706" />)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+              {loadingDash ? (
+                <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-amber-600" /></div>
+              ) : fatData.consultoresPagamento.length === 0 ? (
+                <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro faturável neste ciclo.</div>
+              ) : (
+                <>
+                  <div className="w-full h-95">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={fatData.consultoresPagamento}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                        onClick={(state) => {
+                          const clickedId = state?.activePayload?.[0]?.payload?.id;
+                          if (clickedId) {
+                            setDrilldownConsultorId(prev => prev === clickedId ? null : clickedId);
+                          }
+                        }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
+                        <XAxis dataKey="nomeCurto" tickLine={false} axisLine={false} style={{fontSize: '11px'}} />
+                        <YAxis tickLine={false} axisLine={false} style={{fontSize: '11px'}} tickFormatter={(v) => `${v}h`} />
+                        <RechartsTooltip cursor={{fill: '#88888811'}} contentStyle={{borderRadius: '8px'}} wrapperStyle={{zIndex: 100}} formatter={(v: number) => [`${v} horas faturáveis`, 'Para Cliente']} />
+                        <Bar dataKey="valorGrafico" radius={[4, 4, 0, 0]} maxBarSize={55} cursor="pointer">
+                          {fatData.consultoresPagamento.map((entry, index) => <Cell key={`cell-${index}`} fill="#d97706" />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* 🌟 DRILL-DOWN CONSOLIDADO POR CONTRATO (FATURAMENTO CLIENTE) */}
+                  {drilldownConsultorId && (() => {
+                    const consNome = consultores.find(c => c.id === drilldownConsultorId)?.nome || 'Consultor';
+                    const logsDrilldown = allTimesheets.filter(t => {
+                      if (t.user_id !== drilldownConsultorId) return false;
+                      const cont = contratos.find(c => c.id === t.contract_id);
+                      if (!cont) return false;
+                      return isWithinCycle(t.start_at, fatMes, fatAno, cont.ciclo_fat_inicio, cont.ciclo_fat_fim);
+                    });
+
+                    // Agrupamento consolidado por Contrato Mestre (Faturamento)
+                    const contratosMap = new Map<string, { codigo: string; nome: string; totalHoras: number }>();
+
+                    logsDrilldown.forEach(t => {
+                      const cont = contratos.find(c => c.id === t.contract_id);
+                      if (!cont) return;
+                      
+                      const duration = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
+                      
+                      if (!contratosMap.has(cont.id)) {
+                        contratosMap.set(cont.id, {
+                          codigo: cont.codigo,
+                          nome: cont.nome,
+                          totalHoras: 0
+                        });
+                      }
+                      
+                      const item = contratosMap.get(cont.id)!;
+                      item.totalHoras += duration;
+                    });
+
+                    const listaConsolidada = Array.from(contratosMap.values()).sort((a, b) => b.totalHoras - a.totalHoras);
+
+                    return (
+                      <div className="mt-6 border-t pt-4 animate-in fade-in-50">
+                        <div className="flex justify-between items-center mb-3">
+                          <h4 className="font-bold text-sm text-amber-700 dark:text-amber-500 flex items-center gap-2">
+                            <Receipt className="w-4 h-4" /> Consolidado Comercial (Cliente): {consNome}
+                          </h4>
+                          <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => setDrilldownConsultorId(null)}>
+                            Fechar Detalhamento ✕
+                          </Button>
+                        </div>
+                        <div className="border rounded-xl overflow-hidden bg-card max-h-60 overflow-y-auto">
+                          <table className="w-full text-xs text-left">
+                            <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0">
+                              <tr>
+                                <th className="p-2.5 w-28">Código</th>
+                                <th className="p-2.5">Nome do Contrato</th>
+                                <th className="p-2.5 text-right w-36">Horas Faturáveis</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {listaConsolidada.length === 0 ? (
+                                <tr>
+                                  <td colSpan={3} className="p-4 text-center text-muted-foreground">Nenhum apontamento comercial consolidado neste ciclo.</td>
+                                </tr>
+                              ) : listaConsolidada.map((item, idx) => (
+                                <tr key={idx} className="hover:bg-muted/20">
+                                  <td className="p-2.5 font-bold text-amber-700 dark:text-amber-500 font-mono">{item.codigo}</td>
+                                  <td className="p-2.5 font-medium text-foreground">{item.nome}</td>
+                                  <td className="p-2.5 text-right font-mono font-bold text-amber-600 dark:text-amber-400">{item.totalHoras.toFixed(1)}h</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
               )}
             </CardContent>
           </Card>
         )}
 
-        {/* VIEW: RADAR DE ALERTAS */}
-        {menuAtivo === 'alertas' && (
-          <div className="space-y-6 w-full animate-in fade-in-50">
-            <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle className="w-5 h-5 text-red-500" />
-              <h2 className="text-xl font-bold tracking-tight">Radar de Alertas</h2>
-            </div>
-            
-            {radarAlertas.ociosos.length === 0 && radarAlertas.estouradosConsultor.length === 0 && radarAlertas.estouradosAssessoria.length === 0 && radarAlertas.estouradosOS.length === 0 ? (
-               <div className="py-20 flex flex-col items-center justify-center border-2 border-dashed rounded-2xl bg-green-500/5 border-green-500/20 text-green-700">
-                  <Check className="w-12 h-12 mb-3 text-green-500 opacity-50" />
-                  <p className="font-bold text-lg">Tudo sob controle!</p>
-                  <p className="text-sm opacity-80 mt-1">Nenhum contrato, OS ou consultor em estado crítico de horas no momento.</p>
-               </div>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                
-                {/* 1. OCIOSIDADE */}
-                <Card className="border-red-500/50 bg-red-500/5 shadow-sm">
-                  <CardHeader className="pb-3 border-b border-red-500/10"><CardTitle className="text-red-700 flex items-center gap-2 text-sm uppercase tracking-wider"><User className="w-4 h-4"/> Ociosidade Crítica (&lt; 30% da Meta)</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
-                    {!radarAlertas.jaPassouDaMetade ? (
-                      <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-center shadow-sm">
-                        <p className="text-amber-700 font-bold text-sm">Primeira Quinzena do Ciclo</p>
-                        <p className="text-xs text-amber-700/80 mt-1">O radar despertará após a metade do ciclo (dia 10).</p>
-                      </div>
-                    ) : radarAlertas.ociosos.length === 0 ? (
-                      <p className="text-muted-foreground text-xs p-2 text-center">Toda a equipe está engajada!</p> 
-                    ) : radarAlertas.ociosos.map((o, i) => (
-                      <div key={i} className="bg-background p-3 rounded-lg border border-red-200 flex justify-between items-center shadow-xs">
-                        <div><p className="font-bold text-sm">{o.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Meta: {o.meta}h | Apontou: {o.trabalhadas}h</p></div>
-                        <Badge variant="destructive" className="font-mono">{o.percentual}%</Badge>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
+        {/* ========================================================= */}
+          {/* 🌟 RADAR DE ALERTAS EXECUTIVOS — GOVERNANÇA (DIEGO & RUAN)  */}
+          {/* ========================================================= */}
+          {menuAtivo === 'alertas' && (() => {
+            const listaAlertasContratos: any[] = [];
+            const listaAlertasConsultores: any[] = [];
 
-                {/* 2. CONSULTORES ESTOURANDO MÊS */}
-                <Card className="border-amber-500/50 bg-amber-500/5 shadow-sm">
-                  <CardHeader className="pb-3 border-b border-amber-500/10"><CardTitle className="text-amber-700 flex items-center gap-2 text-sm uppercase tracking-wider"><Clock className="w-4 h-4"/> Risco de Estouro Mensal (Equipe)</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
-                    {radarAlertas.estouradosConsultor.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhum consultor consumiu &gt; 70% da sua alocação do mês.</p> : radarAlertas.estouradosConsultor.map((e, i) => (
-                      <div key={i} className="bg-background p-3 rounded-lg border border-amber-200 flex justify-between items-center shadow-xs">
-                        <div><p className="font-bold text-sm truncate">{e.nome}</p><p className="text-xs text-muted-foreground mt-0.5">Mês: {e.orcado}h | Gastou: {e.consumido}h</p></div>
-                        <Badge className="bg-amber-500 text-white font-mono">{e.perc}%</Badge>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
+            // --- 1. ALERTAS DE VIDA ÚTIL DO CONTRATO / OS (50% e 80%) ---
+            contratos.filter(c => c.status_ativo && c.tipo !== 'overhead').forEach(c => {
+              const tetoBase = Number(c.teto_global_horas > 0 ? c.teto_global_horas : getTetoBaseContrato(c.id));
+              const gastoVida = allTimesheets
+                .filter(t => t.contract_id === c.id)
+                .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
 
-                {/* 3. ASSESSORIA GLOBAL ESTOURANDO */}
-                <Card className="border-orange-500/50 bg-orange-500/5 shadow-sm">
-                  <CardHeader className="pb-3 border-b border-orange-500/10"><CardTitle className="text-orange-700 flex items-center gap-2 text-sm uppercase tracking-wider"><Briefcase className="w-4 h-4"/> Assessoria: Aditivo Global (&gt; 70%)</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
-                    {radarAlertas.estouradosAssessoria.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhuma Assessoria atingiu o limite crítico global.</p> : radarAlertas.estouradosAssessoria.map((e, i) => (
-                      <div key={i} className="bg-background p-3 rounded-lg border border-orange-200 flex justify-between items-center shadow-xs">
-                        <div><p className="font-bold text-sm truncate">{e.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">Teto Vida Útil: {e.orcado}h | Gastou: {e.consumido}h</p></div>
-                        <Badge className="bg-orange-500 text-white font-mono">{e.perc}%</Badge>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
+              if (tetoBase > 0) {
+                const perc = (gastoVida / tetoBase) * 100;
+                if (perc >= 80) {
+                  listaAlertasContratos.push({
+                    tipo: 'critico',
+                    titulo: `Contrato em Risco de Estouro (80%): ${c.codigo}`,
+                    desc: `Consumido ${gastoVida.toFixed(1)}h de ${tetoBase.toFixed(1)}h (${perc.toFixed(1)}%). Avaliar fechamento ou aditivo.`,
+                    contractId: c.id
+                  });
+                } else if (perc >= 50) {
+                  listaAlertasContratos.push({
+                    tipo: 'atencao',
+                    titulo: `Checkpoint de Contrato (50%): ${c.codigo}`,
+                    desc: `Consumido ${gastoVida.toFixed(1)}h de ${tetoBase.toFixed(1)}h (${perc.toFixed(1)}%). Checar se a entrega está nos trilhos.`,
+                    contractId: c.id
+                  });
+                }
+              }
 
-                {/* 4. OS ESTOURANDO */}
-                <Card className="border-purple-500/50 bg-purple-500/5 shadow-sm">
-                  <CardHeader className="pb-3 border-b border-purple-500/10"><CardTitle className="text-purple-700 flex items-center gap-2 text-sm uppercase tracking-wider"><FolderTree className="w-4 h-4"/> Ordens de Serviço Críticas (&gt; 70%)</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 pt-4 max-h-75 overflow-y-auto">
-                    {radarAlertas.estouradosOS.length === 0 ? <p className="text-muted-foreground text-xs p-2 text-center">Nenhuma OS específica atingiu o limite crítico da matriz.</p> : radarAlertas.estouradosOS.map((e, i) => (
-                      <div key={i} className="bg-background p-3 rounded-lg border border-purple-200 flex justify-between items-center shadow-xs">
-                        <div><p className="font-bold text-sm truncate text-purple-700">{e.contrato} - OS: {e.os}</p><p className="text-xs text-muted-foreground mt-0.5">Teto da Base: {e.orcado}h | Gastou: {e.consumido}h</p></div>
-                        <Badge className="bg-purple-500 text-white font-mono">{e.perc}%</Badge>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
+              // Se for Assessoria (continuado_com_os), checa também cada OS individualmente
+              if (c.tipo === 'continuado_com_os') {
+                osList.filter(o => o.contract_id === c.id && o.status_ativa && o.codigo !== '🛠️ Pequenos Suportes').forEach(os => {
+                  const prevOs = Number(os.horas_previstas || 0);
+                  const gastoOs = allTimesheets
+                    .filter(t => t.os_id === os.id)
+                    .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
 
+                  if (prevOs > 0) {
+                    const percOs = (gastoOs / prevOs) * 100;
+                    if (percOs >= 80) {
+                      listaAlertasContratos.push({
+                        tipo: 'critico',
+                        titulo: `OS em Risco (80%): ${os.codigo} — ${c.codigo}`,
+                        desc: `Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
+                        contractId: c.id,
+                        osId: os.id
+                      });
+                    } else if (percOs >= 50) {
+                      listaAlertasContratos.push({
+                        tipo: 'atencao',
+                        titulo: `Checkpoint de OS (50%): ${os.codigo} — ${c.codigo}`,
+                        desc: `Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
+                        contractId: c.id,
+                        osId: os.id
+                      });
+                    }
+                  }
+                });
+              }
+            });
+
+            // --- 2. ALERTAS DO MÊS DO CONSULTOR (50% e 80%) ---
+            consultores.filter(u => u.status_ativo).forEach(u => {
+              const alocsConsultorMes = allAlocacoes.filter(a => a.user_id === u.id && a.mes === dashMes && a.ano === dashAno && a.atividade !== 'Preço Fechado (Medição)');
+              const orcadoMesConsultor = alocsConsultorMes.reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
+
+              if (orcadoMesConsultor > 0) {
+                let gastoMesConsultor = 0;
+                allTimesheets.filter(t => t.user_id === u.id).forEach(t => {
+                  const cObj = contratos.find(c => c.id === t.contract_id);
+                  if (cObj) {
+                    const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
+                    if (new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end) {
+                      gastoMesConsultor += ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000);
+                    }
+                  }
+                });
+
+                const percConsultor = (gastoMesConsultor / orcadoMesConsultor) * 100;
+                if (percConsultor >= 80) {
+                  listaAlertasConsultores.push({
+                    tipo: 'critico',
+                    titulo: `Consultor Quase Esgotado no Mês (80%): ${u.nome}`,
+                    desc: `Consumiu ${gastoMesConsultor.toFixed(1)}h de ${orcadoMesConsultor.toFixed(1)}h (${percConsultor.toFixed(1)}%). Avaliar remanejamento ou ajuste na matriz.`,
+                    userId: u.id
+                  });
+                } else if (percConsultor >= 50) {
+                  listaAlertasConsultores.push({
+                    tipo: 'atencao',
+                    titulo: `Checkpoint Mensal de Consultor (50%): ${u.nome}`,
+                    desc: `Consumiu ${gastoMesConsultor.toFixed(1)}h de ${orcadoMesConsultor.toFixed(1)}h (${percConsultor.toFixed(1)}%). Ritmo dentro do meio do ciclo.`,
+                    userId: u.id
+                  });
+                }
+              }
+            });
+
+            return (
+              <div className="space-y-8 animate-in fade-in-50">
+                {/* CABEÇALHO DO RADAR */}
+                <div className="bg-linear-to-r from-primary/10 via-background to-transparent p-6 rounded-2xl border border-primary/20 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div>
+                    <Badge className="bg-primary text-white font-mono uppercase text-[10px] mb-1.5">
+                      GOVERNANÇA EXECUTIVA
+                    </Badge>
+                    <h2 className="text-xl font-bold tracking-tight text-foreground">Radar de Alertas (Checkpoints 50% & 80%)</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Monitoramento ativo para gestores: acompanhamento de marcos de saúde de Contratos, OSs e Equipe no ciclo.
+                    </p>
+                  </div>
+                </div>
+
+                {/* --- SEÇÃO 1: ALERTAS DE VIDA ÚTIL (CONTRATOS E OSs) --- */}
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
+                    <span>1. Saúde de Contratos e Demandas (Vida Útil)</span>
+                    <Badge variant="secondary" className="font-mono">{listaAlertasContratos.length}</Badge>
+                  </h3>
+
+                  {listaAlertasContratos.length === 0 ? (
+                    <div className="p-8 text-center border border-dashed rounded-2xl bg-card text-muted-foreground text-xs">
+                      Nenhum contrato ou OS atingiu os marcos de 50% ou 80% de consumo da vida útil no momento.
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {listaAlertasContratos.map((a, i) => (
+                        <div key={i} className={`p-4 rounded-xl border flex flex-col justify-between gap-3 shadow-xs transition-all ${
+                          a.tipo === 'critico' ? 'bg-red-500/5 border-red-500/20' : 'bg-amber-500/5 border-amber-500/20'
+                        }`}>
+                          <div>
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className={`text-xs font-bold ${a.tipo === 'critico' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                                {a.titulo}
+                              </span>
+                              <Badge className={`text-[10px] font-mono uppercase ${
+                                a.tipo === 'critico' ? 'bg-red-500 text-white' : 'bg-amber-500 text-white'
+                              }`}>
+                                {a.tipo === 'critico' ? 'Risco 80%' : 'Check 50%'}
+                              </Badge>
+                            </div>
+                            <p className="text-xs text-muted-foreground leading-relaxed">{a.desc}</p>
+                          </div>
+
+                          <div className="flex justify-end pt-2 border-t border-dashed border-border/60">
+                            <Button 
+                              size="sm" 
+                              variant="outline" 
+                              className="text-xs h-8 gap-1.5 border-primary/30 hover:bg-primary/10 text-primary"
+                              onClick={() => {
+                                setDashContratosSelecionados([a.contractId]);
+                                if (a.osId) setDashOs(a.osId);
+                                setMenuAtivo('dash-global');
+                              }}
+                            >
+                              <span>Ver Visão Global do Contrato</span>
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* --- SEÇÃO 2: ALERTAS DE CONSUMO MENSAL DO CONSULTOR --- */}
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
+                    <span>2. Consumo de Alocação da Equipe (No Ciclo Atual)</span>
+                    <Badge variant="secondary" className="font-mono">{listaAlertasConsultores.length}</Badge>
+                  </h3>
+
+                  {listaAlertasConsultores.length === 0 ? (
+                    <div className="p-8 text-center border border-dashed rounded-2xl bg-card text-muted-foreground text-xs">
+                      Nenhum consultor atingiu 50% ou 80% da sua alocação no mês selecionado.
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {listaAlertasConsultores.map((a, i) => (
+                        <div key={i} className={`p-4 rounded-xl border flex flex-col justify-between gap-3 shadow-xs transition-all ${
+                          a.tipo === 'critico' ? 'bg-red-500/5 border-red-500/20' : 'bg-blue-500/5 border-blue-500/20'
+                        }`}>
+                          <div>
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className={`text-xs font-bold ${a.tipo === 'critico' ? 'text-red-600 dark:text-red-400' : 'text-blue-600 dark:text-blue-400'}`}>
+                                {a.titulo}
+                              </span>
+                              <Badge className={`text-[10px] font-mono uppercase ${
+                                a.tipo === 'critico' ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'
+                              }`}>
+                                {a.tipo === 'critico' ? 'Meta 80%' : 'Check 50%'}
+                              </Badge>
+                            </div>
+                            <p className="text-xs text-muted-foreground leading-relaxed">{a.desc}</p>
+                          </div>
+
+                          <div className="flex justify-end pt-2 border-t border-dashed border-border/60">
+                            <Button 
+                              size="sm" 
+                              variant="outline" 
+                              className="text-xs h-8 gap-1.5 border-primary/30 hover:bg-primary/10 text-primary"
+                              onClick={() => {
+                                setAlocMes(dashMes);
+                                setAlocAno(dashAno);
+                                setMenuAtivo('alocacoes');
+                              }}
+                            >
+                              <span>Ajustar Alocação / Matriz</span>
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        )}
+            );
+          })()}
       </main>
     </div>
   )

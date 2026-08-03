@@ -86,7 +86,7 @@ export function HistoryList({
             <span className="text-xs text-muted-foreground">· {e.activity}</span>
           </div>
           <div className="text-xs text-muted-foreground mt-0.5">
-            {formatTime(e.start)} — {e.end ? formatTime(e.end) : "agora"}
+            {formatTimeToHHMM(e.start)} — {e.end ? formatTimeToHHMM(e.end) : "agora"}
           </div>
           {e.notes && (
             <div className="text-xs text-muted-foreground mt-1 italic truncate">
