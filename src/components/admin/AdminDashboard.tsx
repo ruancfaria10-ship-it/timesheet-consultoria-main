@@ -1213,7 +1213,8 @@ export function AdminDashboard() {
         if (!cont) return;
         if (!isWithinCycle(t.start_at, resConsMes, resConsAno, cont.ciclo_inicio, cont.ciclo_fim)) return;
 
-        const os = osList.find(o => o.id === t.os_id)?.codigo || '-';
+        const osObj = osList.find(o => o.id === t.os_id);
+        const os = osObj ? (osObj.descricao ? `${osObj.codigo} - ${osObj.descricao}` : osObj.codigo) : '-';
         const inicio = new Date(t.start_at); 
         const fim = new Date(t.end_at!);
 
@@ -1724,7 +1725,8 @@ export function AdminDashboard() {
     registros.forEach(t => {
       const consultor = consultores.find(c => c.id === t.user_id)?.nome || 'Desconhecido'; 
       const contrato = contratos.find(c => c.id === t.contract_id);
-      const os = osList.find(o => o.id === t.os_id)?.codigo || '-';
+      const osObj = osList.find(o => o.id === t.os_id);
+      const os = osObj ? (osObj.descricao ? `${osObj.codigo} - ${osObj.descricao}` : osObj.codigo) : '-';
       const inicio = new Date(t.start_at); 
       const fim = new Date(t.end_at!);
 
@@ -2137,12 +2139,46 @@ export function AdminDashboard() {
                       return (
                         <div 
                           key={user.id} 
-                          onClick={() => {
-                             if (!jaAlocado) {
-                                if (viewAlocacao === 'baseline') addConsultorBase(user.id);
-                                else toast.info("Consultores só podem ser adicionados à distribuição se já estiverem cadastrados na Linha de Base.");
-                             }
-                          }} 
+                          onClick={async () => {
+                            if (!jaAlocado) {
+                              const isDynamic = isSemOsType || isOverheadType;
+                              const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+
+                              if (viewAlocacao === 'baseline') {
+                                addConsultorBase(user.id);
+                                if (isDynamic) {
+                                  // Auto-aloca no mês silenciosamente
+                                  await supabase.from('alocacoes').insert([{
+                                    user_id: user.id, contract_id: contratoAtivo, os_id: targetOsId,
+                                    horas_disponiveis: 9999, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno
+                                  }]);
+                                  toast.success(`${user.nome} adicionado à Matriz e alocado no mês atual!`);
+                                  carregarAlocacoesMensais(contratoAtivo, targetOsId); // Atualiza a tela
+                                }
+                              } else {
+                                if (isDynamic) {
+                                  // Adiciona direto na mensal e reflete na base automaticamente
+                                  addConsultorBase(user.id);
+                                  setAlocacoes(p => ({ ...p, [user.id]: { consultorId: user.id, horasTotais: 9999, atividades: [] } }));
+                                  
+                                  await supabase.from('alocacoes').insert([{
+                                    user_id: user.id, contract_id: contratoAtivo, os_id: targetOsId,
+                                    horas_disponiveis: 9999, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno
+                                  }]);
+                                  
+                                  if (currentBase) {
+                                    await supabase.from('linha_base_items').insert([{
+                                      base_id: currentBase.id, user_id: user.id, horas_teto: 0, atividades: [], tipo_pagamento: 'horas'
+                                    }]);
+                                  }
+                                  toast.success(`${user.nome} alocado no mês e vinculado à Matriz com sucesso!`);
+                                  carregarAlocacoesMensais(contratoAtivo, targetOsId);
+                                } else {
+                                  toast.info("Consultores de Escopo Fechado só podem ser adicionados se já estiverem na Linha de Base.");
+                                }
+                              }
+                            }
+                          }}
                           className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}
                         >
                           <span className="font-medium">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
@@ -3899,39 +3935,116 @@ export function AdminDashboard() {
               }
             });
 
-            // --- 2. ALERTAS DO MÊS DO CONSULTOR (50% e 80%) ---
+            // --- 2. ALERTAS DE CONSUMO DA EQUIPE (NO CICLO ATUAL) ---
+            const agora = new Date();
+            let mesAtualNum = agora.getMonth();
+            let anoAtualNum = agora.getFullYear();
+            
+            // Lógica do Ciclo Engeprice: Passou do dia 25, já estamos no ciclo do mês seguinte
+            if (agora.getDate() >= 25) {
+              mesAtualNum = mesAtualNum === 11 ? 0 : mesAtualNum + 1;
+              if (mesAtualNum === 0) anoAtualNum++;
+            }
+            const sMes = mesAtualNum.toString();
+            const sAno = anoAtualNum.toString();
+
+            // Cálculo do avanço temporal do ciclo (Dia 25 a Dia 24)
+            let mesInicio = agora.getMonth();
+            let anoInicio = agora.getFullYear();
+            if (agora.getDate() < 25) {
+                mesInicio = mesInicio === 0 ? 11 : mesInicio - 1;
+                if (mesInicio === 11) anoInicio--;
+            }
+            const dataInicioCiclo = new Date(anoInicio, mesInicio, 25, 0, 0, 0).getTime();
+            let mesFim = mesInicio === 11 ? 0 : mesInicio + 1;
+            let anoFim = mesInicio === 11 ? anoInicio + 1 : anoInicio;
+            const dataFimCiclo = new Date(anoFim, mesFim, 24, 23, 59, 59, 999).getTime();
+            
+            const tempoTotalCiclo = dataFimCiclo - dataInicioCiclo;
+            const tempoDecorrido = agora.getTime() - dataInicioCiclo;
+            const avancoCicloPerc = Math.min(100, Math.max(0, (tempoDecorrido / tempoTotalCiclo) * 100));
+
             consultores.filter(u => u.status_ativo).forEach(u => {
-              const alocsConsultorMes = allAlocacoes.filter(a => a.user_id === u.id && a.mes === dashMes && a.ano === dashAno && a.atividade !== 'Preço Fechado (Medição)');
-              const orcadoMesConsultor = alocsConsultorMes.reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
+              let orcadoTotal = 0;
+              let gastoTotal = 0;
 
-              if (orcadoMesConsultor > 0) {
-                let gastoMesConsultor = 0;
-                allTimesheets.filter(t => t.user_id === u.id).forEach(t => {
-                  const cObj = contratos.find(c => c.id === t.contract_id);
-                  if (cObj) {
-                    const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
+              // Agrupa todos os contratos que o consultor interagiu neste ciclo (via alocação ou apontamento)
+              const cEnvolvidos = new Set<string>();
+              
+              allAlocacoes.filter(a => a.user_id === u.id && a.mes === sMes && a.ano === sAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo).forEach(a => cEnvolvidos.add(a.contract_id));
+              
+              allTimesheets.filter(t => t.user_id === u.id).forEach(t => {
+                 const cObj = contratos.find(c => c.id === t.contract_id);
+                 if (cObj?.status_ativo) {
+                    const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, sMes, sAno);
                     if (new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end) {
-                      gastoMesConsultor += ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000);
+                        cEnvolvidos.add(cObj.id);
                     }
-                  }
-                });
+                 }
+              });
 
-                const percConsultor = (gastoMesConsultor / orcadoMesConsultor) * 100;
-                if (percConsultor >= 80) {
-                  listaAlertasConsultores.push({
-                    tipo: 'critico',
-                    titulo: `Consultor Quase Esgotado no Mês (80%): ${u.nome}`,
-                    desc: `Consumiu ${gastoMesConsultor.toFixed(1)}h de ${orcadoMesConsultor.toFixed(1)}h (${percConsultor.toFixed(1)}%). Avaliar remanejamento ou ajuste na matriz.`,
-                    userId: u.id
-                  });
-                } else if (percConsultor >= 50) {
-                  listaAlertasConsultores.push({
-                    tipo: 'atencao',
-                    titulo: `Checkpoint Mensal de Consultor (50%): ${u.nome}`,
-                    desc: `Consumiu ${gastoMesConsultor.toFixed(1)}h de ${orcadoMesConsultor.toFixed(1)}h (${percConsultor.toFixed(1)}%). Ritmo dentro do meio do ciclo.`,
-                    userId: u.id
-                  });
-                }
+              cEnvolvidos.forEach(cid => {
+                 const cObj = contratos.find(c => c.id === cid);
+                 if (!cObj || cObj.tipo === 'fechado') return; 
+                 
+                 const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, sMes, sAno);
+                 const tContrato = allTimesheets.filter(t => t.user_id === u.id && t.contract_id === cid && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                 const aContrato = allAlocacoes.filter(a => a.user_id === u.id && a.contract_id === cid && a.mes === sMes && a.ano === sAno && a.atividade !== 'Preço Fechado (Medição)');
+
+                 const osEnvolvidas = new Set<string | null>();
+                 tContrato.forEach(t => osEnvolvidas.add(t.os_id || null));
+                 aContrato.forEach(a => osEnvolvidas.add(a.os_id || null));
+
+                 osEnvolvidas.forEach(osid => {
+                    let tOs = tContrato; let aOs = aContrato;
+                    if (cObj.tipo === 'continuado_com_os') {
+                       tOs = tContrato.filter(t => t.os_id === osid);
+                       aOs = aContrato.filter(a => a.os_id === osid);
+                    }
+                    
+                    const gastoH = tOs.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                    const osObj = osList.find(o => o.id === osid);
+                    const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
+                    
+                    let orcadoH = 0;
+                    if (isSuportes) {
+                       orcadoH = gastoH; 
+                    } else {
+                       orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+                       if (orcadoH >= 9000) orcadoH = gastoH; 
+                    }
+
+                    if (orcadoH > 0 || gastoH > 0) {
+                       orcadoTotal += orcadoH;
+                       gastoTotal += gastoH;
+                    }
+                 });
+              });
+
+              if (orcadoTotal > 0) {
+                 const percConsultor = (gastoTotal / orcadoTotal) * 100;
+                 
+                 // Compara o consumo com o tempo decorrido do ciclo (Margem de 5%)
+                 const isAcelerado = percConsultor > (avancoCicloPerc + 5);
+                 const analiseRitmo = isAcelerado 
+                    ? "O consumo de horas está acelerado em relação ao tempo do ciclo." 
+                    : "O ritmo de consumo de horas está dentro do esperado.";
+
+                 if (percConsultor >= 80) {
+                    listaAlertasConsultores.push({
+                       tipo: 'critico',
+                       titulo: `Risco de Estouro (Consumo: ${percConsultor.toFixed(0)}% | Tempo do Ciclo: ${avancoCicloPerc.toFixed(0)}%) — ${u.nome}`,
+                       desc: `Consumiu ${gastoTotal.toFixed(1)}h de ${orcadoTotal.toFixed(1)}h. ${analiseRitmo}`,
+                       userId: u.id
+                    });
+                 } else if (percConsultor >= 50) {
+                    listaAlertasConsultores.push({
+                       tipo: 'atencao',
+                       titulo: `Checkpoint (Consumo: ${percConsultor.toFixed(0)}% | Tempo do Ciclo: ${avancoCicloPerc.toFixed(0)}%) — ${u.nome}`,
+                       desc: `Consumiu ${gastoTotal.toFixed(1)}h de ${orcadoTotal.toFixed(1)}h. ${analiseRitmo}`,
+                       userId: u.id
+                    });
+                 }
               }
             });
 
@@ -4004,7 +4117,7 @@ export function AdminDashboard() {
                 {/* --- SEÇÃO 2: ALERTAS DE CONSUMO MENSAL DO CONSULTOR --- */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
-                    <span>2. Consumo de Alocação da Equipe (No Ciclo Atual)</span>
+                    <span>2. Consumo de Alocação da Equipe (Tempo do Ciclo: {avancoCicloPerc.toFixed(0)}%)</span>
                     <Badge variant="secondary" className="font-mono">{listaAlertasConsultores.length}</Badge>
                   </h3>
 

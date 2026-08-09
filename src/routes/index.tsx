@@ -659,12 +659,14 @@ function TimesheetPage() {
               hasData = true;
               const s = new Date(t.start);
               const e = t.end ? new Date(t.end) : new Date();
+              const osObj = osList.find(o => o.id === t.os_id);
+              const osFormatada = osObj ? (osObj.descricao ? `${osObj.codigo} - ${osObj.descricao}` : osObj.codigo) : '-';
               sheet.addRow({
                  consultor: userProfile?.nome || user?.email?.split('@')[0] || 'Consultor',
                  data: s.toLocaleDateString('pt-BR'),
                  cod_contrato: cObj.code,
                  nome_contrato: cObj.name,
-                 os: osList.find(o => o.id === t.os_id)?.codigo || '-',
+                 os: osFormatada, // <-- Aqui está a melhoria
                  atividade: t.activity,
                  inicio: s.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
                  fim: e.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
@@ -970,12 +972,12 @@ function TimesheetPage() {
       <main className="flex-1 w-full overflow-y-auto overflow-x-hidden">
         
         {/* 2. A DIV INTERNA mantém todo o nosso trabalho da SPRINT 4 intacto! */}
-        <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
+        <div className="w-full max-w-400 mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
           
           {viewMode === "timesheet" ? (
             /* 3. Nosso grid anti-achatamento (1 coluna em notebooks, 2 em ultrawide) continua aqui dentro */
-            <div className="grid gap-8 grid-cols-1 xl:grid-cols-[1.3fr_1fr] items-start">
-            <section className="space-y-6">
+            <div className="grid gap-8 grid-cols-1 xl:grid-cols-[1.3fr_1fr] items-start w-full">
+            <section className="space-y-6 min-w-0 w-full">
               <div className="rounded-2xl border bg-card p-6 space-y-6 shadow-sm">
                 <TaskSelector
                   contracts={contractsList}
@@ -1041,7 +1043,7 @@ function TimesheetPage() {
               </div>
             </section>
             
-            <section className="space-y-3">
+            <section className="space-y-3 min-w-0 w-full">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold">Painel de Histórico</h2>
                 <span className="text-xs text-muted-foreground">Ciclo Atual</span>
