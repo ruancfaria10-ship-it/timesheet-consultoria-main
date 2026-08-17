@@ -128,6 +128,7 @@ function TimesheetPage() {
   const [authorizedDates, setAuthorizedDates] = useState<string[]>([]);
   const [horasMinimasMes, setHorasMinimasMes] = useState<number>(0);
   const [medicoesPainel, setMedicoesPainel] = useState<any[]>([]);
+  const [ordemMatriz, setOrdemMatriz] = useState<Record<string, string[]>>({});
 
   // Estado para controlar a edição retroativa
   const [editingRetroId, setEditingRetroId] = useState<string | null>(null);
@@ -197,6 +198,7 @@ function TimesheetPage() {
         fetchOs(); 
         fetchConsultorMeta(session.user.id);
         fetchAuthorizedDates(session.user.id);
+        fetchOrdemMatriz(session.user.id); // <--- ADICIONE ESTA LINHA NAS DUAS VEZES QUE APARECE
       }
       setAuthLoading(false);
     });
@@ -216,6 +218,7 @@ function TimesheetPage() {
         fetchOs(); 
         fetchConsultorMeta(session.user.id);
         fetchAuthorizedDates(session.user.id);
+        fetchOrdemMatriz(session.user.id);
       }
     });
 
@@ -236,6 +239,22 @@ function TimesheetPage() {
     if (!user?.id) return;
     const { data, error } = await supabase.from('medicoes').select('*').eq('user_id', user.id);
     if (!error && data) setMedicoesPainel(data);
+  };
+
+  const fetchOrdemMatriz = async (userId: string) => {
+    const { data: bases } = await supabase.from('linha_base').select('id, contract_id, os_id');
+    const { data: items } = await supabase.from('linha_base_items').select('base_id, atividades').eq('user_id', userId);
+    if (bases && items) {
+       const map: Record<string, string[]> = {};
+       items.forEach(item => {
+           const base = bases.find(b => b.id === item.base_id);
+           if (base) {
+               const key = `${base.contract_id}_${base.os_id || 'sem_os'}`;
+               map[key] = item.atividades || [];
+           }
+       });
+       setOrdemMatriz(map);
+    }
   };
 
   useEffect(() => {
@@ -333,14 +352,28 @@ function TimesheetPage() {
       });
     }, [osList, allocations, activeCycleForInput]);
 
-  const availableActivities = Array.from(new Set(
-    allocations.filter(a => 
-      a.contract_id === contractId && 
-      (!isComOs || a.os_id === osId) && 
-      a.mes === activeCycleForInput.month && 
-      a.ano === activeCycleForInput.year
-    ).map(a => a.atividade)
-  ));
+  const availableActivities = useMemo(() => {
+    const rawActivities = Array.from(new Set(
+      allocations.filter(a => 
+        a.contract_id === contractId && 
+        (!isComOs || a.os_id === osId) && 
+        a.mes === activeCycleForInput.month && 
+        a.ano === activeCycleForInput.year
+      ).map(a => a.atividade)
+    ));
+
+    const key = `${contractId}_${isComOs ? (osId || 'sem_os') : 'sem_os'}`;
+    const ordemOficial = ordemMatriz[key] || [];
+    
+    return rawActivities.sort((a, b) => {
+      const indexA = ordemOficial.indexOf(a);
+      const indexB = ordemOficial.indexOf(b);
+      if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+      if (indexA !== -1) return -1;
+      if (indexB !== -1) return 1;
+      return a.localeCompare(b);
+    });
+  }, [allocations, contractId, osId, activeCycleForInput, isComOs, ordemMatriz]);
 
   useEffect(() => {
     const cObj = contractsList.find((x) => x.id === contractId);
@@ -912,7 +945,22 @@ function TimesheetPage() {
           
           <div className="flex items-center gap-4 z-10 relative">
             {userProfile?.avatar_url ? (
-              <img src={userProfile.avatar_url} alt="Avatar" className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md object-cover" />
+              <>
+                <img 
+                  src={userProfile.avatar_url} 
+                  alt="Avatar" 
+                  className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md object-cover" 
+                  onError={(e) => {
+                    e.currentTarget.style.display = 'none';
+                    if (e.currentTarget.nextElementSibling) {
+                      (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex';
+                    }
+                  }}
+                />
+                <div className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md bg-primary/10 hidden items-center justify-center text-primary font-bold text-sm">
+                   {userProfile?.nome ? userProfile.nome.substring(0,2).toUpperCase() : user?.email?.substring(0,2).toUpperCase()}
+                </div>
+              </>
             ) : (
               <div className="w-12 h-12 rounded-full border-2 border-primary/20 shadow-md bg-primary/10 flex items-center justify-center text-primary font-bold text-sm">
                  {userProfile?.nome ? userProfile.nome.substring(0,2).toUpperCase() : user?.email?.substring(0,2).toUpperCase()}

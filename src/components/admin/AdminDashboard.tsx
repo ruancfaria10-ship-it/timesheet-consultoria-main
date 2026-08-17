@@ -25,7 +25,7 @@ import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { toast } from "sonner";
 
-type Consultor = { id: string, nome: string, horas_minimas_mes: number, avatar_url?: string, status_ativo?: boolean, is_convidado?: boolean }
+type Consultor = { id: string, nome: string, horas_minimas_mes: number, avatar_url?: string, status_ativo?: boolean, is_convidado?: boolean, em_recesso?: boolean }
 type Contrato = { id: string, codigo: string, nome: string, status_ativo: boolean, tipo: string, fonte_pagamento: string, teto_global_horas: number, ciclo_inicio: number, ciclo_fim: number, ciclo_fat_inicio: number, ciclo_fat_fim: number }
 type OrdemServico = { id: string, contract_id: string, codigo: string, descricao: string, status_ativa: boolean, horas_previstas: number }
 
@@ -200,7 +200,7 @@ export function AdminDashboard() {
   async function carregarDadosDoBanco() {
     try {
       setLoading(true)
-      const { data: dbCons } = await supabase.from('consultores').select('id, nome, horas_minimas_mes, avatar_url, status_ativo, is_convidado').order('nome')
+      const { data: dbCons } = await supabase.from('consultores').select('id, nome, horas_minimas_mes, avatar_url, status_ativo, is_convidado, em_recesso').order('nome')
       const { data: dbCont } = await supabase.from('contratos').select('*').order('codigo')
       const { data: dbOs } = await supabase.from('ordens_servico').select('*').order('created_at', { ascending: false })
       
@@ -297,6 +297,79 @@ export function AdminDashboard() {
     if (count && count > 0) return alert(`❌ BLOQUEIO: Esta OS possui ${count} apontamentos vinculados. Exclusão proibida.`);
     if (window.confirm("Apagar esta OS?")) { await supabase.from('ordens_servico').delete().eq('id', id); carregarDadosDoBanco(); }
   }
+
+  // ==========================================
+  // UPLOAD E COMPRESSÃO DE AVATAR (STORAGE)
+  // ==========================================
+  // Função auxiliar que esmaga a imagem no navegador antes de gastar internet
+  const compressImage = (file: File, maxSize: number = 300): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let { width, height } = img;
+          
+          // Mantém a proporção e reduz para no máximo 300px
+          if (width > height && width > maxSize) { 
+            height *= maxSize / width; 
+            width = maxSize; 
+          } else if (height > maxSize) { 
+            width *= maxSize / height; 
+            height = maxSize; 
+          }
+          
+          canvas.width = width; 
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          
+          // Converte para WebP com 80% de qualidade (Ultra leve)
+          canvas.toBlob((blob) => blob ? resolve(blob) : reject('Erro na compressão'), 'image/webp', 0.8);
+        };
+      };
+    });
+  };
+
+  const handleUploadAvatar = async (e: React.ChangeEvent<HTMLInputElement>, consultorId: string) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+    try {
+      toast.info('Otimizando imagem...');
+      
+      // 1. Comprime a imagem antes de subir
+      const compressedBlob = await compressImage(file, 300);
+      
+      // 2. Gera um nome único forçando a extensão .webp
+      const fileName = `${consultorId}-${Math.random().toString(36).substring(2)}.webp`;
+
+      // 3. Faz o upload para o bucket 'avatares'
+      const { error: uploadError } = await supabase.storage.from('avatares').upload(fileName, compressedBlob, {
+         contentType: 'image/webp'
+      });
+      if (uploadError) throw uploadError;
+
+      // 4. Pega a URL pública
+      const { data: { publicUrl } } = supabase.storage.from('avatares').getPublicUrl(fileName);
+
+      // 5. Atualiza o banco de dados
+      const { error: updateError } = await supabase.from('consultores').update({ avatar_url: publicUrl }).eq('id', consultorId);
+      if (updateError) throw updateError;
+
+      // 6. Atualiza a tela
+      setConsultores(p => p.map(c => c.id === consultorId ? { ...c, avatar_url: publicUrl } : c));
+      toast.success('Avatar atualizado e otimizado com sucesso!');
+    } catch (error: any) {
+      toast.error('Erro ao enviar foto: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // ==========================================
   // MOTOR DA LINHA DE BASE (MATRIZ) E ALOCAÇÕES
@@ -607,6 +680,23 @@ export function AdminDashboard() {
     return Array.from(setAtiv);
   }, [baseItems]);
 
+  // 🌟 ITEM 2: Catálogo Global de Atividades (Puxa o histórico de toda a empresa)
+  const catalogoGlobalAtividades = useMemo(() => {
+    const setAtiv = new Set<string>();
+    // Varre todas as alocações e timesheets já feitos na vida
+    allAlocacoes.forEach(a => {
+       if (a.atividade && a.atividade !== 'Sem atividade específica' && a.atividade !== 'Preço Fechado (Medição)') setAtiv.add(a.atividade);
+    });
+    allTimesheets.forEach(t => {
+       if (t.activity && t.activity !== 'Sem atividade específica' && t.activity !== 'Preço Fechado (Medição)') setAtiv.add(t.activity);
+    });
+    // Adiciona as que estão sendo criadas agora na matriz
+    Object.values(baseItems).forEach(item => {
+       item.atividades.forEach(a => setAtiv.add(a));
+    });
+    return Array.from(setAtiv).sort();
+  }, [allAlocacoes, allTimesheets, baseItems]);
+
   // Função para adicionar uma nova atividade mestre que fica disponível para toda a equipe
   const addAtividadeMestre = () => {
     const nome = prompt("Nome da Nova Atividade Padrão do Projeto:");
@@ -727,7 +817,7 @@ export function AdminDashboard() {
   // AUTORIZAÇÕES RETROATIVAS E CARREGAMENTOS GLOBAIS
   // ==========================================
   useEffect(() => { 
-    if (['dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor'].includes(menuAtivo)) {
+    if (['alocacoes', 'dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor'].includes(menuAtivo)) {
       carregarTudoParaDash();
       setModoDataFiltro('ciclo'); // 🌟 BLINDAGEM: Sempre volta para o Ciclo Mensal ao trocar de aba!
     }
@@ -2053,8 +2143,8 @@ export function AdminDashboard() {
 
         {/* 🌟 VIEW: ALOCAÇÃO DE CONSULTORES & LINHA DE BASE */}
         {menuAtivo === 'alocacoes' && (
-          <div className="space-y-6 w-full">
-            <div className="bg-linear-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm w-full">
+          <div className="flex flex-col h-full w-full gap-6 min-h-0">
+            <div className="shrink-0 bg-linear-to-r from-primary/10 via-primary/5 to-transparent border border-primary/20 rounded-2xl p-6 flex flex-col md:flex-row gap-6 items-start md:items-center justify-between shadow-sm w-full">
               <div>
                 <h2 className="text-2xl font-black text-primary tracking-tight flex items-center gap-2">
                   <Clock className="w-6 h-6" /> Gestão de Alocações
@@ -2084,28 +2174,34 @@ export function AdminDashboard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full">
-              <div className="md:col-span-4 space-y-4">
-                {/* 1. SELETOR DE PROJETO (Comum para as duas views) */}
-                <Card>
-                  <CardHeader className="pb-3"><CardTitle className="text-sm">1. Projeto Mestre</CardTitle></CardHeader>
-                  <CardContent>
-                    <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); setBaseItems({}); }}>
-                      <SelectTrigger className="w-full"><SelectValue placeholder="Escolha o contrato..." /></SelectTrigger>
-                      <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
-                    </Select>
+            {/* 🌟 LAYOUT DINÂMICO INTELIGENTE - ALOCAÇÕES */}
+            <div className={`w-full flex-1 min-h-0 flex gap-6 items-start ${viewAlocacao === 'baseline' ? 'flex-col xl:flex-row' : 'flex-col'}`}>
+              
+              {/* COLUNA ESQUERDA (Ou Topo na Distribuição) */}
+              <div className={`${viewAlocacao === 'baseline' ? 'xl:w-87.5 shrink-0 flex flex-col gap-4 h-full min-h-0' : 'w-full shrink-0'}`}>
+                
+                {/* 1. SELETOR DE PROJETO */}
+                <Card className={`shadow-sm ${viewAlocacao === 'mensal' ? 'border-primary/20 bg-primary/5' : ''}`}>
+                  <CardHeader className="pb-3 pt-4"><CardTitle className="text-sm flex items-center gap-2"><Briefcase className="w-4 h-4"/> Projeto Mestre</CardTitle></CardHeader>
+                  <CardContent className={viewAlocacao === 'mensal' ? 'flex flex-col md:flex-row items-start md:items-center gap-4' : 'flex flex-col'}>
+                    <div className="flex-1 w-full min-w-62.5">
+                      <Select value={contratoAtivo} onValueChange={(val) => { setContratoAtivo(val); setAlocacoes({}); setBaseItems({}); }}>
+                        <SelectTrigger className={`w-full ${viewAlocacao === 'mensal' ? 'h-10 bg-background' : ''}`}><SelectValue placeholder="Escolha o contrato..." /></SelectTrigger>
+                        <SelectContent>{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>
                     
                     {contratoSelecionadoObj?.tipo === 'continuado_com_os' && (
-                      <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                        <Label className="text-xs font-bold text-amber-700 mb-2 block">Ordem de Serviço (Subnível)</Label>
+                      <div className={`w-full ${viewAlocacao === 'mensal' ? 'flex-1 min-w-62.5' : 'mt-4'}`}>
+                        {viewAlocacao === 'baseline' && <Label className="text-xs font-bold text-amber-700 mb-2 block">Ordem de Serviço (Subnível)</Label>}
                         {osList.filter(o => o.contract_id === contratoAtivo).length === 0 ? (
-                           <p className="text-[10px] text-amber-800 font-bold bg-amber-500/20 p-2 rounded">Nenhuma OS cadastrada. Vá na aba de OS e crie uma antes de alocar a equipe.</p>
+                           <p className="text-[10px] text-amber-800 font-bold bg-amber-500/20 p-2 rounded">Nenhuma OS cadastrada.</p>
                         ) : (
                           <Select value={alocacaoOsId} onValueChange={setAlocacaoOsId}>
-                            <SelectTrigger className="bg-background border-amber-500/30 text-xs"><SelectValue placeholder="Selecione a OS..."/></SelectTrigger>
+                            <SelectTrigger className={`bg-background border-amber-500/30 ${viewAlocacao === 'mensal' ? 'h-10' : 'text-xs'}`}><SelectValue placeholder="Selecione a OS..."/></SelectTrigger>
                             <SelectContent>
                               {osList.filter(o => o.contract_id === contratoAtivo).map(o => (
-                                <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
+                                <SelectItem key={o.id} value={o.id}><span className="font-bold">{o.codigo}</span> {o.descricao ? `- ${o.descricao}` : ''}</SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
@@ -2114,101 +2210,101 @@ export function AdminDashboard() {
                     )}
 
                     {(isSemOsType || isOverheadType) && (
-                      <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                        <p className="text-xs font-bold text-blue-700 flex items-center gap-1.5"><Wrench className="w-3.5 h-3.5"/> {isOverheadType ? 'Overhead (Custo Fixo/Apoio)' : 'Pequenos Suportes'}</p>
-                        <p className="text-[10px] text-blue-700/70 mt-1 leading-tight">
-                          {isOverheadType 
-                            ? 'As atividades do Overhead são ilimitadas e não requerem teto de horas na matriz ou alocação mensal.' 
-                            : 'Os apontamentos desta OS são dinâmicos, não possuem escopo específico e não requerem limite de horas.'}
-                        </p>
+                      <div className={`bg-blue-500/10 border border-blue-500/20 rounded-lg p-2.5 ${viewAlocacao === 'mensal' ? 'flex-1 min-w-75' : 'mt-4'}`}>
+                        <p className="text-[11px] font-bold text-blue-700 flex items-center gap-1.5"><Wrench className="w-3.5 h-3.5"/> {isOverheadType ? 'Overhead (Ilimitado)' : 'Suporte Dinâmico'}</p>
                       </div>
                     )}
                   </CardContent>
                 </Card>
                 
-                {/* 2. ADICIONAR ENGENHEIRO (Comum, mas salva no state correspondente) */}
-                <Card className={(!contratoAtivo || (isComOsType && !alocacaoOsId)) ? 'opacity-40 pointer-events-none' : ''}>
-                  <CardHeader className="pb-3">
-                     <CardTitle className="text-sm text-primary flex items-center gap-2">
-                        <Users className="w-4 h-4" /> 2. Adicionar Consultor à {viewAlocacao === 'baseline' ? 'Matriz' : 'Distribuição'}
-                     </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-1.5 max-h-87.5 overflow-y-auto p-3">
-                    {consultores.map(user => {
-                      const jaAlocado = viewAlocacao === 'baseline' ? !!baseItems[user.id] : !!alocacoes[user.id];
-                      return (
-                        <div 
-                          key={user.id} 
-                          onClick={async () => {
-                            if (!jaAlocado) {
-                              const isDynamic = isSemOsType || isOverheadType;
-                              const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                {/* SÓ MOSTRA NO MODO LINHA DE BASE */}
+                {viewAlocacao === 'baseline' && (
+                  <>
+                    <Card className={`shadow-sm flex flex-col shrink-0 ${(!contratoAtivo || (isComOsType && !alocacaoOsId)) ? 'opacity-40 pointer-events-none' : ''}`}>
+                      <CardHeader className="pb-3 pt-4">
+                         <CardTitle className="text-sm text-foreground flex items-center gap-2">
+                            <Users className="w-4 h-4 text-primary" /> Adicionar à Matriz
+                         </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1.5 max-h-[30vh] overflow-y-auto p-3 bg-muted/10">
+                        {consultores.map(user => {
+                          const jaAlocado = !!baseItems[user.id];
+                          return (
+                            <div 
+                              key={user.id} 
+                              onClick={async () => {
+                                 if (!jaAlocado) {
+                                    const isDynamic = isSemOsType || isOverheadType;
+                                    const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                                    addConsultorBase(user.id);
+                                    if (isDynamic) {
+                                      await supabase.from('alocacoes').insert([{ user_id: user.id, contract_id: contratoAtivo, os_id: targetOsId, horas_disponiveis: 9999, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno }]);
+                                      toast.success(`${user.nome} adicionado à Matriz e alocado no mês atual!`);
+                                      carregarAlocacoesMensais(contratoAtivo, targetOsId); 
+                                    }
+                                 }
+                              }} 
+                              className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-background opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5 bg-card shadow-xs'}`}
+                            >
+                              <span className="font-semibold">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
+                            </div>
+                          )
+                        })}
+                      </CardContent>
+                    </Card>
 
-                              if (viewAlocacao === 'baseline') {
-                                addConsultorBase(user.id);
-                                if (isDynamic) {
-                                  // Auto-aloca no mês silenciosamente
-                                  await supabase.from('alocacoes').insert([{
-                                    user_id: user.id, contract_id: contratoAtivo, os_id: targetOsId,
-                                    horas_disponiveis: 9999, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno
-                                  }]);
-                                  toast.success(`${user.nome} adicionado à Matriz e alocado no mês atual!`);
-                                  carregarAlocacoesMensais(contratoAtivo, targetOsId); // Atualiza a tela
-                                }
-                              } else {
-                                if (isDynamic) {
-                                  // Adiciona direto na mensal e reflete na base automaticamente
-                                  addConsultorBase(user.id);
-                                  setAlocacoes(p => ({ ...p, [user.id]: { consultorId: user.id, horasTotais: 9999, atividades: [] } }));
-                                  
-                                  await supabase.from('alocacoes').insert([{
-                                    user_id: user.id, contract_id: contratoAtivo, os_id: targetOsId,
-                                    horas_disponiveis: 9999, atividade: 'Sem atividade específica', mes: alocMes, ano: alocAno
-                                  }]);
-                                  
-                                  if (currentBase) {
-                                    await supabase.from('linha_base_items').insert([{
-                                      base_id: currentBase.id, user_id: user.id, horas_teto: 0, atividades: [], tipo_pagamento: 'horas'
-                                    }]);
-                                  }
-                                  toast.success(`${user.nome} alocado no mês e vinculado à Matriz com sucesso!`);
-                                  carregarAlocacoesMensais(contratoAtivo, targetOsId);
-                                } else {
-                                  toast.info("Consultores de Escopo Fechado só podem ser adicionados se já estiverem na Linha de Base.");
-                                }
-                              }
-                            }
-                          }}
-                          className={`p-2.5 rounded-lg border text-xs flex justify-between items-center transition-colors ${jaAlocado ? 'bg-muted opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary hover:bg-primary/5'}`}
-                        >
-                          <span className="font-medium">{user.nome}</span><ArrowRight className="w-3.5 h-3.5 text-muted-foreground" />
-                        </div>
-                      )
-                    })}
-                  </CardContent>
-                </Card>
+                    {contratoAtivo && (
+                      <Card className="border-dashed border-primary/40 bg-primary/5 shadow-inner flex flex-col flex-1 min-h-0">
+                        <CardHeader className="pb-2 pt-4 shrink-0">
+                           <CardTitle className="text-sm text-primary flex items-center gap-2">
+                              <FolderTree className="w-4 h-4" /> Catálogo Global (Arraste)
+                           </CardTitle>
+                           <CardDescription className="text-[10px] leading-tight mt-1 text-primary/70 font-medium">
+                              Arraste as disciplinas abaixo e solte dentro do quadro do consultor ao lado.
+                           </CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-2 flex-1 overflow-y-auto p-3 min-h-0">
+                          {catalogoGlobalAtividades.length === 0 ? (
+                             <p className="text-[10px] text-muted-foreground text-center py-4">Nenhuma disciplina cadastrada ainda.</p>
+                          ) : (
+                             catalogoGlobalAtividades.map((ativ, idx) => (
+                               <div 
+                                 key={idx}
+                                 draggable
+                                 onDragStart={(e) => { e.dataTransfer.setData('text/plain', ativ); }}
+                                 className="p-2 text-[11px] font-semibold bg-background border border-primary/20 rounded-md cursor-grab active:cursor-grabbing hover:bg-primary/10 transition-colors flex items-center gap-2 shadow-xs"
+                               >
+                                 <GripVertical className="w-3.5 h-3.5 text-primary/50" />
+                                 {ativ}
+                               </div>
+                             ))
+                          )}
+                        </CardContent>
+                      </Card>
+                    )}
+                  </>
+                )}
               </div>
               
-              <div className="md:col-span-8 w-full">
+              {/* COLUNA DIREITA (Ou Conteúdo Inferior na Distribuição) */}
+              <div className="flex-1 w-full h-full min-h-0 flex flex-col">
+                
                 {/* --- MODO LINHA DE BASE --- */}
                 {viewAlocacao === 'baseline' && (
-                  <Card className="h-full min-h-112.5 flex flex-col w-full border-primary/30 shadow-md">
-                    <CardHeader className="flex flex-row items-start justify-between border-b pb-4 bg-primary/5">
+                  <Card className="flex flex-col w-full h-full border-primary/20 shadow-md">
+                    <CardHeader className="flex flex-row items-start justify-between border-b pb-4 bg-primary/5 shrink-0">
                       <div>
-                        <CardTitle className="text-base flex items-center gap-2 text-primary">
-                           <FolderTree className="w-5 h-5" /> 3. Linha de Base (Matriz do Projeto)
+                        <CardTitle className="text-base flex items-center gap-2 text-primary font-bold">
+                           <FolderTree className="w-5 h-5" /> Linha de Base (Matriz do Projeto)
                         </CardTitle>
-                        {isComOsType && alocacaoOsId && <CardDescription className="text-amber-600 font-bold mt-1">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</CardDescription>}
-                        <p className="text-xs text-muted-foreground mt-2 max-w-lg">
-                           Aqui você define as regras permanentes: o teto máximo de horas de cada consultor na vida útil do contrato e o escopo (atividades) que eles executarão.
-                        </p>
+                        {isComOsType && alocacaoOsId && <CardDescription className="text-amber-700 font-bold mt-1.5 uppercase tracking-wider text-[10px] bg-amber-500/10 inline-block px-2 py-0.5 rounded border border-amber-500/20">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</CardDescription>}
                       </div>
                       <div className="flex flex-col items-end gap-2">
                         {baseVersions.length > 0 && (
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] uppercase font-bold text-muted-foreground">Histórico:</span>
+                          <div className="flex items-center gap-2 bg-background p-1 rounded-lg border shadow-xs">
+                            <span className="text-[10px] uppercase font-bold text-muted-foreground pl-2">Versão:</span>
                             <Select value={currentBase?.id} onValueChange={mudarVersaoBase}>
-                              <SelectTrigger className="h-8 w-32 text-xs font-mono bg-background">
+                              <SelectTrigger className="h-7 w-28 text-xs font-mono bg-transparent border-none focus:ring-0">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
@@ -2220,294 +2316,308 @@ export function AdminDashboard() {
                           </div>
                         )}
                         {(contratoAtivo && currentBase?.id === baseVersions[0]?.id) && (
-                          <Button onClick={salvarLinhaBase} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Salvar Versão da Matriz</Button>
+                          <Button onClick={salvarLinhaBase} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Salvar Matriz</Button>
                         )}
                       </div>
                     </CardHeader>
-                    <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
-                      {carregandoAlocacoes ? (
-                        <div className="flex justify-center py-10"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
-                      ) : Object.values(baseItems).length === 0 ? (
-                         <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2 bg-muted/10">Adicione consultores ao lado para construir a matriz deste contrato/OS.</div>
-                      ) : (
-                        Object.values(baseItems).map(item => {
-                          const cNome = consultores.find(c => c.id === item.user_id)?.nome;
-                          const isFechado = item.tipo_pagamento === 'fechado';
-                          const isUltimaVersao = currentBase?.id === baseVersions[0]?.id;
-                          
-                          // --- CÁLCULO DE SALDO VITALÍCIO ---
-                          const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
-                          const gastoVidaH = allTimesheets.filter(t => t.user_id === item.user_id && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                          const saldoH = item.horas_teto - gastoVidaH;
-                          
-                          return (
-                            <div key={item.user_id} className={`border-2 rounded-xl p-4 shadow-sm w-full transition-all ${isUltimaVersao ? 'hover:border-primary/50' : 'opacity-80 pointer-events-none grayscale-20'} ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
-                              <div className={`flex flex-col md:flex-row md:justify-between md:items-center gap-4 ${(!isSemOsType && !isFechado && !isOverheadType) ? 'border-b pb-3 mb-3' : ''}`}>
-                                <div>
-                                    <h4 className="font-bold text-sm text-foreground">{cNome}</h4>
-                                    {(!isSemOsType && !isFechado && !isOverheadType) ? (
-                                      <div className="flex items-center gap-3 mt-1.5 text-[10px] uppercase tracking-wider font-mono">
-                                        <span className="text-primary font-bold">Consumido: {gastoVidaH.toFixed(1)}h</span>
-                                        <span className={`${saldoH < 0 ? 'text-red-500' : 'text-green-600'} font-bold`}>Saldo Base: {saldoH.toFixed(1)}h</span>
+                    <CardContent className="p-0 overflow-y-auto w-full bg-muted/10 flex-1 min-h-0">
+                      <div className="p-6 space-y-5">
+                        {carregandoAlocacoes ? (
+                          <div className="flex justify-center py-20"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
+                        ) : Object.values(baseItems).length === 0 ? (
+                           <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-20 border-2 border-dashed rounded-xl bg-card">
+                             <FolderTree className="w-12 h-12 mb-3 text-muted-foreground/30" />
+                             <p className="font-semibold text-sm">Matriz Vazia</p>
+                             <p className="text-xs mt-1">Adicione consultores no menu lateral para construir a equipe.</p>
+                           </div>
+                        ) : (
+                          Object.values(baseItems).map(item => {
+                            const cNome = consultores.find(c => c.id === item.user_id)?.nome;
+                            const isFechado = item.tipo_pagamento === 'fechado';
+                            const isUltimaVersao = currentBase?.id === baseVersions[0]?.id;
+                            
+                            const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                            const gastoVidaH = allTimesheets.filter(t => t.user_id === item.user_id && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                            const saldoH = item.horas_teto - gastoVidaH;
+                            
+                            return (
+                              <div key={item.user_id} className={`border rounded-xl p-5 shadow-sm w-full transition-all ${isUltimaVersao ? 'hover:border-primary/40' : 'opacity-80 pointer-events-none grayscale'} ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                                <div className={`flex flex-col md:flex-row md:justify-between md:items-center gap-4 ${(!isSemOsType && !isFechado && !isOverheadType) ? 'border-b border-border/60 pb-4 mb-4' : ''}`}>
+                                  <div>
+                                      <h4 className="font-black text-base text-foreground mb-2">{cNome}</h4>
+                                      {(!isSemOsType && !isFechado && !isOverheadType) ? (
+                                        <div className="flex items-center gap-3 text-[10px] uppercase tracking-wider font-mono bg-muted/40 p-1.5 rounded-lg border w-fit">
+                                          <span className="text-primary font-bold px-2">Consumido: {gastoVidaH.toFixed(1)}h</span>
+                                          <span className={`${saldoH < 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'} px-2 py-0.5 rounded shadow-xs font-bold`}>Saldo Base: {saldoH.toFixed(1)}h</span>
+                                        </div>
+                                      ) : (
+                                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">Definições da Matriz</p>
+                                      )}
+                                      
+                                      <div className="mt-3 flex items-center gap-2">
+                                        <Select value={item.tipo_pagamento || 'horas'} onValueChange={(val: 'horas' | 'fechado') => updateTipoPagamentoBase(item.user_id, val)}>
+                                          <SelectTrigger className="h-8 w-40 text-xs font-bold shadow-xs bg-background border-primary/20 hover:border-primary/50">
+                                            <SelectValue />
+                                          </SelectTrigger>
+                                          <SelectContent>
+                                            <SelectItem value="horas">⏳ Medição em Horas</SelectItem>
+                                            <SelectItem value="fechado">🎯 Preço Fechado (%)</SelectItem>
+                                          </SelectContent>
+                                        </Select>
                                       </div>
-                                    ) : (
-                                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Definições da Matriz</p>
+                                  </div>
+                                  
+                                  <div className="flex items-center gap-3">
+                                    {(!isSemOsType && !isFechado && !isOverheadType) && (
+                                      <div className="relative flex items-center">
+                                        <Input type="number" value={item.horas_teto || ''} onChange={(e) => updateTetoBase(item.user_id, Number(e.target.value))} className="w-32 h-10 pr-8 font-bold text-lg text-right border-primary/30 focus-visible:ring-primary shadow-xs" placeholder="0" />
+                                        <span className="absolute right-3 text-sm text-muted-foreground font-bold">h</span>
+                                      </div>
                                     )}
-                                    
-                                    <div className="mt-1.5 flex items-center gap-2">
-                                      <Select value={item.tipo_pagamento || 'horas'} onValueChange={(val: 'horas' | 'fechado') => updateTipoPagamentoBase(item.user_id, val)}>
-                                        <SelectTrigger className="h-7 w-36 text-[10px] font-bold shadow-xs bg-background">
-                                          <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                          <SelectItem value="horas">⏳ Por Horas</SelectItem>
-                                          <SelectItem value="fechado">🎯 Preço Fechado (%)</SelectItem>
-                                        </SelectContent>
-                                      </Select>
-                                      {isFechado && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none">Sem controle de horas</Badge>}
-                                    </div>
+                                    {(isOverheadType && !isFechado) && (
+                                      <Badge className="bg-blue-500/10 text-blue-700 border-none font-mono py-1 px-3"><Wrench className="w-3 h-3 mr-1" /> Horas Livres</Badge>
+                                    )}
+                                    <Button variant="ghost" size="icon" onClick={() => removeConsultorBase(item.user_id)} className="h-10 w-10 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 shrink-0"><Trash2 className="w-4 h-4" /></Button>
+                                  </div>
                                 </div>
                                 
-                                <div className="flex items-center gap-3">
-                                  {(!isSemOsType && !isFechado && !isOverheadType) && (
-                                    <div className="relative flex items-center">
-                                      <Input type="number" value={item.horas_teto || ''} onChange={(e) => updateTetoBase(item.user_id, Number(e.target.value))} className="w-28 h-9 pr-7 font-bold text-right border-primary/40 focus-visible:ring-primary/50" placeholder="Teto (ex: 100)" />
-                                      <span className="absolute right-3 text-xs text-muted-foreground font-bold">h</span>
+                                {(!isSemOsType && !isFechado) && (
+                                  <div 
+                                    className="border-l-4 border-primary/20 pl-4 space-y-3 w-full p-3 rounded-r-xl border-y border-r transition-all"
+                                    onDragOver={(e) => {
+                                      e.preventDefault(); 
+                                      e.currentTarget.classList.add('bg-primary/5', 'border-primary/30', 'border-dashed');
+                                    }}
+                                    onDragLeave={(e) => {
+                                      e.currentTarget.classList.remove('bg-primary/5', 'border-primary/30', 'border-dashed');
+                                    }}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      e.currentTarget.classList.remove('bg-primary/5', 'border-primary/30', 'border-dashed');
+                                      const ativNome = e.dataTransfer.getData('text/plain');
+                                      if (ativNome) {
+                                        setBaseItems(p => {
+                                          const atuais = p[item.user_id].atividades;
+                                          if (atuais.includes(ativNome)) {
+                                            toast.info(`A disciplina "${ativNome}" já está alocada para este consultor.`);
+                                            return p;
+                                          }
+                                          return { ...p, [item.user_id]: { ...p[item.user_id], atividades: [...atuais, ativNome] } };
+                                        });
+                                        toast.success(`Disciplina adicionada para ${cNome}!`);
+                                      }
+                                    }}
+                                  >
+                                    <div className="flex justify-between items-center text-xs">
+                                        <span className="font-bold text-muted-foreground uppercase tracking-wider">Disciplinas / Escopo Atribuído</span>
+                                        <Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10 shadow-xs" onClick={() => addAtividadeBase(item.user_id)}>
+                                          <PlusCircle className="w-3 h-3 mr-1" /> Criar Manual
+                                        </Button>
                                     </div>
-                                  )}
-                                  {(isOverheadType && !isFechado) && (
-                                    <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Horas Livres</Badge>
-                                  )}
-                                  <Button variant="ghost" size="icon" onClick={() => removeConsultorBase(item.user_id)} className="h-9 w-9 text-red-500 hover:bg-red-500/10 shrink-0"><Trash2 className="w-4 h-4" /></Button>
-                                </div>
-                              </div>
-                              
-                              {(!isSemOsType && !isFechado) && (
-                                <div className="pl-3 border-l-2 border-primary/20 space-y-3 mt-3 w-full">
-                                  <div className="flex justify-between items-center text-xs">
-                                      <span className="font-semibold text-muted-foreground">Disciplinas / Escopo Atribuído</span>
-                                      <Button variant="outline" size="sm" className="h-7 text-[10px] bg-primary/5 text-primary border-primary/20 hover:bg-primary/10" onClick={addAtividadeMestre}>
-                                        <PlusCircle className="w-3 h-3 mr-1" /> Nova Disciplina Padrão
-                                      </Button>
-                                  </div>
 
-                                  {/* 🌟 ITEM 14: Catálogo Mestre com Toggle e Exclusão Segura */}
-                                  {catalogoMestreAtividades.length === 0 ? (
-                                      <p className="text-[10px] italic text-muted-foreground py-1">Nenhuma disciplina cadastrada no projeto. Clique em "Nova Disciplina Padrão" acima.</p>
-                                  ) : (
-                                      <div className="flex flex-wrap gap-2 pt-1">
-                                        {catalogoMestreAtividades.map((ativNome, idx) => {
-                                          const selecionado = item.atividades.includes(ativNome);
-                                          return (
-                                            <div
-                                              key={idx}
-                                              className={`group flex items-center rounded-lg border transition-all ${
-                                                selecionado 
-                                                  ? 'bg-primary/10 border-primary text-primary shadow-xs' 
-                                                  : 'bg-muted/30 border-dashed border-muted-foreground/30 text-muted-foreground hover:bg-muted/50'
-                                              }`}
-                                            >
-                                              {/* Botão da Esquerda: Marca / Desmarca para o consultor */}
-                                              <button
-                                                type="button"
-                                                onClick={() => toggleAtividadeConsultor(item.user_id, ativNome)}
-                                                className="px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-                                              >
-                                                <div className={`w-3 h-3 rounded-xs border flex items-center justify-center ${selecionado ? 'bg-primary border-primary text-white' : 'border-muted-foreground/40'}`}>
-                                                  {selecionado && <Check className="w-2.5 h-2.5 stroke-3" />}
+                                    {item.atividades.length === 0 ? (
+                                        <div className="text-[11px] font-medium text-muted-foreground py-6 text-center border-2 border-dashed rounded-xl bg-background/50">
+                                          Arraste e solte as disciplinas do catálogo aqui.
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col gap-2 pt-1">
+                                          {item.atividades.map((ativNome, idx) => (
+                                            <div key={idx} className="group flex items-center justify-between rounded-lg border bg-background px-3 py-2 shadow-xs hover:border-primary/40 hover:bg-primary/5 transition-all">
+                                                <div className="flex items-center gap-3">
+                                                  <div className="flex flex-col gap-0.5 opacity-20 group-hover:opacity-100 transition-opacity">
+                                                     <button type="button" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'up')} disabled={idx === 0} className="hover:text-primary disabled:opacity-30 cursor-pointer">
+                                                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+                                                     </button>
+                                                     <button type="button" onClick={() => moverAtividadeBase(item.user_id, ativNome, 'down')} disabled={idx === item.atividades.length - 1} className="hover:text-primary disabled:opacity-30 cursor-pointer">
+                                                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                                                     </button>
+                                                  </div>
+                                                  <span className="text-sm font-semibold text-foreground/90">{ativNome}</span>
                                                 </div>
-                                                <span>{ativNome}</span>
-                                              </button>
 
-                                              {/* Botão da Direita: Remove a disciplina do projeto inteiro */}
-                                              <button
-                                                type="button"
-                                                title="Excluir Disciplina do Projeto"
-                                                onClick={(e) => {
-                                                  e.stopPropagation(); // Impede de ativar/desativar o toggle ao clicar na lixeira
-                                                  removerAtividadeMestre(ativNome);
-                                                }}
-                                                className="pr-2.5 pl-1 py-1.5 text-muted-foreground/50 hover:text-red-500 transition-colors cursor-pointer"
-                                              >
-                                                <Trash2 className="w-3 h-3" />
-                                              </button>
+                                                <button type="button" onClick={() => removeAtividadeBase(item.user_id, ativNome)} className="p-1.5 text-muted-foreground/40 hover:text-red-500 transition-colors cursor-pointer rounded-md hover:bg-red-500/10">
+                                                  <Trash2 className="w-4 h-4" />
+                                                </button>
                                             </div>
-                                          );
-                                        })}
-                                      </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          )
-                        })
-                      )}
+                                          ))}
+                                        </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
                     </CardContent>
                   </Card>
                 )}
 
                 {/* --- MODO DISTRIBUIÇÃO MENSAL --- */}
                 {viewAlocacao === 'mensal' && (
-                  <Card className="h-full min-h-112.5 flex flex-col w-full shadow-sm">
-                    <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/5">
+                  <Card className="flex flex-col w-full h-full shadow-sm">
+                    <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/5 shrink-0">
                       <div>
-                        <CardTitle className="text-base flex items-center gap-2">
-                           3. Distribuição de Horas do Mês
+                        <CardTitle className="text-base flex items-center gap-2 font-bold">
+                           Distribuição de Horas
                         </CardTitle>
                         <div className="flex items-center gap-3 mt-2">
                            <div className="flex bg-background border p-1 rounded-md shadow-sm">
                              <Select value={alocMes} onValueChange={setAlocMes}>
-                               <SelectTrigger className="w-28 h-7 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
+                               <SelectTrigger className="w-32 h-8 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
                                <SelectContent>{MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}</SelectContent>
                              </Select>
                              <div className="w-px bg-border my-1"></div>
                              <Select value={alocAno} onValueChange={setAlocAno}>
-                               <SelectTrigger className="w-20 h-7 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
+                               <SelectTrigger className="w-24 h-8 text-xs font-bold border-none bg-transparent focus:ring-0"><SelectValue /></SelectTrigger>
                                <SelectContent><SelectItem value="2025">2025</SelectItem><SelectItem value="2026">2026</SelectItem></SelectContent>
                              </Select>
                            </div>
-                           {isComOsType && alocacaoOsId && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</Badge>}
+                           {isComOsType && alocacaoOsId && <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 uppercase">OS: {osList.find(o => o.id === alocacaoOsId)?.codigo}</Badge>}
                         </div>
                       </div>
-                      {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-9 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Gravar Distribuição no Mês</Button>}
+                      {contratoAtivo && <Button onClick={salvarAlocacoesNoBanco} disabled={salvando} className="gap-2 h-10 shadow-sm bg-primary text-white"><Save className="w-4 h-4" /> Gravar Distribuição no Mês</Button>}
                     </CardHeader>
-                    <CardContent className="p-4 space-y-4 overflow-y-auto max-h-125 w-full">
-                      {carregandoAlocacoes ? (
-                        <div className="flex justify-center py-10"><Loader2 className="w-8 h-8 animate-spin" /></div>
-                      ) : Object.values(alocacoes).length === 0 ? (
-                         <div className="text-center text-muted-foreground text-xs py-12 border border-dashed rounded-xl m-2 bg-muted/10">Nenhum consultor encontrado na Linha de Base.<br/>Volte para a aba <b>"Linha de Base (Matriz)"</b> e configure a equipe e os tetos primeiro.</div>
-                      ) : (
-                        Object.values(alocacoes).map(aloc => {
-                           const matrizRef = baseItems[aloc.consultorId];
-                           const isFechado = aloc.tipo_pagamento === 'fechado';
-                           const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                    <CardContent className="p-0 overflow-y-auto w-full bg-muted/5 flex-1 min-h-0">
+                      <div className="p-6 space-y-5">
+                        {carregandoAlocacoes ? (
+                          <div className="flex justify-center py-20"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
+                        ) : Object.values(alocacoes).length === 0 ? (
+                           <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-20 border-2 border-dashed rounded-xl bg-card">
+                             <CalendarDays className="w-12 h-12 mb-3 text-muted-foreground/30" />
+                             <p className="font-semibold text-sm">Distribuição Vazia</p>
+                             <p className="text-xs mt-1">Volte para a aba <b>Linha de Base</b> e configure a equipe e os tetos primeiro.</p>
+                           </div>
+                        ) : (
+                          Object.values(alocacoes).map(aloc => {
+                             const matrizRef = baseItems[aloc.consultorId];
+                             const isFechado = aloc.tipo_pagamento === 'fechado';
+                             const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
 
-                           // Soma o que está no banco (outros meses) + o que está digitado no input agora
-                           const alocadoOutrosMeses = allAlocacoes.filter(a => a.user_id === aloc.consultorId && a.contract_id === contratoAtivo && (idOsValido ? a.os_id === idOsValido : true) && !(a.mes === alocMes && a.ano === alocAno) && a.atividade !== 'Preço Fechado (Medição)').reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
-                           const alocadoVidaLive = alocadoOutrosMeses + aloc.horasTotais;
-                           
-                           const medidoVida = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                           const saldoAAlocar = matrizRef ? matrizRef.horas_teto - alocadoVidaLive : 0;
-                           
-                           const cObj = contratos.find(c => c.id === contratoAtivo);
-                           const tetoContrato = cObj?.teto_global_horas || 0;
-                           const medidoContratoGlobal = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                           
-                           return (
-                             <div key={aloc.consultorId} className={`border rounded-xl p-4 shadow-sm w-full transition-all hover:border-primary/50 ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
-                               <div className={`flex flex-col xl:flex-row xl:justify-between xl:items-start gap-4 ${(!isSemOsType && !isFechado && !isOverheadType && aloc.atividades.length > 0) ? 'border-b pb-4 mb-4' : ''}`}>
-                                 <div className="flex-1">
-                                    <h4 className="font-bold text-sm text-foreground flex items-center gap-2">
-                                       {consultores.find(c => c.id === aloc.consultorId)?.nome}
-                                       {isFechado && <Badge className="bg-amber-500/10 text-amber-700 text-[9px] uppercase border-none ml-2" variant="secondary">Preço Fechado</Badge>}
-                                    </h4>
-                                    
-                                    {!isSemOsType && !isFechado && !isOverheadType && matrizRef && (
-                                       <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider">
-                                          <span className="bg-primary/10 text-primary px-2 py-1 rounded font-bold border border-primary/20">Teto Matriz (OS): {matrizRef.horas_teto.toFixed(1)}h</span>
-                                          <span className="text-muted-foreground border border-dashed px-2 py-1 rounded">Global Alocado: {alocadoVidaLive.toFixed(1)}h</span>
-                                          <span className="text-muted-foreground border border-dashed px-2 py-1 rounded">Global Medido: {medidoVida.toFixed(1)}h</span>
-                                          <span className={`px-2 py-1 rounded font-bold shadow-sm ${saldoAAlocar < 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>Saldo Matriz: {saldoAAlocar.toFixed(1)}h</span>
-                                          {tetoContrato > 0 && <span className="bg-orange-500/10 text-orange-700 border border-orange-500/20 px-2 py-1 rounded font-bold ml-auto">Medido no Contrato (Todas OS): {medidoContratoGlobal.toFixed(1)}h / {tetoContrato}h</span>}
-                                       </div>
-                                    )}
+                             const alocadoOutrosMeses = allAlocacoes.filter(a => a.user_id === aloc.consultorId && a.contract_id === contratoAtivo && (idOsValido ? a.os_id === idOsValido : true) && !(a.mes === alocMes && a.ano === alocAno) && a.atividade !== 'Preço Fechado (Medição)').reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+                             const alocadoVidaLive = alocadoOutrosMeses + aloc.horasTotais;
+                             
+                             const medidoVida = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true)).reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                             const saldoAAlocar = matrizRef ? matrizRef.horas_teto - alocadoVidaLive : 0;
+                             
+                             const cObj = contratos.find(c => c.id === contratoAtivo);
+                             const tetoContrato = cObj?.teto_global_horas || 0;
+                             const medidoContratoGlobal = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo).reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                             
+                             return (
+                               <div key={aloc.consultorId} className={`border rounded-xl p-5 shadow-sm w-full transition-all hover:border-primary/50 ${isFechado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                                 <div className={`flex flex-col xl:flex-row xl:justify-between xl:items-start gap-4 ${(!isSemOsType && !isFechado && !isOverheadType && aloc.atividades.length > 0) ? 'border-b border-border/60 pb-4 mb-4' : ''}`}>
+                                   <div className="flex-1">
+                                      <h4 className="font-black text-base text-foreground flex items-center gap-2 mb-2">
+                                         {consultores.find(c => c.id === aloc.consultorId)?.nome}
+                                         {isFechado && <Badge className="bg-amber-500/10 text-amber-700 text-[10px] uppercase border-none ml-2 shadow-xs" variant="secondary">Preço Fechado</Badge>}
+                                      </h4>
+                                      
+                                      {!isSemOsType && !isFechado && !isOverheadType && matrizRef && (
+                                         <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider bg-muted/30 p-1.5 rounded-lg border w-fit">
+                                            <span className="text-primary font-bold px-2">Teto Matriz (OS): {matrizRef.horas_teto.toFixed(1)}h</span>
+                                            <span className="text-muted-foreground border-l border-dashed pl-2">Global Alocado: {alocadoVidaLive.toFixed(1)}h</span>
+                                            <span className="text-muted-foreground border-l border-dashed pl-2">Global Medido: {medidoVida.toFixed(1)}h</span>
+                                            <span className={`px-2 py-0.5 rounded shadow-xs font-bold ml-2 ${saldoAAlocar < 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>Saldo Matriz: {saldoAAlocar.toFixed(1)}h</span>
+                                         </div>
+                                      )}
 
-                                    {/* 🌟 NOVO: INFORMATIVO E SALDO % PARA PREÇO FECHADO */}
-                                    {isFechado && (() => {
+                                      {isFechado && (() => {
+                                         const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
+                                         const medidoOutrosMesesPerc = (allMedicoes || [])
+                                           .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (idOsValido ? m.os_id === idOsValido : true) && !(m.mes === alocMes && m.ano === alocAno))
+                                           .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
+                                         const saldoPerc = Math.max(0, 100 - medidoOutrosMesesPerc);
+
+                                         return (
+                                           <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider">
+                                              <span className="bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1 rounded font-bold border border-amber-500/20">
+                                                Já Medido: {medidoOutrosMesesPerc.toFixed(1)}%
+                                              </span>
+                                              <span className={`px-2 py-1 rounded font-bold shadow-sm ${saldoPerc <= 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>
+                                                Saldo: {saldoPerc.toFixed(1)}%
+                                              </span>
+                                           </div>
+                                         );
+                                      })()}
+
+                                      {(isSemOsType || isOverheadType) && <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1 font-bold">Horas Ilimitadas (Escopo Dinâmico)</p>}
+                                   </div>
+                                   <div className="flex items-center gap-2">
+                                     {isFechado ? (() => {
                                        const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
                                        const medidoOutrosMesesPerc = (allMedicoes || [])
                                          .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (idOsValido ? m.os_id === idOsValido : true) && !(m.mes === alocMes && m.ano === alocAno))
                                          .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
                                        const saldoPerc = Math.max(0, 100 - medidoOutrosMesesPerc);
+                                       const key = alocacaoOsId ? `${contratoAtivo}_${alocacaoOsId}` : contratoAtivo;
 
                                        return (
-                                         <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider">
-                                            <span className="bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1 rounded font-bold border border-amber-500/20">
-                                              Já Medido: {medidoOutrosMesesPerc.toFixed(1)}%
-                                            </span>
-                                            <span className={`px-2 py-1 rounded font-bold shadow-sm ${saldoPerc <= 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'}`}>
-                                              Saldo: {saldoPerc.toFixed(1)}%
-                                            </span>
+                                         <div className="relative flex items-center">
+                                           <Input
+                                             type="number"
+                                             min={0}
+                                             max={saldoPerc}
+                                             placeholder="0"
+                                             value={medicoesInput[key] || ''}
+                                             onChange={(e) => {
+                                               let val = Number(e.target.value);
+                                               if (medidoOutrosMesesPerc + val > 100) {
+                                                 toast.error(`⚠️ Limite excedido! Saldo livre: ${saldoPerc.toFixed(1)}%`);
+                                                 val = saldoPerc;
+                                               }
+                                               setMedicoesInput(p => ({ ...p, [key]: val }));
+                                             }}
+                                             className="w-28 h-10 pr-7 font-bold text-lg text-right text-amber-600 bg-amber-500/10 border-amber-500/30 focus-visible:ring-amber-500/50 shadow-xs"
+                                           />
+                                           <span className="absolute right-3 text-sm font-bold text-amber-600">%</span>
                                          </div>
                                        );
-                                    })()}
-
-                                    {(isSemOsType || isOverheadType) && <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Horas Ilimitadas (Escopo Dinâmico)</p>}
-                                 </div>
-                                 <div className="flex items-center gap-2">
-                                   {isFechado ? (() => {
-                                     const idOsValido = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
-                                     const medidoOutrosMesesPerc = (allMedicoes || [])
-                                       .filter(m => m.user_id === aloc.consultorId && m.contract_id === contratoAtivo && (idOsValido ? m.os_id === idOsValido : true) && !(m.mes === alocMes && m.ano === alocAno))
-                                       .reduce((sum, m) => sum + Number(m.percentual || 0), 0);
-                                     const saldoPerc = Math.max(0, 100 - medidoOutrosMesesPerc);
-                                     const key = alocacaoOsId ? `${contratoAtivo}_${alocacaoOsId}` : contratoAtivo;
-
-                                     return (
+                                     })() : (isSemOsType || isOverheadType) ? (
+                                       <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono py-1 px-3"><Wrench className="w-3 h-3 mr-1" /> Dinâmico</Badge>
+                                     ) : (
                                        <div className="relative flex items-center">
-                                         <Input
-                                           type="number"
-                                           min={0}
-                                           max={saldoPerc}
-                                           placeholder="0"
-                                           value={medicoesInput[key] || ''}
-                                           onChange={(e) => {
-                                             let val = Number(e.target.value);
-                                             if (medidoOutrosMesesPerc + val > 100) {
-                                               toast.error(`⚠️ Limite de 100% excedido! Saldo livre para medir: ${saldoPerc.toFixed(1)}%`);
-                                               val = saldoPerc; // 🌟 AQUI: Trava automaticamente no máximo permitido!
-                                             }
-                                             setMedicoesInput(p => ({ ...p, [key]: val }));
-                                           }}
-                                           className="w-24 h-8 pr-6 font-bold text-right text-amber-600 bg-amber-500/10 border-amber-500/30 focus-visible:ring-amber-500/50"
-                                         />
-                                         <span className="absolute right-2 text-xs font-bold text-amber-600">%</span>
+                                         <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHorasMensal(aloc.consultorId, Number(e.target.value))} className="w-28 h-10 pr-7 font-bold text-lg text-right text-primary bg-muted/50 border-primary/20 focus-visible:ring-primary/50 shadow-xs" disabled={aloc.atividades.length > 0} />
+                                         <span className="absolute right-3 text-sm font-bold text-muted-foreground">h</span>
                                        </div>
-                                     );
-                                   })() : (isSemOsType || isOverheadType) ? (
-                                     <Badge className="bg-blue-500/10 text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Dinâmico</Badge>
-                                   ) : (
-                                     <div className="relative flex items-center">
-                                       <Input type="number" value={aloc.horasTotais || ''} onChange={(e) => updateHorasMensal(aloc.consultorId, Number(e.target.value))} className="w-24 h-8 pr-6 font-bold text-right text-primary bg-muted/50 border-primary/20 focus-visible:ring-primary/50" disabled={aloc.atividades.length > 0} />
-                                       <span className="absolute right-2 text-xs text-muted-foreground">h</span>
-                                     </div>
-                                   )}
-                                 </div>
-                               </div>
-                               
-                               {(!isSemOsType && !isFechado && aloc.atividades.length > 0) && (
-                                 <div className="pl-3 border-l-2 border-primary/20 space-y-2 mt-3 w-full">
-                                   <div className="flex justify-between items-center text-xs">
-                                      <span className="font-medium text-muted-foreground">{isOverheadType ? "Disciplinas do Overhead" : "Horas do Mês por Disciplina"}</span>
-                                      <span className="text-[9px] text-muted-foreground/60 italic">(Adicione novas disciplinas via Linha de Base)</span>
+                                     )}
                                    </div>
-                                   {aloc.atividades.map(a => {
-                                        const ativOutrosMeses = allAlocacoes.filter(x => x.user_id === aloc.consultorId && x.contract_id === contratoAtivo && (idOsValido ? x.os_id === idOsValido : true) && x.atividade === a.nome && !(x.mes === alocMes && x.ano === alocAno)).reduce((sum, x) => sum + Number(x.horas_disponiveis), 0);
-                                        const ativMedido = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true) && t.activity === a.nome).reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                        
-                                        return (
-                                          <div key={a.id} className="flex justify-between items-center bg-muted/10 p-3 rounded-lg text-xs w-full border border-dashed border-transparent hover:border-muted-foreground/30">
-                                            <div className="flex flex-col">
-                                               <span className="font-medium text-sm">{a.nome}</span>
-                                               {!isOverheadType && <span className="text-[9px] text-muted-foreground font-mono mt-1 uppercase tracking-wider">Histórico: {ativOutrosMeses.toFixed(1)}h Aloc. Anterior | {ativMedido.toFixed(1)}h Medido na vida</span>}
-                                            </div>
-                                            {isOverheadType ? (
-                                              <Badge className="bg-transparent text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Livre</Badge>
-                                            ) : (
-                                              <div className="relative w-24">
-                                                 <Input type="number" className="h-7 text-right font-bold pr-5 border-primary/20 focus-visible:ring-primary/50 bg-background" value={a.horas || ''} onChange={(e) => updateAtivMensal(aloc.consultorId, a.id, Number(e.target.value))} />
-                                                 <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">h</span>
-                                              </div>
-                                            )}
-                                          </div>
-                                        );
-                                   })}
                                  </div>
-                               )}
-                             </div>
-                           )
-                        })
-                      )}
+                                 
+                                 {(!isSemOsType && !isFechado && aloc.atividades.length > 0) && (
+                                   <div className="pl-4 border-l-4 border-primary/20 space-y-2 mt-3 w-full bg-background p-3 rounded-r-xl shadow-xs">
+                                     <div className="flex justify-between items-center text-xs mb-3">
+                                        <span className="font-bold text-muted-foreground uppercase tracking-wider">{isOverheadType ? "Disciplinas do Overhead" : "Horas do Mês por Disciplina"}</span>
+                                        <span className="text-[10px] text-muted-foreground/60 italic">(Adicione novas disciplinas via Linha de Base)</span>
+                                     </div>
+                                     {aloc.atividades.map(a => {
+                                          const ativOutrosMeses = allAlocacoes.filter(x => x.user_id === aloc.consultorId && x.contract_id === contratoAtivo && (idOsValido ? x.os_id === idOsValido : true) && x.atividade === a.nome && !(x.mes === alocMes && x.ano === alocAno)).reduce((sum, x) => sum + Number(x.horas_disponiveis), 0);
+                                          const ativMedido = allTimesheets.filter(t => t.user_id === aloc.consultorId && t.contract_id === contratoAtivo && (idOsValido ? t.os_id === idOsValido : true) && t.activity === a.nome).reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+                                          
+                                          return (
+                                            <div key={a.id} className="flex justify-between items-center bg-muted/10 p-3 rounded-lg w-full border border-dashed border-transparent hover:border-muted-foreground/30 transition-all">
+                                              <div className="flex flex-col">
+                                                 <span className="font-bold text-sm text-foreground/90">{a.nome}</span>
+                                                 {!isOverheadType && <span className="text-[9px] text-muted-foreground font-mono mt-1 uppercase tracking-wider">Histórico: {ativOutrosMeses.toFixed(1)}h Aloc. Anterior | {ativMedido.toFixed(1)}h Medido</span>}
+                                              </div>
+                                              {isOverheadType ? (
+                                                <Badge className="bg-transparent text-blue-600 border-none font-mono"><Wrench className="w-3 h-3 mr-1" /> Livre</Badge>
+                                              ) : (
+                                                <div className="relative w-28">
+                                                   <Input type="number" className="h-9 text-right font-bold text-sm pr-7 border-primary/20 focus-visible:ring-primary/50 bg-background shadow-xs" value={a.horas || ''} onChange={(e) => updateAtivMensal(aloc.consultorId, a.id, Number(e.target.value))} />
+                                                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground">h</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                     })}
+                                   </div>
+                                 )}
+                               </div>
+                             )
+                          })
+                        )}
+                      </div>
                     </CardContent>
                   </Card>
                 )}
@@ -2528,20 +2638,52 @@ export function AdminDashboard() {
             <CardContent className="pt-6">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
                 {consultores.map(c => (
-                  <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : 'bg-card'}`}>
+                  <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : (c.em_recesso ? 'bg-blue-500/5 border-blue-500/20' : 'bg-card')}`}>
                     <div className="flex items-start justify-between">
                        <div className="flex items-center gap-3">
-                          {c.avatar_url ? (
-                            <img src={c.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full border border-primary/20 object-cover" />
-                          ) : (
-                            <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20">
-                               {c.nome.substring(0,2).toUpperCase()}
+                          {/* 🌟 NOVO SISTEMA DE UPLOAD DE AVATAR OTIMIZADO */}
+                          <div className="relative group cursor-pointer">
+                            <input 
+                              type="file" 
+                              accept="image/*" 
+                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" 
+                              title="Clique para alterar a foto"
+                              onChange={(e) => handleUploadAvatar(e, c.id)}
+                            />
+                            {c.avatar_url ? (
+                              <>
+                                <img 
+                                  src={c.avatar_url} 
+                                  alt="Avatar" 
+                                  className="w-10 h-10 rounded-full border border-primary/20 object-cover group-hover:opacity-50 transition-opacity" 
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = 'none';
+                                    if (e.currentTarget.nextElementSibling) {
+                                      (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex';
+                                    }
+                                  }}
+                                />
+                                <div className="w-10 h-10 rounded-full bg-emerald-500/10 hidden items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20">
+                                   {c.nome.substring(0,2).toUpperCase()}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">
+                                 {c.nome.substring(0,2).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                               <PlusCircle className="w-4 h-4 text-primary bg-background/80 rounded-full" />
                             </div>
-                          )}
+                          </div>
+                          {/* ------------------------------------ */}
+                          
                           <div>
                             <span className="font-bold text-sm block leading-tight">{c.nome}</span>
                             {c.is_convidado ? (
                                <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Controle Interno)</Badge>
+                            ) : c.em_recesso ? (
+                               <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 text-[9px] mt-1 uppercase border-none">Em Recesso / Férias</Badge>
                             ) : (
                                <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
                             )}
@@ -2560,6 +2702,22 @@ export function AdminDashboard() {
                             }} 
                          />
                          <Label htmlFor={`status-${c.id}`} className="text-xs cursor-pointer">{c.status_ativo !== false ? 'Ativo' : 'Inativo'}</Label>
+                      </div>
+                      
+                      {/* Botão de Recesso */}
+                      <div className="flex items-center gap-2">
+                         <Switch 
+                            id={`recesso-${c.id}`} 
+                            checked={c.em_recesso === true} 
+                            disabled={!c.status_ativo}
+                            onCheckedChange={async (checked) => {
+                               setConsultores(p => p.map(user => user.id === c.id ? { ...user, em_recesso: checked } : user));
+                               await supabase.from('consultores').update({ em_recesso: checked }).eq('id', c.id);
+                               if (checked) toast.info(`${c.nome} entrou em recesso. Alertas de ociosidade pausados.`);
+                               else toast.success(`${c.nome} retornou do recesso.`);
+                            }} 
+                         />
+                         <Label htmlFor={`recesso-${c.id}`} className="text-xs cursor-pointer text-blue-700 font-medium">Recesso</Label>
                       </div>
                     </div>
                   </div>
@@ -2764,27 +2922,31 @@ export function AdminDashboard() {
               </Card>
             </div>
 
-            <div className="md:col-span-7">
-              <Card className="h-full max-h-125 flex flex-col shadow-sm w-full">
-                <CardHeader className="border-b py-3"><CardTitle className="text-xs font-bold text-muted-foreground">Últimos Lançamentos Efetuados</CardTitle></CardHeader>
-                <CardContent className="p-0 overflow-y-auto flex-1 divide-y text-xs w-full">
-                  {gestaoLogsFiltrados.map(t => {
-                    const s = new Date(t.start_at); const e = t.end_at ? new Date(t.end_at) : new Date();
-                    return (
-                      <div key={t.id} className="p-3 hover:bg-muted/40 flex justify-between items-center w-full">
-                        <div>
-                          <p className="font-bold text-foreground text-xs">{consultores.find(c => c.id === t.user_id)?.nome}</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">{contratos.find(c => c.id === t.contract_id)?.codigo}{t.os_id ? ` • ${osList.find(o => o.id === t.os_id)?.codigo}` : ''} • {t.activity} • {s.toLocaleDateString('pt-BR')}</p>
-                          {t.notes && <p className="text-[10px] italic text-primary font-medium mt-1 truncate max-w-70">"{t.notes}"</p>}
+            <div className="md:col-span-7 h-full flex flex-col">
+              <Card className="flex flex-col shadow-sm w-full h-full min-h-150 xl:min-h-[calc(100vh-180px)]">
+                <CardHeader className="border-b py-3 bg-muted/10 shrink-0">
+                  <CardTitle className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Últimos Lançamentos Efetuados</CardTitle>
+                </CardHeader>
+                <CardContent className="p-0 overflow-y-auto flex-1 divide-y text-xs w-full relative">
+                  <div className="absolute inset-0 overflow-y-auto">
+                    {gestaoLogsFiltrados.map(t => {
+                      const s = new Date(t.start_at); const e = t.end_at ? new Date(t.end_at) : new Date();
+                      return (
+                        <div key={t.id} className="p-4 hover:bg-muted/40 flex justify-between items-center w-full transition-colors">
+                          <div>
+                            <p className="font-bold text-foreground text-sm">{consultores.find(c => c.id === t.user_id)?.nome}</p>
+                            <p className="text-[10px] text-muted-foreground mt-1 font-medium">{contratos.find(c => c.id === t.contract_id)?.codigo}{t.os_id ? ` • ${osList.find(o => o.id === t.os_id)?.codigo}` : ''} • {t.activity} • {s.toLocaleDateString('pt-BR')}</p>
+                            {t.notes && <p className="text-[11px] italic text-primary font-medium mt-1.5 truncate max-w-sm">"{t.notes}"</p>}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <Badge variant="secondary" className="font-mono bg-primary/10 text-primary border-none h-7 px-2 text-xs">{((e.getTime() - s.getTime()) / 3600000).toFixed(1)}h</Badge>
+                            <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-primary" onClick={() => iniciarEdicaoApontamento(t)}><Pencil className="w-3.5 h-3.5" /></Button>
+                            <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-red-500 hover:bg-red-500/10" onClick={() => excluirApontamentoAdmin(t.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <Badge variant="secondary" className="font-mono bg-primary/10 text-primary border-none h-6 px-1.5">{((e.getTime() - s.getTime()) / 3600000).toFixed(1)}h</Badge>
-                          <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => iniciarEdicaoApontamento(t)}><Pencil className="w-3 h-3" /></Button>
-                          <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => excluirApontamentoAdmin(t.id)}><Trash2 className="w-3 h-3" /></Button>
-                        </div>
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </CardContent>
               </Card>
             </div>
