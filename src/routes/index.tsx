@@ -1,7 +1,7 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo } from "react";
-import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2, RefreshCw } from "lucide-react";
+import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2, RefreshCw, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,6 +26,7 @@ import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { usePerfil } from "@/hooks/use-perfil";
 import { UpdatePassword } from "@/components/UpdatePassword";
+import { RetroHistoryList } from "@/components/timesheet/RetroHistoryList";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -171,11 +172,21 @@ function TimesheetPage() {
 
   const notesValid = notes.trim().length > 0;
 
-  const getTimestampFromTimeFields = (timeStr: string, dateSourceStr: string) => {
+  const getTimestampFromTimeFields = (timeStr: string, dateSourceStr: string, isEndTime: boolean = false, startMs?: number) => {
     const [hours, minutes] = timeStr.split(":").map(Number);
     const [year, month, day] = dateSourceStr.split("-").map(Number);
+    
+    // Cria a data base
     const date = new Date(year, month - 1, day, hours, minutes, 0, 0);
-    return date.getTime();
+    const ms = date.getTime();
+
+    // Se for o horário final, e ele for menor ou igual ao inicial (ou 00:00), joga pro dia seguinte!
+    if (isEndTime && startMs && ms <= startMs) {
+      date.setDate(date.getDate() + 1);
+      return date.getTime();
+    }
+    
+    return ms;
   };
 
   useEffect(() => {
@@ -578,9 +589,13 @@ function TimesheetPage() {
   const isPanelDateUnlocked = useMemo(() => authorizedDates.includes(panelDate), [panelDate, authorizedDates]);
 
   const panelDayEntries = useMemo(() => {
+    if (!panelDate) return [];
     const [y, m, d] = panelDate.split("-").map(Number);
+    // Cria a data no fuso local exato à meia-noite
     const startDay = new Date(y, m - 1, d, 0, 0, 0).getTime();
+    // Cria a data no fuso local exato às 23:59:59
     const endDay = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+    
     return entries.filter(e => e.start >= startDay && e.start <= endDay);
   }, [entries, panelDate]);
 
@@ -733,7 +748,7 @@ function TimesheetPage() {
     }
   };
 
-  const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string) => {
+  const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string, newContractId?: string, newOsId?: string | null, newActivity?: string) => {
     const entryToEdit = entries.find(e => e.id === id);
     if (entryToEdit) {
        const activeCb = getContractCycleBounds(entryToEdit.contractId);
@@ -760,14 +775,32 @@ function TimesheetPage() {
     if (newEnd <= newStart) return toast.error("A hora de fim deve ser posterior à hora de início.");
     if (newNotes.trim().length === 0) return toast.error("A observação é obrigatória.");
 
-    setEntries((p) => p.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd, notes: newNotes.trim(), edited: true } : e)));
-    toast.success("Apontamento atualizado");
+    setEntries((p) => p.map((e) => {
+      if (e.id === id) {
+        return {
+          ...e, start: newStart, end: newEnd, notes: newNotes.trim(), edited: true,
+          ...(newContractId ? { contractId: newContractId, contractName: contractsList.find(c => c.id === newContractId)?.name || e.contractName } : {}),
+          ...(newActivity ? { activity: newActivity } : {}),
+          ...(newOsId !== undefined ? { os_id: newOsId || undefined } : {})
+        };
+      }
+      return e;
+    }));
+    toast.success("Apontamento atualizado!");
 
     if (user) {
-      await supabase.from('timesheets').update({
+      const payload: any = {
         start_at: new Date(newStart).toISOString(), end_at: new Date(newEnd).toISOString(),
         notes: newNotes.trim(), edited: true
-      }).eq('id', id);
+      };
+      if (newContractId) {
+         payload.contract_id = newContractId;
+         payload.contract_name = `${contractsList.find(c => c.id === newContractId)?.code} — ${contractsList.find(c => c.id === newContractId)?.name}`;
+      }
+      if (newActivity) payload.activity = newActivity;
+      if (newOsId !== undefined) payload.os_id = newOsId;
+
+      await supabase.from('timesheets').update(payload).eq('id', id);
     }
   };
 
@@ -777,7 +810,7 @@ function TimesheetPage() {
     if (!notesValid) return toast.error("A observação é obrigatória para registrar as horas.");
 
     const startMs = getTimestampFromTimeFields(startTime, dateStr);
-    const endMs = getTimestampFromTimeFields(endTime, dateStr);
+    const endMs = getTimestampFromTimeFields(endTime, dateStr, true, startMs);
 
     const activeCb = getContractCycleBounds(contractId);
     const pastCycleStart = new Date(activeCb.start);
@@ -793,8 +826,6 @@ function TimesheetPage() {
             return toast.error("🚫 Régua Passada! O dia 26 chegou e este ciclo foi liquidado e travado para pagamentos.");
         }
     }
-
-    if (endMs <= startMs) return toast.error("A hora de fim deve ser posterior à hora de início.");
 
     const hasOverlap = entries.some(entry => {
       // Ignora o próprio card sendo editado no painel retroativo
@@ -826,13 +857,7 @@ function TimesheetPage() {
     
     const label = `${currentContract.code} — ${currentContract.name}`;
 
-    if (editingRetroId) {
-      await handleEditEntry(editingRetroId, startMs, endMs, notes);
-      setEditingRetroId(null);
-      setNotes("");
-      setStartTime(endTime);
-      return;
-    }
+
 
     const newEntryId = crypto.randomUUID();
     const newEntry: TimeEntry = {
@@ -861,16 +886,9 @@ function TimesheetPage() {
   const handleAddPanelEntry = () => executeLaunch(panelDate);
 
   const handleEditRetro = (entry: TimeEntry) => {
-    setContractId(entry.contractId);
-    if (entry.os_id) setOsId(entry.os_id);
-    setActivity(entry.activity);
-    setNotes(entry.notes || "");
-    const s = new Date(entry.start);
-    const e = entry.end ? new Date(entry.end) : new Date();
-    setStartTime(`${String(s.getHours()).padStart(2,'0')}:${String(s.getMinutes()).padStart(2,'0')}`);
-    setEndTime(`${String(e.getHours()).padStart(2,'0')}:${String(e.getMinutes()).padStart(2,'0')}`);
+    // Nós não precisamos mais setar os campos antigos da página, 
+    // porque o Modal do HistoryList cuida disso agora!
     setEditingRetroId(entry.id);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleDeleteEntry = async (id: string) => {
@@ -1092,11 +1110,19 @@ function TimesheetPage() {
             </section>
             
             <section className="space-y-3 min-w-0 w-full">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold">Painel de Histórico</h2>
-                <span className="text-xs text-muted-foreground">Ciclo Atual</span>
+              <div className="flex items-center justify-between border-b pb-2 mb-4">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5"><History className="w-4 h-4" /> Painel de Histórico</h2>
+                <Badge variant="secondary" className="font-mono">{targetHistoryEntries.length} itens</Badge>
               </div>
-              <HistoryList entries={targetHistoryEntries} onEdit={handleEditEntry} onDelete={handleDeleteEntry} />
+              
+              <HistoryList 
+                entries={targetHistoryEntries} 
+                contracts={contractsList}
+                osList={osList}
+                allocations={allocations}
+                onEdit={handleEditEntry} 
+                onDelete={handleDeleteEntry} 
+              />
             </section>
           </div>
         ) : (
@@ -1371,8 +1397,8 @@ function TimesheetPage() {
               </div>
             </div>
 
-            <div className="grid gap-6 md:grid-cols-[1.2fr_1fr] items-start pt-6 border-t">
-              <div className="space-y-4">
+            <div className="grid gap-6 md:grid-cols-[1.2fr_1fr] items-start pt-6 border-t w-full">
+              <div className="space-y-4 min-w-0 w-full">
                 <Card className="shadow-sm">
                   <CardHeader className="pb-4 border-b">
                     <div className="flex flex-wrap items-center gap-4 justify-between">
@@ -1388,12 +1414,23 @@ function TimesheetPage() {
                   <CardContent className="pt-5">
                     {isPanelDateUnlocked ? (
                       <div className="space-y-6">
-                        <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 text-green-700 p-3 rounded-xl text-xs font-semibold">
-                          <Unlock className="w-4 h-4" />
-                          <span>Esta data está desbloqueada. Você pode consultar, inserir ou excluir horas neste dia.</span>
-                        </div>
+                        {/* 🌟 NOVO: AVISO VISUAL DE MODO DE EDIÇÃO */}
+                        {editingRetroId ? (
+                          <div className="bg-orange-500/10 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-xs transition-all animate-in slide-in-from-top-2">
+                            <h3 className="font-bold text-orange-700 dark:text-orange-500 flex items-center gap-2"><Pencil className="w-4 h-4"/> Modo de Edição Ativo</h3>
+                            <p className="text-xs text-orange-600/80 dark:text-orange-400/80 mt-1">
+                              Você está editando um apontamento já existente. Modifique o contrato, a OS, a disciplina ou o horário abaixo e salve.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 text-green-700 p-3 rounded-xl text-xs font-semibold">
+                            <Unlock className="w-4 h-4" />
+                            <span>Esta data está desbloqueada. Você pode consultar, inserir ou excluir horas neste dia.</span>
+                          </div>
+                        )}
+                        {/* -------------------------------------- */}
                         
-                        <div className="space-y-6">
+                        <div className={`space-y-6 ${editingRetroId ? 'p-4 border border-orange-500/30 rounded-xl bg-orange-500/5' : ''}`}>
                           <TaskSelector
                             contracts={contractsList}
                             contractId={contractId}
@@ -1457,57 +1494,29 @@ function TimesheetPage() {
                 </Card>
               </div>
 
-              <div className="space-y-3">
-                <div className="flex items-center justify-between border-b pb-2">
-                  <h3 className="text-xs font-bold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5">
-                    <MessageSquare className="w-3.5 h-3.5" /> Lançamentos do Dia: {panelDate.split('-').reverse().join('/')}
+              <div className="space-y-3 min-w-0 w-full">
+                <div className="flex items-center justify-between border-b pb-2 mb-3">
+                  <h3 className="text-xs font-bold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5 truncate">
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" /> Lançamentos do Dia: {panelDate.split('-').reverse().join('/')}
                   </h3>
-                  <Badge variant="secondary" className="font-mono">{panelDayEntries.length} itens</Badge>
+                  <Badge variant="secondary" className="font-mono shrink-0">{panelDayEntries.length} itens</Badge>
                 </div>
 
-                {panelDayEntries.length === 0 ? (
-                  <div className="text-center text-xs text-muted-foreground py-10 border border-dashed rounded-xl bg-card">
-                    Nenhum apontamento efetuado nesta data.
-                  </div>
-                ) : (
-                  <div className="space-y-2 max-h-125 overflow-y-auto pr-1">
-                    {panelDayEntries.map((entry) => {
-                      const s = new Date(entry.start);
-                      const e = entry.end ? new Date(entry.end) : new Date();
-                      const hours = ((e.getTime() - s.getTime()) / 3600000).toFixed(1);
-                      const isBeingEdited = editingRetroId === entry.id;
-                      
-                      return (
-                        <div key={entry.id} className={`p-3.5 bg-card border rounded-xl shadow-xs space-y-2 text-xs transition-colors ${isBeingEdited ? 'border-primary bg-primary/5' : ''}`}>
-                          <div className="flex justify-between items-start gap-2">
-                            <div>
-                              <p className="font-bold text-foreground leading-tight">{entry.contractName}</p>
-                              <p className="text-[10px] text-muted-foreground font-medium mt-0.5">{entry.activity}</p>
-                            </div>
-                            <Badge variant="outline" className="font-mono shrink-0 bg-primary/5 text-primary border-primary/10">{hours}h</Badge>
-                          </div>
-                          {entry.notes && (
-                            <p className="text-[11px] italic text-muted-foreground/90 bg-muted/40 p-2 rounded-md border border-muted/50 leading-relaxed">
-                              "{entry.notes}"
-                            </p>
-                          )}
-                          
-                          {isPanelDateUnlocked && (
-                            <div className="flex justify-end gap-1.5 pt-1 border-t border-dashed mt-2">
-                              <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-primary hover:bg-primary/10" onClick={() => handleEditRetro(entry)}>
-                                <Pencil className="w-3 h-3 mr-1" /> Editar
-                              </Button>
-                              <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-red-500 hover:bg-red-500/10" onClick={() => handleDeleteEntry(entry.id)}>
-                                <Trash2 className="w-3 h-3 mr-1" /> Excluir
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                <div className={!isPanelDateUnlocked ? "opacity-50 pointer-events-none" : ""}>
+                  <RetroHistoryList 
+                    entries={panelDayEntries} 
+                    contracts={contractsList}
+                    osList={osList}
+                    allocations={allocations}
+                    panelDate={panelDate}
+                    onEdit={handleEditEntry} 
+                    onDelete={handleDeleteEntry} 
+                  />
+                </div>
                 
+                {!isPanelDateUnlocked && (
+                  <p className="text-[10px] text-center text-red-500 mt-2 font-bold">⚠️ Liberação retroativa necessária para editar estes lançamentos.</p>
+                )}
               </div>
             </div>
           </div>
