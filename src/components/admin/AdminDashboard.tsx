@@ -5,27 +5,31 @@ import { useTheme } from '@/hooks/use-theme'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Progress } from '@/components/ui/progress'
 import { 
   PlusCircle, ArrowRight, Trash2, 
   Loader2, Pencil, Check, X, Save, Sun, Moon, User, Layers, 
   CalendarDays, Download, Percent, History, 
-  FileUp, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2, Users, GripVertical, RefreshCw, PanelLeftClose, PanelLeftOpen
+  FileUp, FileDown, FolderTree, Target, AlertTriangle, Building2, UserCog, Receipt, Briefcase, Clock, Unlock, Wrench, Contact2, Users, GripVertical, RefreshCw, PanelLeftClose, PanelLeftOpen, Scissors, HelpCircle, ChevronRight, ArrowLeft, TerminalSquare, Activity, Zap
 } from 'lucide-react'
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
-  ResponsiveContainer, PieChart, Pie, Cell 
+  ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area 
 } from 'recharts'
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { toast } from "sonner";
 
-type Consultor = { id: string, nome: string, horas_minimas_mes: number, avatar_url?: string, status_ativo?: boolean, is_convidado?: boolean, em_recesso?: boolean }
+type Consultor = { id: string, nome: string, horas_minimas_mes: number, avatar_url?: string, status_ativo?: boolean, is_convidado?: boolean, em_recesso?: boolean, especialidade?: string }
+type LogAuditoria = { id: string, created_at: string, gestor_nome: string, acao: string, detalhes: string }
 type Contrato = { id: string, codigo: string, nome: string, status_ativo: boolean, tipo: string, fonte_pagamento: string, teto_global_horas: number, ciclo_inicio: number, ciclo_fim: number, ciclo_fat_inicio: number, ciclo_fat_fim: number, catalogo_atividades?: string[] }
 type OrdemServico = { id: string, contract_id: string, codigo: string, descricao: string, status_ativa: boolean, horas_previstas: number }
 
@@ -196,30 +200,71 @@ export function AdminDashboard() {
      const newName = prompt(`Renomear "${oldName}" para:`, oldName);
      if (!newName || newName.trim() === "" || newName === oldName) return;
      
-     // Renomeia na matriz
+     setLoading(true);
+
+     // 1. Atualiza na matriz que está aberta em tela
      setBaseItems(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(uid => {
-           if (next[uid].atividades.includes(oldName)) {
-              next[uid] = { ...next[uid], atividades: next[uid].atividades.map(a => a === oldName ? newName : a) };
+        const next: Record<string, LinhaBaseItem> = {};
+        Object.keys(prev).forEach(uid => {
+           const idx = prev[uid].atividades.indexOf(oldName);
+           if (idx !== -1) {
+              const newAtivs = [...prev[uid].atividades];
+              newAtivs[idx] = newName;
+              next[uid] = { ...prev[uid], atividades: newAtivs };
+           } else {
+              next[uid] = { ...prev[uid] };
            }
         });
         return next;
      });
 
-     // Renomeia na memória avulsa e no banco
+     // 2. Renomeia no catálogo do contrato (Banco)
      const cObj = contratos.find(c => c.id === contratoAtivo);
      const currentCat = cObj?.catalogo_atividades || [];
      await salvarCatalogoNoBanco(contratoAtivo, currentCat.map(a => a === oldName ? newName : a));
-     
      setAtividadesAvulsas(prev => prev.map(a => a === oldName ? newName : a));
-     toast.success("Disciplina renomeada no contrato atual!");
+
+     // 3. Renomeação Profunda no Supabase (Mata Fantasmas nas Alocações e Horas)
+     await supabase.from('alocacoes').update({ atividade: newName }).eq('contract_id', contratoAtivo).eq('atividade', oldName);
+     await supabase.from('timesheets').update({ activity: newName }).eq('contract_id', contratoAtivo).eq('activity', oldName);
+
+     // 🌟 4. SALVAMENTO AUTOMÁTICO: Evita o bug se você esquecer de clicar em "Salvar Matriz"
+     if (currentBase?.id) {
+        const { data: items } = await supabase.from('linha_base_items').select('*').eq('base_id', currentBase.id);
+        if (items) {
+           for (const item of items) {
+              if (item.atividades && item.atividades.includes(oldName)) {
+                 const newAtivs = item.atividades.map((a: string) => a === oldName ? newName : a);
+                 await supabase.from('linha_base_items').update({ atividades: newAtivs }).eq('id', item.id);
+              }
+           }
+        }
+     }
+
+     // 5. Atualiza a memória da tela instantaneamente
+     setAllAlocacoes(prev => prev.map(a => (a.contract_id === contratoAtivo && a.atividade === oldName) ? { ...a, atividade: newName } : a));
+     setAllTimesheets(prev => prev.map(t => (t.contract_id === contratoAtivo && t.activity === oldName) ? { ...t, activity: newName } : t));
+
+     await registrarLog("Disciplina Renomeada", `A disciplina "${oldName}" foi alterada para "${newName}" no catálogo do contrato.`);
+     setLoading(false);
+     toast.success(`Disciplina renomeada para "${newName}" com sucesso!`);
   };
 
   const removeContractActivity = async (ativNome: string) => {
-    if (!window.confirm(`Remover a disciplina "${ativNome}" do catálogo deste contrato e apagá-la das alocações?`)) return;
+    // 1. Verifica apontamentos e avisa o gestor
+    const apontamentosFeitos = allTimesheets.filter(t => t.contract_id === contratoAtivo && t.activity === ativNome);
     
-    // 1. Remove da Matriz em tela
+    if (apontamentosFeitos.length > 0) {
+       const horasTotais = apontamentosFeitos.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+       const msg = `⚠️ ALERTA DE EXCLUSÃO PROFUNDA!\n\nExistem ${apontamentosFeitos.length} apontamentos registrados nesta disciplina, totalizando ${horasTotais.toFixed(1)}h.\n\nSe você prosseguir, TODOS ESSES APONTAMENTOS SERÃO EXCLUÍDOS DO SISTEMA para sempre.\n\nTem certeza absoluta que deseja deletar tudo isso?`;
+       if (!window.confirm(msg)) return;
+    } else {
+       if (!window.confirm(`Remover a disciplina "${ativNome}" do catálogo deste contrato e apagá-la da matriz?`)) return;
+    }
+    
+    setLoading(true);
+
+    // 2. Remove da Matriz em tela
     setBaseItems(prev => {
       const updated: Record<string, LinhaBaseItem> = {};
       Object.entries(prev).forEach(([userId, item]) => {
@@ -228,22 +273,36 @@ export function AdminDashboard() {
       return updated;
     });
     
-    // 2. Remove do catálogo do Supabase
+    // 3. Remove do catálogo oficial
     const cObj = contratos.find(c => c.id === contratoAtivo);
     const currentCat = cObj?.catalogo_atividades || [];
-    
-    // 🌟 CORREÇÃO AQUI: passando 'contratoAtivo' como primeiro parâmetro
     await salvarCatalogoNoBanco(contratoAtivo, currentCat.filter(a => a !== ativNome));
-    
     setAtividadesAvulsas(prev => prev.filter(a => a !== ativNome));
 
-    // 3. Deleta fisicamente as alocações antigas do banco
+    // 4. DELEÇÃO NUCLEAR NO SUPABASE (Apaga Alocações E Apontamentos)
     await supabase.from('alocacoes').delete().eq('contract_id', contratoAtivo).eq('atividade', ativNome);
-    
-    // Limpa o estado global na hora para sumir da lista
-    setAllAlocacoes(prev => prev.filter(a => !(a.contract_id === contratoAtivo && a.atividade === ativNome)));
+    await supabase.from('timesheets').delete().eq('contract_id', contratoAtivo).eq('activity', ativNome);
 
-    toast.success(`Disciplina "${ativNome}" removida do catálogo e das alocações!`);
+    // 🌟 5. SALVAMENTO AUTOMÁTICO: Remove da Linha de Base no banco para não gerar fantasmas
+    if (currentBase?.id) {
+        const { data: items } = await supabase.from('linha_base_items').select('*').eq('base_id', currentBase.id);
+        if (items) {
+           for (const item of items) {
+              if (item.atividades && item.atividades.includes(ativNome)) {
+                 const newAtivs = item.atividades.filter((a: string) => a !== ativNome);
+                 await supabase.from('linha_base_items').update({ atividades: newAtivs }).eq('id', item.id);
+              }
+           }
+        }
+    }
+    
+    // 6. Atualiza a memória local
+    setAllAlocacoes(prev => prev.filter(a => !(a.contract_id === contratoAtivo && a.atividade === ativNome)));
+    setAllTimesheets(prev => prev.filter(t => !(t.contract_id === contratoAtivo && t.activity === ativNome)));
+
+    await registrarLog("Disciplina Apagada", `A disciplina "${ativNome}" foi apagada de forma nuclear do contrato e da matriz.`);
+    setLoading(false);
+    toast.success(`Disciplina e todos os seus vínculos foram exterminados!`);
   };
 
   const handleAddActivityFromPalette = async () => {
@@ -266,6 +325,7 @@ export function AdminDashboard() {
      } else {
          toast.success("Disciplina criada no catálogo do contrato!");
      }
+     await registrarLog("Nova Disciplina Criada", `A disciplina "${n}" foi adicionada manualmente ao catálogo do projeto.`);
      setNewActivityName('');
   };
 
@@ -287,6 +347,7 @@ export function AdminDashboard() {
   const [dashFonte, setDashFonte] = useState<string>('todas')
   // 🌟 SPRINT 3 - ITEM 7: Estado para Drill-down nos gráficos (armazena o ID do consultor clicado)
   const [drilldownConsultorId, setDrilldownConsultorId] = useState<string | null>(null);
+  const [drilldownContractId, setDrilldownContractId] = useState<string | null>(null);
 
   // 🌟 SPRINT 3 - ITEM 13: Modo de visualização de datas (por 'ciclo' padrão ou 'intervalo' customizado)
   const [modoDataFiltro, setModoDataFiltro] = useState<'ciclo' | 'intervalo'>('ciclo');
@@ -328,12 +389,113 @@ export function AdminDashboard() {
   const [gestaoFim, setGestaoFim] = useState<string>('12:00')
   const [gestaoNotes, setGestaoNotes] = useState<string>('')
   const [gestaoEditandoId, setGestaoEditandoId] = useState<string | null>(null)
+  const [isModalEdicaoOpen, setIsModalEdicaoOpen] = useState(false)
 
   // Estados Liberação
   const [authList, setAuthList] = useState<any[]>([])
   const [liberarConsultor, setLiberarConsultor] = useState<string>('')
   const [liberarData, setLiberarData] = useState<string>(getLocalISODate(new Date()))
   const [loadingAuth, setLoadingAuth] = useState(false)
+
+  // Estados e Lógica do "Passar a Régua"
+  const [isReguaModalOpen, setIsReguaModalOpen] = useState(false);
+  const [reguaData, setReguaData] = useState<any[]>([]);
+  const [liquidandoRegua, setLiquidandoRegua] = useState(false);
+
+  const calcularSaldosPassados = () => {
+    const now = new Date();
+    const currentDay = now.getDate();
+    let currentMonth = now.getMonth();
+    let currentYear = now.getFullYear();
+
+    const gorduras: any[] = [];
+
+    allAlocacoes.forEach(aloc => {
+       // Ignora Preço Fechado e Overhead / Pequenos Suportes dinâmicos
+       if (aloc.atividade === 'Preço Fechado (Medição)' || aloc.horas_disponiveis >= 9000 || aloc.horas_disponiveis <= 0) return;
+
+       const cObj = contratos.find(c => c.id === aloc.contract_id);
+       if (!cObj) return;
+
+       let isPast = false;
+       const aM = parseInt(aloc.mes);
+       const aA = parseInt(aloc.ano);
+
+       let refMonth = currentMonth;
+       let refYear = currentYear;
+       if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) {
+           refMonth = refMonth === 11 ? 0 : refMonth + 1;
+           if (refMonth === 0) refYear++;
+       }
+
+       if (aA < refYear || (aA === refYear && aM < refMonth)) {
+           isPast = true;
+       }
+
+       if (isPast) {
+           const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, aloc.mes, aloc.ano);
+           let times = allTimesheets.filter(t => t.user_id === aloc.user_id && t.contract_id === aloc.contract_id && t.activity === aloc.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+           
+           if (cObj.tipo === 'continuado_com_os' && aloc.os_id) {
+               times = times.filter(t => t.os_id === aloc.os_id);
+           }
+
+           const gasto = times.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
+
+           if (aloc.horas_disponiveis > gasto) {
+               gorduras.push({
+                   alocId: aloc.id,
+                   consultorNome: consultores.find(c => c.id === aloc.user_id)?.nome || 'Desconhecido',
+                   contratoCodigo: cObj.codigo,
+                   mes: aloc.mes,
+                   ano: aloc.ano,
+                   orcado: aloc.horas_disponiveis,
+                   gasto: gasto,
+                   saldoRemanescente: aloc.horas_disponiveis - gasto
+               });
+           }
+       }
+    });
+
+    setReguaData(gorduras);
+    setIsReguaModalOpen(true);
+  };
+
+  const liquidarPassado = async () => {
+     setLiquidandoRegua(true);
+     try {
+        const promises = reguaData.map(item =>
+           supabase.from('alocacoes').update({ horas_disponiveis: item.gasto }).eq('id', item.alocId)
+        );
+        await Promise.all(promises);
+        await registrarLog("Saldos Liquidados", `Foram liquidadas e zeradas ${reguaData.length} alocações ociosas do passado na base de dados.`);
+        toast.success(`${reguaData.length} alocações passadas foram liquidadas com sucesso!`);
+        setIsReguaModalOpen(false);
+        await carregarTudoParaDash();
+     } catch (error) {
+        toast.error("Erro ao liquidar saldos.");
+     } finally {
+        setLiquidandoRegua(false);
+     }
+  };
+
+  const [logsAuditoria, setLogsAuditoria] = useState<LogAuditoria[]>([])
+
+  async function registrarLog(acao: string, detalhes: string) {
+     const { data: authData } = await supabase.auth.getUser();
+     const gestor = authData.user?.email?.split('@')[0] || 'Gestor Admin';
+     await supabase.from('logs_auditoria').insert([{ gestor_nome: gestor, acao, detalhes }]);
+     carregarLogs();
+  }
+
+  async function carregarLogs() {
+     const { data } = await supabase.from('logs_auditoria').select('*').order('created_at', { ascending: false }).limit(100);
+     if (data) setLogsAuditoria(data);
+  }
+
+  useEffect(() => { 
+    if (menuAtivo === 'log-alteracoes') carregarLogs(); 
+  }, [menuAtivo])
 
   async function carregarDadosDoBanco() {
     try {
@@ -370,6 +532,7 @@ export function AdminDashboard() {
     if (novoTipo === 'continuado_com_os') {
        await supabase.from('ordens_servico').insert([{ contract_id: newContract.id, codigo: '🛠️ Pequenos Suportes', descricao: 'Serviços pontuais e assessoria (Saldo Dinâmico)', horas_previstas: 0, status_ativa: true }]);
     }
+    await registrarLog("Contrato Criado", `O contrato ${novoCodigo.toUpperCase()} (${novoNomeContrato}) foi gerado.`);
     setNovoCodigo(''); setNovoNomeContrato(''); setNovoTetoGlobal(0); carregarDadosDoBanco();
   }
 
@@ -385,6 +548,7 @@ export function AdminDashboard() {
       tipo: editTipo, fonte_pagamento: editFonte, teto_global_horas: editTipo === 'continuado_com_os' ? editTetoGlobal : 0,
       ciclo_inicio: editInicio, ciclo_fim: editFim, ciclo_fat_inicio: editFatInicio, ciclo_fat_fim: editFatFim 
     }).eq('id', id)
+    await registrarLog("Contrato Editado", `Informações de cadastro do contrato ${editCodigo.toUpperCase()} foram alteradas.`);
     setEditandoId(null); carregarDadosDoBanco();
   }
 
@@ -411,6 +575,7 @@ export function AdminDashboard() {
     await supabase.from('alocacoes').delete().eq('contract_id', id); 
     await supabase.from('medicoes').delete().eq('contract_id', id); 
     await supabase.from('contratos').delete().eq('id', id);
+    await registrarLog("Exclusão Nuclear de Contrato", `O contrato "${nome}" e todos os seus vínculos de alocação foram deletados.`);
     if (contratoAtivo === id) { setContratoAtivo(''); setAlocacoes({}); }
     carregarDadosDoBanco();
   }
@@ -421,6 +586,7 @@ export function AdminDashboard() {
   async function criarOS() {
     if (!osContratoId || !osCodigo) return alert("Selecione o Contrato e digite o Código da OS.");
     await supabase.from('ordens_servico').insert([{ contract_id: osContratoId, codigo: osCodigo.toUpperCase().trim(), descricao: osDescricao.trim(), horas_previstas: 0, status_ativa: true }]);
+    await registrarLog("Ordem de Serviço Criada", `A OS ${osCodigo.toUpperCase()} foi gerada e vinculada ao contrato.`);
     setOsCodigo(''); setOsDescricao(''); carregarDadosDoBanco(); toast.success("OS criada com sucesso!");
   }
 
@@ -428,13 +594,19 @@ export function AdminDashboard() {
 
   async function salvarEdicaoOS(id: string) {
     await supabase.from('ordens_servico').update({ codigo: editOsCodigo.toUpperCase().trim(), descricao: editOsDescricao.trim() }).eq('id', id);
+    await registrarLog("Ordem de Serviço Editada", `A Ordem de Serviço ${editOsCodigo.toUpperCase()} foi modificada.`);
     setOsEditandoId(null); carregarDadosDoBanco();
   }
 
   async function apagarOS(id: string) {
     const { count } = await supabase.from('timesheets').select('*', { count: 'exact', head: true }).eq('os_id', id);
     if (count && count > 0) return alert(`❌ BLOQUEIO: Esta OS possui ${count} apontamentos vinculados. Exclusão proibida.`);
-    if (window.confirm("Apagar esta OS?")) { await supabase.from('ordens_servico').delete().eq('id', id); carregarDadosDoBanco(); }
+    if (window.confirm("Apagar esta OS?")) { 
+       const osObj = osList.find(o => o.id === id);
+       await supabase.from('ordens_servico').delete().eq('id', id); 
+       await registrarLog("OS Excluída", `A Ordem de Serviço ${osObj?.codigo} foi deletada do sistema.`);
+       carregarDadosDoBanco(); 
+    }
   }
 
   // ==========================================
@@ -695,6 +867,7 @@ export function AdminDashboard() {
     }
     // 🌟 FIM DO CAÇA-FANTASMAS
 
+    await registrarLog("Linha de Base Modificada", `Nova versão (v${novaVersaoNum}) salva na Matriz do contrato ${cObj?.codigo}.`);
     toast.success(`Linha de Base (Versão ${novaVersaoNum}) salva com sucesso!`);
     carregarLinhaBase(contratoAtivo, idOsValido);
     
@@ -872,6 +1045,7 @@ export function AdminDashboard() {
       for (const u of upserts) await supabase.from('alocacoes').update({ horas_disponiveis: u.horas_disponiveis, atividade: u.atividade, os_id: u.os_id, mes: u.mes, ano: u.ano }).eq('id', u.id)
       if (inserts.length > 0) await supabase.from('alocacoes').insert(inserts)
       if (deletes.length > 0) await supabase.from('alocacoes').delete().in('id', deletes)
+      await registrarLog("Alocação Mensal Salva", `A distribuição de horas da equipe no ciclo ${alocMes}/${alocAno} foi ajustada no contrato ${cObj?.codigo}.`);
       toast.success("Distribuição mensal salva com sucesso!"); 
       await carregarTudoParaDash();
       carregarAlocacoesMensais(contratoAtivo, alocacaoOsId)
@@ -969,7 +1143,7 @@ export function AdminDashboard() {
   // AUTORIZAÇÕES RETROATIVAS E CARREGAMENTOS GLOBAIS
   // ==========================================
   useEffect(() => { 
-    if (['alocacoes', 'dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor'].includes(menuAtivo)) {
+    if (['alocacoes', 'dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor', 'performance-consultores'].includes(menuAtivo)) {
       carregarTudoParaDash();
       setModoDataFiltro('ciclo'); // 🌟 BLINDAGEM: Sempre volta para o Ciclo Mensal ao trocar de aba!
     }
@@ -1028,6 +1202,9 @@ export function AdminDashboard() {
     setSalvando(false);
 
     if (error) return alert("Erro ao liberar data: " + error.message);
+    
+    const uNome = consultores.find(c => c.id === liberarConsultor)?.nome;
+    await registrarLog("Acesso Retroativo", `Concedido acesso no dia ${liberarData.split('-').reverse().join('/')} para o(a) engenheiro(a) ${uNome}.`);
     toast.success("Acesso retroativo liberado com sucesso!");
     setLiberarData(getLocalISODate(new Date()));
     carregarAutorizacoes();
@@ -1036,6 +1213,7 @@ export function AdminDashboard() {
   async function revogarAutorizacao(id: string) {
     if (!window.confirm("Deseja revogar este acesso retroativo do consultor?")) return;
     await supabase.from('autorizacoes_edicao').delete().eq('id', id);
+    await registrarLog("Acesso Retroativo Revogado", `A liberação de edição de histórico de um consultor foi cancelada.`);
     carregarAutorizacoes();
   }
 
@@ -1087,8 +1265,42 @@ export function AdminDashboard() {
     return osList.filter(o => dashContratosSelecionados.includes(o.contract_id));
   }, [dashContratosSelecionados, osList]);
 
+  const baixarPlanilhaPadrao = async () => {
+    const workbook = new ExcelJS.Workbook();
+    
+    // Aba principal de dados
+    const sheet = workbook.addWorksheet('Importacao');
+    sheet.columns = [
+      { header: 'Consultor', key: 'consultor', width: 25 },
+      { header: 'Data', key: 'data', width: 15 },
+      { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
+      { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
+      { header: 'OS', key: 'os', width: 15 },
+      { header: 'Disciplina/Escopo', key: 'disciplina', width: 35 },
+      { header: 'Entrada', key: 'entrada', width: 12 },
+      { header: 'Saída', key: 'saida', width: 12 },
+      { header: 'Observação', key: 'obs', width: 50 },
+    ];
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF9333EA' } };
+
+    // Aba de instruções separada (para não interferir na importação)
+    const sheet2 = workbook.addWorksheet('Instruções');
+    sheet2.getCell('A1').value = 'Instruções para Importação';
+    sheet2.getCell('A1').font = { bold: true, size: 14 };
+    sheet2.getCell('A3').value = '1. Preencha os dados apenas na aba "Importacao". O sistema só lê a primeira aba.';
+    sheet2.getCell('A4').value = '2. Não altere os nomes ou a ordem das colunas no cabeçalho (linha 1).';
+    sheet2.getCell('A5').value = '3. Consultor: O nome deve estar rigorosamente idêntico ao cadastrado no sistema.';
+    sheet2.getCell('A6').value = '4. Data: Use o formato de data padrão (ex: 20/05/2026).';
+    sheet2.getCell('A7').value = '5. Entrada e Saída: Use o formato de horas HH:MM (ex: 08:00 e 12:00).';
+    sheet2.getCell('A8').value = '6. Cód. Contrato e OS: Escreva exatamente como no sistema (ex: CT-001).';
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, 'Planilha_Padrao_Importacao.xlsx');
+  };
+
   const handleImportarTimesheetExcel = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    // Código de importação igual à versão anterior, mantido para estabilidade.
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -1096,21 +1308,24 @@ export function AdminDashboard() {
       const buffer = e.target?.result as ArrayBuffer;
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(buffer);
-      const sheet = workbook.worksheets[0];
-      const toInsert: any[] = [];
+      const sheet = workbook.worksheets[0]; // Lê estritamente a primeira aba
+      const toInsertTimesheets: any[] = [];
+      const pastAllocationsToInsert = new Map<string, any>();
       let errors = 0;
 
       sheet.eachRow((row, rowNumber) => {
         if (rowNumber === 1) return;
         const getVal = (colIndex: number) => {
           const cell = row.getCell(colIndex);
-          if (!cell.value) return '';
+          if (!cell || cell.value === null) return '';
           if (cell.value instanceof Date) return cell.value;
-          if (typeof cell.value === 'object' && 'result' in cell.value) return cell.value.result;
-          if (typeof cell.value === 'object' && 'text' in cell.value) return cell.value.text;
-          return cell.value.toString().trim();
+          if (typeof cell.value === 'object' && cell.value !== null && 'result' in cell.value) return cell.value.result;
+          if (typeof cell.value === 'object' && cell.value !== null && 'text' in cell.value) return cell.value.text;
+          return cell.value ? cell.value.toString().trim() : '';
         };
 
+        // 🌟 NOVO PADRÃO DE COLUNAS ALINHADO COM A PLANILHA PADRÃO: 
+        // 1.Cons | 2.Data | 3.Cód | 4.Nome | 5.OS | 6.Disciplina | 7.Entrada | 8.Saída | 9.Obs
         const consultorNome = String(getVal(1));
         const dataVal = getVal(2);
         const contratoCodigo = String(getVal(3)).toUpperCase();
@@ -1126,6 +1341,7 @@ export function AdminDashboard() {
 
         const parseTime = (val: any) => {
           if (val instanceof Date) return val.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+          // O Excel às vezes salva hora como fração do dia (ex: 0.5 = 12:00)
           if (typeof val === 'number') {
             const totalMs = Math.round(val * 24 * 60 * 60 * 1000);
             const h = Math.floor(totalMs / 3600000);
@@ -1160,19 +1376,59 @@ export function AdminDashboard() {
           const endDt = new Date(parseInt(anoFinal), parseInt(mes) - 1, parseInt(dia), parseInt(hFim), parseInt(mFim));
           if (endDt <= startDt) endDt.setDate(endDt.getDate() + 1);
 
-          toInsert.push({
+          toInsertTimesheets.push({
             id: crypto.randomUUID(), user_id: consultor.id, contract_id: contrato.id, os_id: osId,
             contract_name: `${contrato.codigo} — ${contrato.nome}`, activity: atividadeStr,
             notes: observacao, start_at: startDt.toISOString(), end_at: endDt.toISOString(), edited: true
           });
+
+          // 🌟 LÓGICA DE ALOCAÇÃO DE PASSADO (ITEM 3)
+          const now = new Date();
+          const currentDay = now.getDate();
+          let currentM = now.getMonth();
+          let currentY = now.getFullYear();
+          if (contrato.ciclo_inicio > contrato.ciclo_fim && currentDay >= contrato.ciclo_inicio) {
+             currentM = currentM === 11 ? 0 : currentM + 1;
+             if (currentM === 0) currentY++;
+          }
+          const [dtY, dtM, dtD] = getLocalISODate(startDt).split('-').map(Number);
+          let targetM = dtM - 1; let targetY = dtY;
+          if (contrato.ciclo_inicio > contrato.ciclo_fim && dtD >= contrato.ciclo_inicio) {
+             targetM = targetM === 11 ? 0 : targetM + 1;
+             if (targetM === 0) targetY++;
+          }
+
+          const isPast = (targetY < currentY) || (targetY === currentY && targetM < currentM);
+          
+          if (isPast) {
+             const durationH = (endDt.getTime() - startDt.getTime()) / 3600000;
+             const allocKey = `${consultor.id}_${contrato.id}_${osId || 'null'}_${targetM}_${targetY}_${atividadeStr}`;
+             if (!pastAllocationsToInsert.has(allocKey)) {
+                pastAllocationsToInsert.set(allocKey, {
+                   user_id: consultor.id, contract_id: contrato.id, os_id: osId,
+                   atividade: atividadeStr, mes: targetM.toString(), ano: targetY.toString(), horas_disponiveis: durationH
+                });
+             } else {
+                const existing = pastAllocationsToInsert.get(allocKey);
+                existing.horas_disponiveis += durationH;
+             }
+          }
+
         } catch (err) { errors++; }
       });
 
-      if (toInsert.length > 0) {
+      if (toInsertTimesheets.length > 0) {
         setLoading(true);
-        const { error } = await supabase.from('timesheets').insert(toInsert);
-        if (error) alert("Erro no banco de dados: " + error.message);
-        else { toast.success(`✅ ${toInsert.length} apontamentos importados!\n❌ ${errors} linhas com erro.`); carregarTudoParaDash(); }
+        const { error: err1 } = await supabase.from('timesheets').insert(toInsertTimesheets);
+        if (err1) alert("Erro ao importar horas: " + err1.message);
+        
+        const allocs = Array.from(pastAllocationsToInsert.values());
+        if (allocs.length > 0 && !err1) {
+            // Em caso de múltiplas importações, insere a alocação fantasma para o passado bater o saldo
+            await supabase.from('alocacoes').insert(allocs);
+        }
+
+        if (!err1) { toast.success(`✅ ${toInsertTimesheets.length} apontamentos importados!\n❌ ${errors} linhas com erro.`); carregarTudoParaDash(); }
         setLoading(false);
       } else alert(`Nenhum apontamento válido encontrado.`);
       event.target.value = ''; 
@@ -1253,21 +1509,27 @@ export function AdminDashboard() {
     try {
       if(gestaoEditandoId) {
         await supabase.from('timesheets').update(payload).eq('id', gestaoEditandoId);
+        await registrarLog("Apontamento Forçado (Edição)", `O apontamento do consultor no contrato ${contObj?.codigo} foi editado de forma imperativa (Admin).`);
         toast.success("Atualizado com sucesso!"); setGestaoEditandoId(null);
       } else {
         await supabase.from('timesheets').insert([{ ...payload, id: crypto.randomUUID() }]);
+        await registrarLog("Apontamento Forçado (Criação)", `Foi inserido um apontamento manualmente via Gestão para o contrato ${contObj?.codigo}.`);
         toast.success("Criado com sucesso!");
       }
       setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); setGestaoOs(''); await carregarTudoParaDash();
+      if (isModalEdicaoOpen) setIsModalEdicaoOpen(false);
     } catch (e) { alert("Erro ao processar."); } finally { setSalvando(false); }
   }
 
   async function excluirApontamentoAdmin(id: string) {
     if(!window.confirm("Atenção: Deseja apagar este apontamento do sistema?")) return;
-    await supabase.from('timesheets').delete().eq('id', id); await carregarTudoParaDash();
+    await supabase.from('timesheets').delete().eq('id', id); 
+    await registrarLog("Apontamento Excluído", `Um apontamento foi apagado permanentemente de forma imperativa (Painel do Gestor).`);
+    await carregarTudoParaDash();
   }
 
   function iniciarEdicaoApontamento(t: TimesheetLog) {
+    setMenuAtivo('gestao');
     setGestaoEditandoId(t.id); setGestaoConsultor(t.user_id); setGestaoContrato(t.contract_id);
     setGestaoAtividade(t.activity); setGestaoNotes(t.notes || '');
     setGestaoOs(t.os_id || '');
@@ -1276,6 +1538,17 @@ export function AdminDashboard() {
     setGestaoInicio(`${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}`);
     setGestaoFim(`${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}`);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function abrirModalEdicaoApontamento(t: TimesheetLog) {
+    setGestaoEditandoId(t.id); setGestaoConsultor(t.user_id); setGestaoContrato(t.contract_id);
+    setGestaoAtividade(t.activity); setGestaoNotes(t.notes || '');
+    setGestaoOs(t.os_id || '');
+    const startDate = new Date(t.start_at); const endDate = t.end_at ? new Date(t.end_at) : new Date();
+    setGestaoData(getLocalISODate(startDate));
+    setGestaoInicio(`${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}`);
+    setGestaoFim(`${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}`);
+    setIsModalEdicaoOpen(true);
   }
 
   const gestaoLogsFiltrados = useMemo(() => {
@@ -1337,6 +1610,7 @@ export function AdminDashboard() {
     const inserts = medContratosVinculados.map(v => ({ contract_id: v.contract_id, os_id: v.os_id || null, user_id: medConsultor, mes: medMes, ano: medAno, percentual: medicoesInput[v.key] || 0 })).filter(m => m.percentual > 0)
     
     if (inserts.length > 0) await supabase.from('medicoes').insert(inserts)
+    await registrarLog("Medições Lançadas", `Novas medições de Preço Fechado (%) foram atualizadas no sistema.`);
     toast.success("Medições do consultor salvas com sucesso!"); await carregarTudoParaDash(); setSalvando(false)
   }
 
@@ -1395,19 +1669,16 @@ export function AdminDashboard() {
       } else {
          // Para Contratos Normais: Soma as horas dos Pequenos Suportes ou de Meses já passados direto do timesheet (sem duplicar)
          const tDinamicoPassado = timesContrato.filter(t => {
-             const isSup = osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes';
-             return isSup || isPast;
-         });
-         const gastoDinamicoPassado = tDinamicoPassado.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-         
-         // Soma apenas as horas alocadas explicitamente no mês atual/futuro (Ignorando Suportes e Fechados)
-         let alocadoFixo = 0;
-         if (!isPast) {
-             const alocsFixas = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes');
-             alocadoFixo = alocsFixas.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
-         }
-         
-         orcadoAtual = gastoDinamicoPassado + alocadoFixo;
+               const isSup = osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes';
+               return isSup;
+           });
+           const gastoDinamicoPassado = tDinamicoPassado.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
+           
+           // Soma as horas alocadas explicitamente (Ignorando Suportes e Fechados)
+           const alocsFixas = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes');
+           const alocadoFixo = alocsFixas.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+           
+           orcadoAtual = gastoDinamicoPassado + alocadoFixo;
       }
 
       orcadoGlobal += orcadoAtual;
@@ -1437,14 +1708,15 @@ export function AdminDashboard() {
 
     if (tipo === 'detalhada') {
       sheet.columns = [
+        { header: 'Consultor', key: 'consultor', width: 25 },
         { header: 'Data', key: 'data', width: 15 },
         { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
         { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
         { header: 'OS', key: 'os', width: 15 },
-        { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
+        { header: 'Memorial Descritivo', key: 'obs', width: 50 },
         { header: 'Entrada', key: 'inicio', width: 12 },
         { header: 'Saída', key: 'fim', width: 12 },
-        { header: 'Memorial Descritivo', key: 'obs', width: 50 },
+        { header: 'Disciplina / Escopo', key: 'atividade', width: 35 }
       ];
       sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
       sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
@@ -1453,6 +1725,9 @@ export function AdminDashboard() {
       const contratosValidos = Array.from(new Set(alocsMes.map(a => a.contract_id)));
       
       let registros = allTimesheets.filter(t => t.user_id === resConsId && contratosValidos.includes(t.contract_id));
+      
+      // 🌟 Ordenação Cronológica Estrita
+      registros.sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
       
       registros.forEach(t => {
         const cont = contratos.find(c => c.id === t.contract_id);
@@ -1465,9 +1740,15 @@ export function AdminDashboard() {
         const fim = new Date(t.end_at!);
 
         sheet.addRow({
-          data: inicio.toLocaleDateString('pt-BR'), cod_contrato: cont.codigo, nome_contrato: cont.nome,
-          os: os, atividade: t.activity, inicio: inicio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-          fim: fim.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), obs: t.notes || ''
+          consultor: cObj.nome,
+          data: inicio.toLocaleDateString('pt-BR'), 
+          cod_contrato: cont.codigo, 
+          nome_contrato: cont.nome,
+          os: os, 
+          obs: t.notes || '',
+          inicio: inicio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          fim: fim.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          atividade: t.activity
         });
       });
     } else {
@@ -1572,8 +1853,7 @@ export function AdminDashboard() {
                let orcadoH = 0;
                if (isSuportes) orcadoH = gastoH;
                else {
-                  if (isPast) orcadoH = gastoH;
-                  else orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+                  orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
                }
 
                if (orcadoH > 0 || gastoH > 0) {
@@ -1958,16 +2238,19 @@ export function AdminDashboard() {
       { header: 'Cód. Contrato', key: 'cod_contrato', width: 15 },
       { header: 'Nome do Contrato', key: 'nome_contrato', width: 35 },
       { header: 'OS', key: 'os', width: 15 },
-      { header: 'Disciplina / Escopo', key: 'atividade', width: 35 },
+      { header: 'Memorial Descritivo', key: 'obs', width: 50 },
       { header: 'Entrada', key: 'inicio', width: 12 },
       { header: 'Saída', key: 'fim', width: 12 },
-      { header: 'Memorial Descritivo', key: 'obs', width: 50 },
+      { header: 'Disciplina / Escopo', key: 'atividade', width: 35 }
     ];
 
     sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
     sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isFaturamento ? 'FFD97706' : 'FF3B82F6' } };
     sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
 
+    // Ordenação cronológica estrita por Data e Hora de Início
+    registros.sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
+    
     registros.forEach(t => {
       const consultor = consultores.find(c => c.id === t.user_id)?.nome || 'Desconhecido'; 
       const contrato = contratos.find(c => c.id === t.contract_id);
@@ -1982,10 +2265,10 @@ export function AdminDashboard() {
         cod_contrato: contrato?.codigo || '-',
         nome_contrato: contrato?.nome || '-',
         os: os,
-        atividade: t.activity,
+        obs: t.notes || '',
         inicio: inicio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
         fim: fim.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        obs: t.notes || ''
+        atividade: t.activity
       });
     });
 
@@ -2108,21 +2391,23 @@ export function AdminDashboard() {
           <div>
             {isAdminSidebarOpen ? <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Indicadores</p> : <div className="h-px bg-border w-full my-2"></div>}
             <div className="space-y-1">
-              <button onClick={() => setMenuAtivo('resumo-consultor')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'resumo-consultor' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel por Consultor" : ""}><Contact2 className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Consultor</span>}</button>
-              <button onClick={() => setMenuAtivo('dash-global')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel dos Contratos" : ""}><Layers className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Contratos</span>}</button>
+              <button onClick={() => setMenuAtivo('resumo-consultor')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'resumo-consultor' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel Consultor" : ""}><Contact2 className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Consultor</span>}</button>
+              <button onClick={() => setMenuAtivo('dash-global')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel Contratos" : ""}><Layers className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Contratos</span>}</button>
+              <button onClick={() => setMenuAtivo('performance-consultores')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'performance-consultores' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Performance da Equipe" : ""}><Activity className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Performance Equipe</span>}</button>
             </div>
           </div>
           <div>
             {isAdminSidebarOpen ? <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Financeiro</p> : <div className="h-px bg-border w-full my-2"></div>}
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('dash-mensal')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'dash-mensal' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Folha (Mensal)" : ""}><CalendarDays className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Folha (Mensal)</span>}</button>
-              <button onClick={() => setMenuAtivo('faturamento-cliente')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'faturamento-cliente' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Extração p/ Clientes" : ""}><Receipt className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Exportar Clientes</span>}</button>
+              <button onClick={() => setMenuAtivo('faturamento-cliente')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'faturamento-cliente' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Exportar Clientes" : ""}><Receipt className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Exportar Clientes</span>}</button>
             </div>
           </div>
           <div>
-            {isAdminSidebarOpen ? <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Alertas</p> : <div className="h-px bg-border w-full my-2"></div>}
+            {isAdminSidebarOpen ? <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-3 mb-2">Alertas e Registros</p> : <div className="h-px bg-border w-full my-2"></div>}
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('alertas')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors bg-red-500/5 ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'alertas' ? 'bg-red-500! text-white' : 'text-red-600 hover:bg-red-500/10'}`} title={!isAdminSidebarOpen ? "Radar de Alertas" : ""}><AlertTriangle className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Radar de Alertas</span>}</button>
+              <button onClick={() => setMenuAtivo('log-alteracoes')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors bg-slate-500/10 ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'log-alteracoes' ? 'bg-slate-700 dark:bg-slate-200 text-white dark:text-slate-900' : 'text-slate-700 dark:text-slate-300 hover:bg-slate-500/20'}`} title={!isAdminSidebarOpen ? "Log de Alterações" : ""}><TerminalSquare className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Log de Alterações</span>}</button>
             </div>
           </div>
         </nav>
@@ -2151,7 +2436,7 @@ export function AdminDashboard() {
         {/* VIEW: CONTRATOS */}
         {menuAtivo === 'contratos' && (
           <Card className="w-full">
-            <CardHeader><CardTitle>Gestão Estratégica de Contratos</CardTitle><CardDescription>Classifique os contratos e configure os ciclos de faturamento do cliente e pagamento do consultor.</CardDescription></CardHeader>
+            <CardHeader><CardTitle className="flex items-center gap-2">Gestão Estratégica de Contratos <span title="Cadastre os contratos ativos e configure o Teto Global ou períodos de pagamento/faturamento." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span></CardTitle><CardDescription>Classifique os contratos e configure os ciclos de faturamento do cliente e pagamento do consultor.</CardDescription></CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 items-end bg-muted/30 p-5 rounded-xl border">
                 <div className="space-y-2"><Label>Código</Label><Input placeholder="CT-001" className="uppercase" value={novoCodigo} onChange={(e) => setNovoCodigo(e.target.value)} /></div>
@@ -2252,7 +2537,7 @@ export function AdminDashboard() {
         {/* VIEW: ORDENS DE SERVIÇO */}
         {menuAtivo === 'os' && (
           <Card className="border-t-4 border-t-amber-500 w-full">
-            <CardHeader><CardTitle>Central de Ordens de Serviço (OS)</CardTitle><CardDescription>Distribua os subcontratos e limites de horas dos Contratos Sob Demanda.</CardDescription></CardHeader>
+            <CardHeader><CardTitle className="flex items-center gap-2">Central de Ordens de Serviço (OS) <span title="Para contratos 'Sob Demanda', cadastre aqui as OSs vinculadas e seus escopos." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span></CardTitle><CardDescription>Distribua os subcontratos e limites de horas dos Contratos Sob Demanda.</CardDescription></CardHeader>
             <CardContent className="space-y-6">
               <div className="flex flex-wrap gap-4 items-end bg-amber-500/5 p-4 rounded-xl border border-amber-500/10">
                 <div className="space-y-2 flex-1 min-w-62.5"><Label>Contrato Mestre (Sob Demanda)</Label>
@@ -2308,6 +2593,7 @@ export function AdminDashboard() {
               <div>
                 <h2 className="text-2xl font-black text-primary tracking-tight flex items-center gap-2">
                   <Clock className="w-6 h-6" /> Gestão de Alocações
+                  <span title="Crie a Matriz definindo o teto de horas na Linha de Base e distribua as horas de cada consultor por disciplina na Distribuição Mensal." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-primary transition-colors" /></span>
                 </h2>
                 <p className="text-sm text-muted-foreground mt-1">
                   Defina a matriz estrutural do contrato (Linha de Base) e gerencie a distribuição de horas mensais.
@@ -2498,7 +2784,9 @@ export function AdminDashboard() {
                                           </SelectTrigger>
                                           <SelectContent>
                                             <SelectItem value="horas">⏳ Medição em Horas</SelectItem>
-                                            <SelectItem value="fechado">🎯 Preço Fechado (%)</SelectItem>
+                                            {(!isSemOsType && !isOverheadType) && (
+                                              <SelectItem value="fechado">🎯 Preço Fechado (%)</SelectItem>
+                                            )}
                                           </SelectContent>
                                         </Select>
                                       </div>
@@ -2736,7 +3024,10 @@ export function AdminDashboard() {
           <Card className="border-t-4 border-t-emerald-500 w-full shadow-sm">
             <CardHeader className="border-b pb-4 bg-muted/5">
               <div>
-                <CardTitle className="flex items-center gap-2 text-emerald-700"><Users className="w-5 h-5"/> Gestão de Equipe e Acessos</CardTitle>
+                <CardTitle className="flex items-center gap-2 text-emerald-700">
+                  <Users className="w-5 h-5"/> Gestão de Equipe e Acessos
+                  <span title="Gerencie o acesso da sua equipe. Use o botão de Recesso para pausar alertas de ociosidade de consultores em férias." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-emerald-500 transition-colors" /></span>
+                </CardTitle>
                 <CardDescription className="mt-1">Gerencie quem tem acesso ao aplicativo (Ativos/Inativos).</CardDescription>
               </div>
             </CardHeader>
@@ -2804,6 +3095,7 @@ export function AdminDashboard() {
                             onCheckedChange={async (checked) => {
                                setConsultores(p => p.map(user => user.id === c.id ? { ...user, status_ativo: checked } : user));
                                await supabase.from('consultores').update({ status_ativo: checked }).eq('id', c.id);
+                               await registrarLog("Status de Consultor Alterado", `O status de permissão do(a) engenheiro(a) ${c.nome} foi alterado para ${checked ? 'Ativo' : 'Inativo'}.`);
                             }} 
                          />
                          <Label htmlFor={`status-${c.id}`} className="text-xs cursor-pointer">{c.status_ativo !== false ? 'Ativo' : 'Inativo'}</Label>
@@ -2818,6 +3110,7 @@ export function AdminDashboard() {
                             onCheckedChange={async (checked) => {
                                setConsultores(p => p.map(user => user.id === c.id ? { ...user, em_recesso: checked } : user));
                                await supabase.from('consultores').update({ em_recesso: checked }).eq('id', c.id);
+                               await registrarLog("Recesso de Consultor Alterado", `O status de recesso do(a) engenheiro(a) ${c.nome} foi definido para ${checked ? 'Em Recesso' : 'Trabalhando'}.`);
                                if (checked) toast.info(`${c.nome} entrou em recesso. Alertas de ociosidade pausados.`);
                                else toast.success(`${c.nome} retornou do recesso.`);
                             }} 
@@ -2836,7 +3129,10 @@ export function AdminDashboard() {
         {menuAtivo === 'medicoes' && (
           <Card className="border-t-4 border-t-amber-500 w-full shadow-sm">
             <CardHeader className="bg-muted/10 border-b pb-6">
-              <CardTitle className="text-xl">Lançamento de Medições (Preço Fechado)</CardTitle>
+              <CardTitle className="text-xl flex items-center gap-2">
+                Lançamento de Medições (Preço Fechado)
+                <span title="Lance o percentual de avanço mensal para consultores e contratos configurados como 'Preço Fechado' na Matriz." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-amber-500 transition-colors" /></span>
+              </CardTitle>
               <CardDescription>Insira o avanço físico mensal do consultor nos contratos em que ele atua por pacote.</CardDescription>
               <div className="flex flex-wrap gap-3 mt-4 p-3 bg-background border rounded-lg shadow-sm">
                 <Select value={medConsultor} onValueChange={setMedConsultor}>
@@ -2895,25 +3191,26 @@ export function AdminDashboard() {
 
         {/* VIEW: GESTÃO DE APONTAMENTOS (ADMIN) */}
         {menuAtivo === 'gestao' && (
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full">
-            <div className="md:col-span-5 space-y-6">
-              <Card className="border-t-4 border-t-purple-500 shadow-sm">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full h-full min-h-0">
+            <div className="md:col-span-5 flex flex-col gap-6 h-full min-h-0 overflow-y-auto pr-1">
+              <Card className="border-t-4 border-t-purple-500 shadow-sm shrink-0">
                 <CardHeader className="border-b pb-4 space-y-4">
-                  <div className="flex justify-between items-center w-full">
-                    <CardTitle className="text-sm font-bold flex items-center gap-2"><History className="w-4 h-4"/> Lançamento Direto / Importação</CardTitle>
-                    <div className="relative">
-                      <input type="file" id="excel-ts-up" className="hidden" accept=".xlsx, .xls" onChange={handleImportarTimesheetExcel} />
-                      <Button variant="outline" size="sm" className="text-purple-600 border-purple-200 text-[11px] h-8 gap-1.5" onClick={() => document.getElementById('excel-ts-up')?.click()}>
-                        <FileUp className="w-3.5 h-3.5" /> Importar Planilha (.xlsx)
+                  <div className="flex flex-col xl:flex-row xl:justify-between items-start xl:items-center w-full gap-3">
+                    <CardTitle className="text-sm font-bold flex items-center gap-2">
+                      <History className="w-4 h-4"/> Lançamento / Importação
+                      <span title="Lançamento retroativo forçado ou importação de planilhas antigas. Para importar, faça o download do padrão ao lado." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-purple-500 transition-colors" /></span>
+                    </CardTitle>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" size="sm" className="text-purple-700 border-purple-300 hover:bg-purple-500/10 text-[10px] h-8 gap-1.5" onClick={baixarPlanilhaPadrao}>
+                        <FileDown className="w-3.5 h-3.5" /> Planilha Padrão
                       </Button>
+                      <div className="relative">
+                        <input type="file" id="excel-ts-up" className="hidden" accept=".xlsx, .xls" onChange={handleImportarTimesheetExcel} />
+                        <Button variant="default" size="sm" className="bg-purple-600 hover:bg-purple-700 text-white text-[10px] h-8 gap-1.5 shadow-sm" onClick={() => document.getElementById('excel-ts-up')?.click()}>
+                          <FileUp className="w-3.5 h-3.5" /> Importar Arquivo
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                  
-                  <div className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3 text-[10px] text-purple-800 space-y-1">
-                    <p className="font-bold uppercase tracking-wider mb-1">Como importar via Excel:</p>
-                    <p>O arquivo (.xlsx) deve conter <strong>exatamente 9 colunas</strong>, na seguinte ordem (com cabeçalho na linha 1):</p>
-                    <p className="font-mono font-semibold opacity-90 mt-1">1. Consultor | 2. Data | 3. Cód. Contrato | 4. Nome Contrato | 5. OS | 6. Disciplina/Escopo | 7. Entrada | 8. Saída | 9. Observação</p>
-                    <p className="italic opacity-80 mt-1">* Dica: Exporte a planilha na aba "Folha (Mensal)" ou no Painel do Consultor para obter o modelo idêntico.</p>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3 pt-4 text-xs">
@@ -2972,6 +3269,12 @@ export function AdminDashboard() {
                            onClick={() => {
                               setGestaoEditandoId(null);
                               setGestaoNotes('');
+                              setGestaoData(getLocalISODate(new Date()));
+                              setGestaoInicio('08:00');
+                              setGestaoFim('12:00');
+                              setGestaoConsultor('');
+                              setGestaoContrato('');
+                              setGestaoOs('');
                            }} 
                            className="h-9 text-xs border-dashed"
                         >
@@ -2983,9 +3286,12 @@ export function AdminDashboard() {
               </Card>
 
               {/* 🌟 CARD DE LIBERAÇÃO RETROATIVA */}
-              <Card className="border-t-4 border-t-green-500 shadow-sm">
+              <Card className="border-t-4 border-t-green-500 shadow-sm shrink-0">
                 <CardHeader className="border-b pb-4">
-                  <CardTitle className="text-sm font-bold flex items-center gap-2"><Unlock className="w-4 h-4"/> Liberação Retroativa (Equipe)</CardTitle>
+                  <CardTitle className="text-sm font-bold flex items-center gap-2">
+                    <Unlock className="w-4 h-4"/> Liberação Retroativa (Equipe)
+                    <span title="Autorize dias passados para que o próprio consultor consiga registrar/editar horas pelo seu painel." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-green-600 transition-colors" /></span>
+                  </CardTitle>
                   <CardDescription className="text-[10px]">Autorize consultores a editarem dias passados no painel deles.</CardDescription>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-3 text-xs">
@@ -3027,8 +3333,8 @@ export function AdminDashboard() {
               </Card>
             </div>
 
-            <div className="md:col-span-7 h-full flex flex-col">
-              <Card className="flex flex-col shadow-sm w-full h-full min-h-150 xl:min-h-[calc(100vh-180px)]">
+            <div className="md:col-span-7 h-full flex flex-col min-h-0">
+              <Card className="flex flex-col shadow-sm w-full h-full min-h-0">
                 <CardHeader className="border-b py-3 bg-muted/10 shrink-0">
                   <CardTitle className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Últimos Lançamentos Efetuados</CardTitle>
                 </CardHeader>
@@ -3063,7 +3369,10 @@ export function AdminDashboard() {
           <div className="space-y-6 animate-in fade-in-50 duration-200">
              <div className="flex flex-col md:flex-row md:items-center justify-between border-b pb-4 gap-4">
               <div className="flex-1">
-                <h2 className="text-xl font-bold tracking-tight text-blue-700 flex items-center gap-2"><Contact2 className="w-5 h-5"/> Painel por Consultor</h2>
+                <h2 className="text-xl font-bold tracking-tight text-blue-700 flex items-center gap-2">
+                  <Contact2 className="w-5 h-5"/> Painel por Consultor
+                  <span title="Acompanhe de perto as horas orçadas vs consumidas de um único consultor em todos os seus projetos." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-blue-500 transition-colors" /></span>
+                </h2>
                 <p className="text-xs text-muted-foreground mt-1">Acompanhe a performance orçamentária e a entrega de cada membro da equipe isoladamente.</p>
               </div>
               {resConsId && resumoConsultorData && (
@@ -3256,10 +3565,10 @@ export function AdminDashboard() {
 
         {/* VIEW: DASHBOARD MENSAL (PAGAMENTO CONSULTOR) */}
         {menuAtivo === 'dash-mensal' && (
-          <Card className="border-t-4 border-t-blue-500 shadow-sm min-h-125 w-full">
-            <CardHeader className="bg-muted/10 border-b pb-4">
+          <Card className="border-t-4 border-t-blue-500 shadow-sm w-full h-full min-h-0 flex flex-col">
+            <CardHeader className="bg-muted/10 border-b pb-4 shrink-0">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
-                <div><CardTitle className="text-lg">Folha de Pagamento (Equipe)</CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por consultor.</CardDescription></div>
+                <div><CardTitle className="text-lg flex items-center gap-2">Folha de Pagamento (Equipe) <span title="Nesta tela você visualiza as horas a serem pagas aos consultores. Clique na barra de um consultor no gráfico abaixo para ver ou editar os apontamentos detalhados dele neste mês." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span></CardTitle><CardDescription>Acompanhe o volume a ser repassado, faturado horizontalmente por consultor.</CardDescription></div>
                 <div className="flex gap-2">
                   <Button onClick={() => exportarExcel(false)} variant="outline" className="gap-1.5 text-green-700 border-green-500/30 hover:bg-green-500/10 text-xs h-8">
                     <Download className="w-3.5 h-3.5" /> Detalhada
@@ -3325,14 +3634,14 @@ export function AdminDashboard() {
                 )}
               </div>
             </CardHeader>
-            <CardContent className="pt-6 w-full">
+            <CardContent className="pt-6 w-full flex-1 min-h-0 overflow-y-auto flex flex-col">
               {loadingDash ? (
                 <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
               ) : dashData.consultoresPagamento.length === 0 ? (
                 <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro encontrado no ciclo para esse filtro.</div>
               ) : (
                 <>
-                  <div className="w-full h-95">
+                  <div className={`w-full transition-all duration-300 ${drilldownConsultorId ? 'h-64 shrink-0' : 'flex-1'}`} style={{ minHeight: drilldownConsultorId ? undefined : 400 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
                         data={dashData.consultoresPagamento}
@@ -3340,7 +3649,11 @@ export function AdminDashboard() {
                         onClick={(state) => {
                           const clickedId = state?.activePayload?.[0]?.payload?.id;
                           if (clickedId) {
-                            setDrilldownConsultorId(prev => prev === clickedId ? null : clickedId);
+                            setDrilldownConsultorId(prev => {
+                              if (prev === clickedId) return null;
+                              setDrilldownContractId(null);
+                              return clickedId;
+                            });
                           }
                         }}
                       >
@@ -3355,7 +3668,7 @@ export function AdminDashboard() {
                     </ResponsiveContainer>
                   </div>
 
-                  {/* 🌟 DRILL-DOWN CONSOLIDADO POR CONTRATO */}
+                  {/* 🌟 DRILL-DOWN DETALHADO POR APONTAMENTO (FASE 3) */}
                   {drilldownConsultorId && (() => {
                     const consNome = consultores.find(c => c.id === drilldownConsultorId)?.nome || 'Consultor';
                     const logsDrilldown = allTimesheets.filter(t => {
@@ -3365,25 +3678,86 @@ export function AdminDashboard() {
                       return isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim);
                     });
 
-                    // Agrupamento consolidado por Contrato Mestre
-                    const contratosMap = new Map<string, { codigo: string; nome: string; totalHoras: number }>();
+                    // --- NÍVEL 2: APONTAMENTOS DE UM CONTRATO ESPECÍFICO ---
+                    if (drilldownContractId) {
+                       const contSelecionado = contratos.find(c => c.id === drilldownContractId);
+                       const logsDoContrato = logsDrilldown.filter(t => t.contract_id === drilldownContractId);
+                       logsDoContrato.sort((a,b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime());
 
+                       return (
+                          <div className="mt-6 border-t pt-4 animate-in slide-in-from-right-4">
+                            <div className="flex justify-between items-center mb-3">
+                              <h4 className="font-bold text-sm text-primary flex items-center gap-2">
+                                <History className="w-4 h-4" /> Histórico: {contSelecionado?.codigo} ({consNome})
+                              </h4>
+                              <div className="flex gap-2">
+                                 <Button variant="outline" size="sm" className="text-xs h-7" onClick={() => setDrilldownContractId(null)}>
+                                   <ArrowLeft className="w-3.5 h-3.5 mr-1" /> Voltar
+                                 </Button>
+                                 <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => { setDrilldownConsultorId(null); setDrilldownContractId(null); }}>
+                                   Fechar ✕
+                                 </Button>
+                              </div>
+                            </div>
+                            <div className="border rounded-xl overflow-hidden bg-card max-h-80 overflow-y-auto w-full overflow-x-auto shadow-inner">
+                              <table className="w-full min-w-max text-xs text-left">
+                                <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0">
+                                  <tr>
+                                    <th className="p-2.5 w-24">Data</th>
+                                    <th className="p-2.5 w-28">Horário</th>
+                                    <th className="p-2.5">Disciplina / Escopo</th>
+                                    {contSelecionado?.tipo === 'continuado_com_os' && <th className="p-2.5 w-32">Ordem de Serviço</th>}
+                                    <th className="p-2.5">Observação</th>
+                                    <th className="p-2.5 text-right w-20">Tempo</th>
+                                    <th className="p-2.5 text-center w-24">Ações</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                  {logsDoContrato.length === 0 ? (
+                                    <tr><td colSpan={contSelecionado?.tipo === 'continuado_com_os' ? 7 : 6} className="p-4 text-center text-muted-foreground">Nenhum apontamento neste contrato.</td></tr>
+                                  ) : logsDoContrato.map((item) => {
+                                     const s = new Date(item.start_at); 
+                                     const e = item.end_at ? new Date(item.end_at) : new Date();
+                                     const dur = (e.getTime() - s.getTime()) / 3600000;
+                                     
+                                     return (
+                                       <tr key={item.id} className="hover:bg-muted/20">
+                                         <td className="p-2.5 font-medium">{s.toLocaleDateString('pt-BR')}</td>
+                                         <td className="p-2.5 text-muted-foreground">{s.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})} - {e.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}</td>
+                                         <td className="p-2.5 font-bold text-foreground">{item.activity}</td>
+                                         {contSelecionado?.tipo === 'continuado_com_os' && (
+                                           <td className="p-2.5 text-amber-600 dark:text-amber-500 font-bold text-[11px]">
+                                             {item.os_id ? osList.find(o => o.id === item.os_id)?.codigo || '-' : '-'}
+                                           </td>
+                                         )}
+                                         <td className="p-2.5 text-muted-foreground italic truncate max-w-50" title={item.notes || ''}>{item.notes || '-'}</td>
+                                         <td className="p-2.5 text-right font-mono font-bold text-primary">{dur.toFixed(1)}h</td>
+                                         <td className="p-2.5 text-center">
+                                            <div className="flex items-center justify-center gap-1">
+                                               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-primary" onClick={() => abrirModalEdicaoApontamento(item)}><Pencil className="w-3 h-3" /></Button>
+                                               <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-red-500 hover:bg-red-500/10" onClick={() => excluirApontamentoAdmin(item.id)}><Trash2 className="w-3 h-3" /></Button>
+                                            </div>
+                                         </td>
+                                       </tr>
+                                     )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                       );
+                    }
+
+                    // --- NÍVEL 1: CONSOLIDADO POR CONTRATO (Como era antes, porém com clique) ---
+                    const contratosMap = new Map<string, { id: string; codigo: string; nome: string; totalHoras: number }>();
                     logsDrilldown.forEach(t => {
                       const cont = contratos.find(c => c.id === t.contract_id);
                       if (!cont) return;
-                      
                       const duration = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
-                      
                       if (!contratosMap.has(cont.id)) {
-                        contratosMap.set(cont.id, {
-                          codigo: cont.codigo,
-                          nome: cont.nome,
-                          totalHoras: 0
-                        });
+                        contratosMap.set(cont.id, { id: cont.id, codigo: cont.codigo, nome: cont.nome, totalHoras: 0 });
                       }
-                      
-                      const item = contratosMap.get(cont.id)!;
-                      item.totalHoras += duration;
+                      contratosMap.get(cont.id)!.totalHoras += duration;
                     });
 
                     const listaConsolidada = Array.from(contratosMap.values()).sort((a, b) => b.totalHoras - a.totalHoras);
@@ -3392,31 +3766,31 @@ export function AdminDashboard() {
                       <div className="mt-6 border-t pt-4 animate-in fade-in-50">
                         <div className="flex justify-between items-center mb-3">
                           <h4 className="font-bold text-sm text-primary flex items-center gap-2">
-                            <History className="w-4 h-4" /> Consolidado por Contrato: {consNome}
+                            <History className="w-4 h-4" /> Consolidado do Mês: {consNome}
                           </h4>
                           <Button variant="ghost" size="sm" className="text-xs h-7" onClick={() => setDrilldownConsultorId(null)}>
                             Fechar Detalhamento ✕
                           </Button>
                         </div>
                         <div className="border rounded-xl overflow-hidden bg-card max-h-60 overflow-y-auto w-full overflow-x-auto">
-                          <table className="w-full text-xs text-left min-w-120">
+                          <table className="w-full min-w-max text-xs text-left">
                             <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0">
                               <tr>
                                 <th className="p-2.5 w-28">Código</th>
                                 <th className="p-2.5">Nome do Contrato</th>
                                 <th className="p-2.5 text-right w-28">Horas Totais</th>
+                                <th className="p-2.5 w-12 text-center"></th>
                               </tr>
                             </thead>
                             <tbody className="divide-y">
                               {listaConsolidada.length === 0 ? (
-                                <tr>
-                                  <td colSpan={3} className="p-4 text-center text-muted-foreground">Nenhum apontamento consolidado neste ciclo.</td>
-                                </tr>
+                                <tr><td colSpan={4} className="p-4 text-center text-muted-foreground">Nenhum apontamento consolidado neste ciclo.</td></tr>
                               ) : listaConsolidada.map((item, idx) => (
-                                <tr key={idx} className="hover:bg-muted/20">
+                                <tr key={idx} className="hover:bg-muted/20 cursor-pointer transition-colors" onClick={() => setDrilldownContractId(item.id)}>
                                   <td className="p-2.5 font-bold text-primary font-mono">{item.codigo}</td>
                                   <td className="p-2.5 font-medium text-foreground">{item.nome}</td>
                                   <td className="p-2.5 text-right font-mono font-bold text-primary">{item.totalHoras.toFixed(1)}h</td>
+                                  <td className="p-2.5 text-center text-muted-foreground"><ChevronRight className="w-4 h-4 mx-auto" /></td>
                                 </tr>
                               ))}
                             </tbody>
@@ -3425,6 +3799,50 @@ export function AdminDashboard() {
                       </div>
                     );
                   })()}
+
+                  {/* MODAL DE EDIÇÃO RÁPIDA (FOLHA MENSAL) */}
+                  <Dialog open={isModalEdicaoOpen} onOpenChange={setIsModalEdicaoOpen}>
+                    <DialogContent className="max-h-[90vh] overflow-y-auto">
+                      <DialogHeader><DialogTitle>Editar Apontamento</DialogTitle></DialogHeader>
+                      <div className="space-y-4 pt-2 text-xs">
+                        <div className="space-y-1.5">
+                          <Label>Contrato</Label>
+                          <Select value={gestaoContrato} onValueChange={(val) => { setGestaoContrato(val); setGestaoOs(''); setGestaoAtividade(''); }}>
+                            <SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger>
+                            <SelectContent className="z-9999">{contratos.filter(c => c.status_ativo).map(c => <SelectItem key={c.id} value={c.id}>{c.codigo} - {c.nome}</SelectItem>)}</SelectContent>
+                          </Select>
+                        </div>
+                        {contratos.find(c => c.id === gestaoContrato)?.tipo === 'continuado_com_os' && (
+                          <div className="space-y-1.5">
+                            <Label>Ordem de Serviço (OS)</Label>
+                            <Select value={gestaoOs} onValueChange={(val) => { setGestaoOs(val); setGestaoAtividade(''); }}>
+                              <SelectTrigger className="h-9 border-amber-500/30"><SelectValue placeholder="Selecione a OS..." /></SelectTrigger>
+                              <SelectContent className="z-9999">
+                                {osList.filter(o => o.contract_id === gestaoContrato).map(o => (
+                                  <SelectItem key={o.id} value={o.id}>{o.codigo} - {o.descricao}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        <div className="space-y-1.5">
+                          <Label>Disciplina / Escopo</Label>
+                          <Select value={gestaoAtividade} onValueChange={setGestaoAtividade} disabled={!gestaoContrato}>
+                            <SelectTrigger className="h-9"><SelectValue placeholder="Selecione..." /></SelectTrigger>
+                            <SelectContent className="z-9999">{gestaoAtividadesDisponiveis.map((a: string) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent>
+                          </Select>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2"><div className="space-y-1.5"><Label>Data</Label><Input type="date" value={gestaoData} onChange={e => setGestaoData(e.target.value)} className="h-9" /></div><div className="grid grid-cols-2 gap-2"><div className="space-y-1.5"><Label>Início</Label><Input type="time" value={gestaoInicio} onChange={e => setGestaoInicio(e.target.value)} className="h-9" /></div><div className="space-y-1.5"><Label>Fim</Label><Input type="time" value={gestaoFim} onChange={e => setGestaoFim(e.target.value)} className="h-9" /></div></div></div>
+                        <div className="space-y-1.5"><Label>Observação</Label><Textarea value={gestaoNotes} onChange={e => setGestaoNotes(e.target.value)} rows={3} /></div>
+                      </div>
+                      <DialogFooter>
+                        <Button variant="ghost" onClick={() => setIsModalEdicaoOpen(false)}>Cancelar</Button>
+                        <Button onClick={salvarApontamentoAdmin} disabled={salvando} className="bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
+                          {salvando ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Save className="w-4 h-4 mr-2" />} Salvar
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
                 </>
               )}
             </CardContent>
@@ -3437,12 +3855,20 @@ export function AdminDashboard() {
             <CardHeader className="bg-muted/10 border-b pb-4">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
                 <div>
-                  <CardTitle className="text-lg">Painel dos Contratos (Saúde Financeira)</CardTitle>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    Painel dos Contratos (Saúde Financeira)
+                    <span title="Visão executiva da saúde de todos os contratos. O botão 'Passar a Régua' limpa as horas orçadas não utilizadas em meses passados." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span>
+                  </CardTitle>
                   <CardDescription>Visão geral de engenharia e custos dos contratos.</CardDescription>
                 </div>
-                <Button onClick={exportarMatrizGestao} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8 shadow-sm">
-                  <Download className="w-3.5 h-3.5" /> Exportar Visão Executiva (3 Colunas)
-                </Button>
+                <div className="flex gap-2">
+                  <Button onClick={calcularSaldosPassados} variant="outline" className="gap-1.5 text-amber-600 border-amber-600/30 hover:bg-amber-600/10 text-xs h-8 shadow-sm">
+                    <Scissors className="w-3.5 h-3.5" /> Passar a Régua (Liquidar)
+                  </Button>
+                  <Button onClick={exportarMatrizGestao} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs h-8 shadow-sm">
+                    <Download className="w-3.5 h-3.5" /> Exportar Visão Executiva (3 Colunas)
+                  </Button>
+                </div>
               </div>
               <div className="flex flex-col gap-4 mt-6 w-full">
                 <div className="flex items-center gap-4 bg-muted/30 p-2 rounded-md border w-fit">
@@ -3786,12 +4212,7 @@ export function AdminDashboard() {
                                                  const tAtiv = uTimesCiclo.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
                                                  uOrcadoCiclo += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
                                               } else {
-                                                 if (isPast) {
-                                                   const tAtiv = uTimesCiclo.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                                   uOrcadoCiclo += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                                 } else {
-                                                   uOrcadoCiclo += Number(a.horas_disponiveis);
-                                                 }
+                                                 uOrcadoCiclo += Number(a.horas_disponiveis);
                                               }
                                             });
                                             if (uAlocsCiclo.length === 0) {
@@ -3904,8 +4325,7 @@ export function AdminDashboard() {
                                           isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
                                           if (isSuportes) orcado = gasto;
                                           else {
-                                            if (cIsPast) orcado = gasto;
-                                            else orcado = Number(a.horas_disponiveis);
+                                            orcado = Number(a.horas_disponiveis);
                                           }
                                       }
 
@@ -3969,10 +4389,10 @@ export function AdminDashboard() {
 
         {/* VIEW: DASHBOARD DE FATURAMENTO - CLIENTES */}
         {menuAtivo === 'faturamento-cliente' && (
-          <Card className="border-t-4 border-t-amber-600 shadow-sm min-h-125 w-full">
-            <CardHeader className="bg-amber-600/5 border-b pb-4">
+          <Card className="border-t-4 border-t-amber-600 shadow-sm w-full h-full min-h-0 flex flex-col">
+            <CardHeader className="bg-amber-600/5 border-b pb-4 shrink-0">
               <div className="flex flex-wrap items-center justify-between gap-4 w-full">
-                <div><CardTitle className="text-lg text-amber-700 flex items-center gap-2"><Receipt className="w-5 h-5"/> Extração de Horas (Cliente)</CardTitle><CardDescription>Volume comercial consolidado com base no calendário de faturamento acordado.</CardDescription></div>
+                <div><CardTitle className="text-lg text-amber-700 flex items-center gap-2"><Receipt className="w-5 h-5"/> Extração de Horas (Cliente) <span title="Volume de horas prontas para repasse ao cliente, baseadas estritamente no ciclo de faturamento." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-amber-500 transition-colors" /></span></CardTitle><CardDescription>Volume comercial consolidado com base no calendário de faturamento acordado.</CardDescription></div>
                 <Button onClick={() => exportarExcel(true)} className="gap-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs h-8"><Download className="w-4 h-4" /> Exportar Planilha de Cobrança</Button>
               </div>
               <div className="flex flex-wrap gap-3 mt-4 items-center bg-background p-2.5 rounded-lg border shadow-sm w-full">
@@ -4031,14 +4451,14 @@ export function AdminDashboard() {
                 )}
               </div>
             </CardHeader>
-            <CardContent className="pt-6 w-full">
+            <CardContent className="pt-6 w-full flex-1 min-h-0 overflow-y-auto flex flex-col">
               {loadingDash ? (
                 <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-amber-600" /></div>
               ) : fatData.consultoresPagamento.length === 0 ? (
                 <div className="text-center text-muted-foreground text-xs py-12">Nenhum registro faturável neste ciclo.</div>
               ) : (
                 <>
-                  <div className="w-full h-95">
+                  <div className={`w-full transition-all duration-300 ${drilldownConsultorId ? 'h-64 shrink-0' : 'flex-1 min-h-100'}`}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
                         data={fatData.consultoresPagamento}
@@ -4137,7 +4557,222 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* ========================================================= */}
+        {/* VIEW: LOG DE RASTREABILIDADE (ITEM 8) */}
+        {menuAtivo === 'log-alteracoes' && (
+          <Card className="border-t-4 border-t-slate-700 shadow-sm w-full h-full min-h-0 flex flex-col">
+            <CardHeader className="bg-slate-500/5 border-b pb-4 shrink-0">
+              <CardTitle className="text-xl flex items-center gap-2 text-slate-800 dark:text-slate-200">
+                 <TerminalSquare className="w-5 h-5"/> Log de Rastreabilidade e Auditoria
+                 <span title="Registro automático das alterações estruturais e financeiras feitas por gestores no sistema." className="cursor-help"><HelpCircle className="w-4 h-4 text-slate-500 hover:text-slate-800 transition-colors" /></span>
+              </CardTitle>
+              <CardDescription>Feed visual detalhado das últimas ações críticas executadas na plataforma.</CardDescription>
+            </CardHeader>
+            <CardContent className="pt-6 w-full flex-1 overflow-y-auto">
+              <div className="relative border-l-2 border-slate-500/30 ml-4 space-y-6 pb-8">
+                 {logsAuditoria.length === 0 ? (
+                    <p className="text-muted-foreground text-sm ml-6 italic">Nenhum evento registrado ainda.</p>
+                 ) : logsAuditoria.map((log) => {
+                    const dataObj = new Date(log.created_at);
+                    return (
+                      <div key={log.id} className="relative ml-8">
+                        <div className="absolute -left-10 top-1 h-5 w-5 rounded-full border-4 border-background bg-slate-600 shadow-xs"></div>
+                        <div className="bg-card border rounded-xl p-4 shadow-xs hover:border-slate-500/40 transition-colors">
+                           <div className="flex justify-between items-start gap-4 mb-2">
+                              <h4 className="font-bold text-sm text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                                 {log.acao}
+                              </h4>
+                              <div className="text-right">
+                                 <span className="block text-[10px] uppercase font-bold text-muted-foreground">{dataObj.toLocaleDateString('pt-BR')}</span>
+                                 <span className="block text-xs font-mono text-foreground/70">{dataObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                              </div>
+                           </div>
+                           <p className="text-sm text-foreground/90">{log.detalhes}</p>
+                           <p className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mt-3 bg-muted/40 w-fit px-2 py-1 rounded">
+                             Operador: <span className="text-foreground">{log.gestor_nome}</span>
+                           </p>
+                        </div>
+                      </div>
+                    )
+                 })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* VIEW: PERFORMANCE DA EQUIPE (ITEM 9) */}
+        {menuAtivo === 'performance-consultores' && (() => {
+           // Motor de Cálculo de Performance (Velocidade Bruta e Capacidade Cognitiva)
+           const desempenho = consultores.filter(c => c.status_ativo).map(c => {
+              const uTimes = allTimesheets.filter(t => t.user_id === c.id);
+              const mesesTrabalhados = new Map<string, { horas: number, contratos: Set<string>, atividades: Map<string, number> }>();
+              
+              // 1. Identificar o "Ciclo Atual Vigente" (que ainda não fechou e não deve entrar na média)
+              const now = new Date();
+              let currM = now.getMonth();
+              let currY = now.getFullYear();
+              if (now.getDate() >= 25) {
+                 currM = currM === 11 ? 0 : currM + 1;
+                 if (currM === 0) currY++;
+              }
+              const currentActiveMKey = `${currY}-${String(currM + 1).padStart(2, '0')}`;
+
+              uTimes.forEach(t => {
+                  const d = new Date(t.start_at);
+                  let m = d.getMonth();
+                  let y = d.getFullYear();
+                  
+                  const cObj = contratos.find(x => x.id === t.contract_id);
+                  // Mapeia a hora consumida para o seu ciclo fiscal correto (Dia 25 a Dia 24)
+                  if (cObj && cObj.ciclo_inicio > cObj.ciclo_fim && d.getDate() >= cObj.ciclo_inicio) {
+                      m = m === 11 ? 0 : m + 1;
+                      if (m === 0) y++;
+                  }
+                  const mKey = `${y}-${String(m + 1).padStart(2, '0')}`;
+                  
+                  // 🚫 IGNORA O CICLO ATUAL (pois não foi concluído)
+                  if (mKey === currentActiveMKey) return;
+
+                  if (!mesesTrabalhados.has(mKey)) {
+                      mesesTrabalhados.set(mKey, { horas: 0, contratos: new Set(), atividades: new Map() });
+                  }
+                  
+                  const dadosMes = mesesTrabalhados.get(mKey)!;
+                  const dur = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
+                  
+                  dadosMes.horas += dur;
+                  
+                  if (cObj && cObj.tipo !== 'overhead') {
+                      dadosMes.contratos.add(cObj.id);
+                  }
+                  
+                  const aKey = `${t.contract_id}-${t.activity}`;
+                  dadosMes.atividades.set(aKey, (dadosMes.atividades.get(aKey) || 0) + dur);
+              });
+
+              const ultimosMeses = Array.from(mesesTrabalhados.keys()).sort().slice(-6);
+              
+              let somaHoras = 0; let somaContratos = 0; let focos: number[] = [];
+              const chartData: any[] = [];
+
+              ultimosMeses.forEach(mKey => {
+                  const [yStr, mStr] = mKey.split('-');
+                  const labelMes = `${MESES_NOME[parseInt(mStr) - 1].substring(0,3)}/${yStr.substring(2)}`;
+                  const dados = mesesTrabalhados.get(mKey)!;
+                  
+                  somaHoras += dados.horas;
+                  somaContratos += dados.contratos.size;
+                  
+                  // Índice de Foco: (Top 2 atividades / Total Horas) * 100
+                  const ativs = Array.from(dados.atividades.values()).sort((a,b) => b - a);
+                  const top2 = (ativs[0] || 0) + (ativs[1] || 0);
+                  const focoMes = dados.horas > 0 ? (top2 / dados.horas) * 100 : 0;
+                  focos.push(focoMes);
+
+                  chartData.push({ name: labelMes, horas: Number(dados.horas.toFixed(1)) });
+              });
+
+              const qtd = ultimosMeses.length;
+              return { 
+                  ...c, 
+                  mediaHoras: qtd > 0 ? (somaHoras / qtd) : 0, 
+                  mediaContratos: qtd > 0 ? (somaContratos / qtd) : 0,
+                  mediaFoco: focos.length > 0 ? (focos.reduce((a,b)=>a+b,0) / focos.length) : 0,
+                  chartData 
+              };
+           }).sort((a,b) => b.mediaHoras - a.mediaHoras);
+
+           return (
+             <div className="space-y-6 animate-in fade-in-50">
+               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
+                 <div>
+                    <h2 className="text-xl font-bold tracking-tight text-primary flex items-center gap-2">
+                       <Activity className="w-5 h-5"/> Curva de Velocidade & Capacidade (Velocity)
+                       <span title="Análise puramente em horas efetivas do quão rápido o consultor produz historicamente e quantos clientes atende simultaneamente." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span>
+                    </h2>
+                    <p className="text-xs text-muted-foreground mt-1">Indicadores reais de mochila de engenharia: Horas Entregues, Carga Paralela e Foco Direcional.</p>
+                 </div>
+               </div>
+
+               <div className="grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                  {desempenho.map(c => (
+                     <Card key={c.id} className="shadow-sm overflow-hidden border-border/60 hover:border-primary/40 transition-colors flex flex-col group">
+                        <div className="p-4 flex items-start gap-4">
+                           {c.avatar_url ? (
+                              <img src={c.avatar_url} alt="Avatar" className="w-14 h-14 rounded-full border-2 border-primary/20 object-cover shadow-sm shrink-0" />
+                           ) : (
+                              <div className="w-14 h-14 rounded-full border-2 border-primary/20 bg-primary/10 flex items-center justify-center text-primary font-black shadow-sm shrink-0">
+                                 {c.nome.substring(0,2).toUpperCase()}
+                              </div>
+                           )}
+                           <div className="flex-1 min-w-0">
+                              <h3 className="font-bold text-foreground text-sm truncate">{c.nome}</h3>
+                              <Input 
+                                 placeholder="Definir especialidade..." 
+                                 defaultValue={c.especialidade || ''}
+                                 onBlur={async (e) => {
+                                    const val = e.target.value;
+                                    if(val !== c.especialidade) {
+                                       setConsultores(p => p.map(u => u.id === c.id ? { ...u, especialidade: val } : u));
+                                       await supabase.from('consultores').update({ especialidade: val }).eq('id', c.id);
+                                       await registrarLog("Especialidade Editada", `A especialidade de engenharia de ${c.nome} foi atualizada para "${val}".`);
+                                       toast.success("Especialidade salva!");
+                                    }
+                                 }}
+                                 className="h-7 text-[10px] mt-1 bg-muted/20 border-transparent hover:border-primary/30 focus-visible:ring-primary shadow-none"
+                              />
+                           </div>
+                        </div>
+
+                        <div className="px-5 pb-3 grid grid-cols-2 gap-4 border-b border-border/60">
+                           <div className="space-y-1">
+                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1"><Zap className="w-3 h-3 text-amber-500"/> Velocidade</span>
+                              <p className="text-xl font-black font-mono text-primary leading-none">{c.mediaHoras.toFixed(0)}<span className="text-sm text-muted-foreground font-semibold">h/mês</span></p>
+                           </div>
+                           <div className="space-y-1 text-right">
+                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1 justify-end"><Briefcase className="w-3 h-3 text-blue-500"/> Carga de Contratos</span>
+                              <p className="text-xl font-black font-mono text-foreground leading-none">{c.mediaContratos.toFixed(1)} <span className="text-xs font-semibold text-muted-foreground font-sans">simultâneos</span></p>
+                           </div>
+                        </div>
+
+                        <div className="px-5 py-3 border-b border-border/60 bg-muted/10 flex justify-between items-center">
+                           <div>
+                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1">
+                                 <Target className="w-3 h-3 text-green-500"/> Índice de Foco
+                                 <span title="Calculado dividindo a soma de horas das 2 disciplinas mais trabalhadas no mês pelo total de horas trabalhadas naquele ciclo. Ajuda a entender a dispersão de contexto da engenharia." className="cursor-help ml-1"><HelpCircle className="w-3 h-3 text-muted-foreground hover:text-green-500 transition-colors" /></span>
+                              </span>
+                              <p className="text-[9px] text-muted-foreground leading-tight max-w-37.5 mt-0.5">Grau de concentração nas Top 2 tarefas.</p>
+                           </div>
+                           <div className="text-right">
+                              <p className={`text-lg font-black font-mono ${c.mediaFoco >= 75 ? 'text-green-600' : c.mediaFoco >= 50 ? 'text-amber-500' : 'text-red-500'}`}>
+                                 {c.mediaFoco.toFixed(0)}%
+                              </p>
+                           </div>
+                        </div>
+
+                        <div className="h-28 w-full mt-auto relative">
+                           <div className="absolute inset-0 bg-linear-to-b from-transparent to-primary/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                           <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={c.chartData} margin={{ top: 10, right: 0, left: 0, bottom: 0 }}>
+                                 <defs>
+                                    <linearGradient id={`colorPerf-${c.id}`} x1="0" y1="0" x2="0" y2="1">
+                                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
+                                       <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                                    </linearGradient>
+                                 </defs>
+                                 <RechartsTooltip cursor={false} contentStyle={{borderRadius: '8px', fontSize: '12px'}} formatter={(v: number) => [`${v}h entregues`, 'Histórico de Horas']} />
+                                 <Area type="monotone" dataKey="horas" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill={`url(#colorPerf-${c.id})`} />
+                              </AreaChart>
+                           </ResponsiveContainer>
+                           {c.chartData.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground uppercase font-bold">Sem dados de horas finalizadas</div>}
+                        </div>
+                     </Card>
+                  ))}
+               </div>
+             </div>
+           )
+        })()}
+
+          {/* ========================================================= */}
           {/* 🌟 RADAR DE ALERTAS EXECUTIVOS — GOVERNANÇA (DIEGO & RUAN)  */}
           {/* ========================================================= */}
           {menuAtivo === 'alertas' && (() => {
@@ -4323,7 +4958,10 @@ export function AdminDashboard() {
                     <Badge className="bg-primary text-white font-mono uppercase text-[10px] mb-1.5">
                       GOVERNANÇA EXECUTIVA
                     </Badge>
-                    <h2 className="text-xl font-bold tracking-tight text-foreground">Radar de Alertas (Checkpoints 50% & 80%)</h2>
+                    <h2 className="text-xl font-bold tracking-tight text-foreground flex items-center gap-2">
+                      Radar de Alertas (Checkpoints 50% & 80%)
+                      <span title="Monitoramento automático que cruza o tempo do ciclo com o consumo de horas da equipe e da demanda." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-primary transition-colors" /></span>
+                    </h2>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       Monitoramento ativo para gestores: acompanhamento de marcos de saúde de Contratos, OSs e Equipe no ciclo.
                     </p>
@@ -4435,6 +5073,62 @@ export function AdminDashboard() {
               </div>
             );
           })()}
+
+        {/* MODAL: PASSAR A RÉGUA */}
+        <Dialog open={isReguaModalOpen} onOpenChange={setIsReguaModalOpen}>
+          <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col bg-card">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-amber-600"><Scissors className="w-5 h-5"/> Liquidar Saldos Remanescentes</DialogTitle>
+            </DialogHeader>
+            <div className="flex-1 overflow-y-auto space-y-4 py-4 pr-2">
+              {reguaData.length === 0 ? (
+                 <p className="text-center text-muted-foreground text-sm py-8 border border-dashed rounded-lg">Não há saldos pendentes (gordura) em meses anteriores.</p>
+              ) : (
+                 <>
+                   <p className="text-sm text-muted-foreground leading-relaxed">
+                     Foram encontradas <strong className="text-foreground">{reguaData.length} alocações passadas</strong> com horas não utilizadas. Ao confirmar, o orçamento dessas disciplinas no passado será igualado ao que foi efetivamente trabalhado, zerando a gordura remanescente.
+                   </p>
+                   <div className="border rounded-md overflow-hidden text-xs">
+                     <table className="w-full text-left">
+                       <thead className="bg-muted/50">
+                         <tr>
+                           <th className="p-2.5 font-semibold">Consultor</th>
+                           <th className="p-2.5 font-semibold">Contrato</th>
+                           <th className="p-2.5 font-semibold">Ciclo (Mês/Ano)</th>
+                           <th className="p-2.5 text-right font-semibold">Saldo Pendente</th>
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y max-h-72 overflow-y-auto">
+                         {reguaData.slice(0, 100).map((r, i) => (
+                           <tr key={i} className="hover:bg-muted/10">
+                             <td className="p-2.5 font-medium">{r.consultorNome}</td>
+                             <td className="p-2.5 font-mono">{r.contratoCodigo}</td>
+                             <td className="p-2.5 font-mono">{MESES_NOME[parseInt(r.mes)]}/{r.ano}</td>
+                             <td className="p-2.5 text-right font-bold text-amber-600">{r.saldoRemanescente.toFixed(1)}h</td>
+                           </tr>
+                         ))}
+                         {reguaData.length > 100 && (
+                           <tr><td colSpan={4} className="p-3 text-center text-muted-foreground italic bg-muted/5">E mais {reguaData.length - 100} registros...</td></tr>
+                         )}
+                       </tbody>
+                     </table>
+                   </div>
+                   <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl flex justify-between items-center mt-2 shadow-sm">
+                     <span className="font-bold text-amber-700">Total Global de Horas a Liquidar:</span>
+                     <span className="font-mono text-2xl font-black text-amber-700">{reguaData.reduce((sum, r) => sum + r.saldoRemanescente, 0).toFixed(1)}h</span>
+                   </div>
+                 </>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setIsReguaModalOpen(false)}>Cancelar</Button>
+              <Button onClick={liquidarPassado} disabled={liquidandoRegua || reguaData.length === 0} className="bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
+                {liquidandoRegua ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Check className="w-4 h-4 mr-2" />}
+                Confirmar e Passar a Régua
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* 🌟 PALETA FLUTUANTE DE DISCIPLINAS */}
         {isPaletteOpen && (

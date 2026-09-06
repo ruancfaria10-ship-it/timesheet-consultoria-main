@@ -1,7 +1,7 @@
 // src/routes/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo } from "react";
-import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2, RefreshCw, History } from "lucide-react";
+import { Moon, Sun, Timer, LogOut, Check, Calendar, BarChart3, ArrowLeft, Lock, Unlock, MessageSquare, Trash2, Pencil, Briefcase, FolderTree, Wrench, Download, Loader2, RefreshCw, History, HelpCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -322,9 +322,20 @@ function TimesheetPage() {
     }
   };
 
+  const daySelectionDate = useMemo(() => {
+    if (daySelection === 'ontem') {
+      const d = new Date(); d.setDate(d.getDate() - 1); return d;
+    }
+    return new Date();
+  }, [daySelection]);
+
   const contractsList = Array.from(new Map(
     allocations
-      .filter(a => a.contratos?.status_ativo && a.atividade !== 'Preço Fechado (Medição)')
+      .filter(a => {
+         if (!a.contratos?.status_ativo || a.atividade === 'Preço Fechado (Medição)') return false;
+         const expectedCycle = getCycleMonthYear(daySelectionDate, a.contratos.ciclo_inicio, a.contratos.ciclo_fim);
+         return a.mes === expectedCycle.month && a.ano === expectedCycle.year && a.horas_disponiveis > 0;
+      })
       .map(a => [
       a.contract_id, 
       { 
@@ -342,13 +353,6 @@ function TimesheetPage() {
   const currentContractType = currentContractObjFull?.tipo || 'horas';
   const isComOs = currentContractType === 'continuado_com_os';
 
-  const daySelectionDate = useMemo(() => {
-    if (daySelection === 'ontem') {
-      const d = new Date(); d.setDate(d.getDate() - 1); return d;
-    }
-    return new Date();
-  }, [daySelection]);
-
   const activeCycleForInput = useMemo(() => {
     const cIni = currentContractObjFull?.ciclo_inicio || 25;
     const cFim = currentContractObjFull?.ciclo_fim || 24;
@@ -357,9 +361,11 @@ function TimesheetPage() {
 
   const filteredOsList = useMemo(() => {
       return osList.filter(os => {
-        // Oculta a OS se o consultor estiver nela como Preço Fechado no mês atual
         const isFechado = allocations.some(a => a.os_id === os.id && a.atividade === 'Preço Fechado (Medição)' && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
-        return !isFechado;
+        if (isFechado) return false;
+        
+        const hasAllocation = allocations.some(a => a.os_id === os.id && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year && a.horas_disponiveis > 0);
+        return hasAllocation;
       });
     }, [osList, allocations, activeCycleForInput]);
 
@@ -1111,7 +1117,10 @@ function TimesheetPage() {
             
             <section className="space-y-3 min-w-0 w-full">
               <div className="flex items-center justify-between border-b pb-2 mb-4">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5"><History className="w-4 h-4" /> Painel de Histórico</h2>
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                  <History className="w-4 h-4" /> Painel de Histórico
+                  <span title="Seus apontamentos recentes de hoje e ontem. Para dias anteriores, acesse o Painel de Performance." className="cursor-help ml-1"><HelpCircle className="w-3.5 h-3.5 hover:text-primary transition-colors" /></span>
+                </h2>
                 <Badge variant="secondary" className="font-mono">{targetHistoryEntries.length} itens</Badge>
               </div>
               
@@ -1129,7 +1138,10 @@ function TimesheetPage() {
           <div className="space-y-6 animate-in fade-in-50 duration-200 pb-12">
             <div className="flex flex-col md:flex-row md:items-center justify-between border-b pb-4 gap-4">
               <div>
-                <h2 className="text-xl font-bold tracking-tight">Painel de Performance e Histórico</h2>
+                <h2 className="text-xl font-bold tracking-tight flex items-center gap-2">
+                  Painel de Performance e Histórico
+                  <span title="Consulte seu saldo de horas disponíveis, total gasto e registre/edite horas retroativas caso possua liberação do gestor." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-primary transition-colors" /></span>
+                </h2>
                 <p className="text-xs text-muted-foreground">Consulte seu andamento, saldos de contratos e preencha horas autorizadas.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1305,24 +1317,26 @@ function TimesheetPage() {
                           </p>
                         </div>
                         <div className="flex items-center gap-6 text-xs">
-                          <div className="text-right">
-                            <p className="text-[10px] text-muted-foreground uppercase">
-                              Orçado no {panelModoData === 'intervalo' ? 'Período' : 'Ciclo'}
-                            </p>
-                            <p className="font-mono font-bold text-foreground">
-                              {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
-                            </p>
-                          </div>
+                          {panelModoData === 'ciclo' && (
+                            <div className="text-right">
+                              <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
+                              <p className="font-mono font-bold text-foreground">
+                                {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
+                              </p>
+                            </div>
+                          )}
                           <div className="text-right">
                             <p className="text-[10px] text-muted-foreground uppercase">Consumido</p>
                             <p className="font-mono font-bold text-primary">{contract.totalGasto.toFixed(1)}{contract.hasFechado ? '%' : 'h'}</p>
                           </div>
-                          <div className="text-right">
-                            <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
-                            <p className={`font-mono font-bold ${contract.totalSaldo < 0 && !contract.hasIlimitado ? 'text-red-500' : 'text-green-600'}`}>
-                              {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
-                            </p>
-                          </div>
+                          {panelModoData === 'ciclo' && (
+                            <div className="text-right">
+                              <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
+                              <p className={`font-mono font-bold ${contract.totalSaldo < 0 && !contract.hasIlimitado ? 'text-red-500' : 'text-green-600'}`}>
+                                {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
+                              </p>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </AccordionTrigger>
@@ -1341,22 +1355,20 @@ function TimesheetPage() {
                               <thead>
                                 <tr className="text-muted-foreground/70">
                                   <th className="pb-2 font-medium">Disciplina / Escopo</th>
-                                  <th className="pb-2 font-medium text-right w-20">Orçado</th>
+                                  {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Orçado</th>}
                                   <th className="pb-2 font-medium text-right w-20">Consumido</th>
-                                  <th className="pb-2 font-medium text-right w-20">Saldo</th>
+                                  {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Saldo</th>}
                                 </tr>
                               </thead>
                               <tbody className="divide-y">
                                 {osGroup.atividades.map((ativ: any, idx: number) => {
-                                  const isFechado = ativ.nome === 'Preço Fechado (Medição)';
-                                  
                                   if (ativ.isFechado) {
                                      return (
                                         <tr key={idx} className="border-t border-green-500/20 bg-green-500/5 hover:bg-green-500/10">
                                           <td className="py-2.5 font-medium text-green-700 flex items-center gap-1.5 pl-2"><Check className="w-3.5 h-3.5"/> Medição de Avanço (%)</td>
-                                          <td className="py-2.5 text-right font-mono text-green-700">{ativ.orcado}%</td>
+                                          {panelModoData === 'ciclo' && <td className="py-2.5 text-right font-mono text-green-700">{ativ.orcado}%</td>}
                                           <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto}%</td>
-                                          <td className="py-2.5 text-right font-bold font-mono text-green-700">{ativ.saldo}%</td>
+                                          {panelModoData === 'ciclo' && <td className="py-2.5 text-right font-bold font-mono text-green-700">{ativ.saldo}%</td>}
                                         </tr>
                                      );
                                   }
@@ -1364,13 +1376,17 @@ function TimesheetPage() {
                                   return (
                                     <tr key={idx} className="border-t border-muted/50 hover:bg-muted/20">
                                       <td className="py-2.5 font-medium">{ativ.nome}</td>
-                                      <td className="py-2.5 text-right text-muted-foreground font-mono">
-                                        {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
-                                      </td>
+                                      {panelModoData === 'ciclo' && (
+                                        <td className="py-2.5 text-right text-muted-foreground font-mono">
+                                          {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
+                                        </td>
+                                      )}
                                       <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto.toFixed(1)}h</td>
-                                      <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
-                                        {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
-                                      </td>
+                                      {panelModoData === 'ciclo' && (
+                                        <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
+                                          {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
+                                        </td>
+                                      )}
                                     </tr>
                                   );
                                 })}

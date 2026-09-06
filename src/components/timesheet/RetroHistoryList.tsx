@@ -71,11 +71,15 @@ export function RetroHistoryList({
       <div key={e.id} className="flex items-center gap-3 rounded-lg border bg-card p-3 hover:border-primary/40 transition-colors w-full min-w-0">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground"><Clock className="h-4 w-4" /></div>
         <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-medium text-sm truncate max-w-[80%]">{e.contractName}</span>
-            <span className="text-xs text-muted-foreground truncate max-w-full">· {e.activity}</span>
+          <div className="flex flex-col">
+            <span className="font-medium text-sm truncate">{e.contractName}</span>
+            {e.os_id && (() => {
+               const os = osList.find(o => o.id === e.os_id);
+               return os ? <span className="text-[11px] font-bold text-amber-600 dark:text-amber-500 truncate mt-0.5">↳ OS: {os.codigo} {os.descricao ? `- ${os.descricao}` : ''}</span> : null;
+            })()}
+            <span className="text-xs text-muted-foreground mt-0.5">{e.activity}</span>
           </div>
-          <div className="text-xs text-muted-foreground mt-0.5">{formatTimeToHHMM(e.start)} — {e.end ? formatTimeToHHMM(e.end) : "agora"}</div>
+          <div className="text-xs text-muted-foreground mt-1">{formatTimeToHHMM(e.start)} — {e.end ? formatTimeToHHMM(e.end) : "agora"}</div>
           {e.notes && <div className="text-[11px] text-muted-foreground mt-1 italic bg-muted/40 p-1.5 rounded border border-muted/50 wrap-break-word whitespace-pre-wrap">“{e.notes}”</div>}
         </div>
         <div className="font-mono text-sm tabular-nums mr-2 shrink-0">{formatDuration(dur)}</div>

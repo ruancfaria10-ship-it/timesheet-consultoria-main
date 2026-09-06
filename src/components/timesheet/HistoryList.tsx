@@ -106,11 +106,15 @@ export function HistoryList({
           <Clock className="h-4 w-4" />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex flex-col">
             <span className="font-medium text-sm truncate">{e.contractName}</span>
-            <span className="text-xs text-muted-foreground">· {e.activity}</span>
+            {e.os_id && (() => {
+               const os = osList.find(o => o.id === e.os_id);
+               return os ? <span className="text-[11px] font-bold text-amber-600 dark:text-amber-500 truncate mt-0.5">↳ OS: {os.codigo} {os.descricao ? `- ${os.descricao}` : ''}</span> : null;
+            })()}
+            <span className="text-xs text-muted-foreground mt-0.5">{e.activity}</span>
           </div>
-          <div className="text-xs text-muted-foreground mt-0.5">
+          <div className="text-xs text-muted-foreground mt-1">
             {formatTimeToHHMM(e.start)} — {e.end ? formatTimeToHHMM(e.end) : "agora"}
           </div>
           {e.notes && <div className="text-xs text-muted-foreground mt-1 italic truncate">“{e.notes}”</div>}
