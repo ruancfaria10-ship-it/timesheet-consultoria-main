@@ -276,7 +276,8 @@ function TimesheetPage() {
     const { data, error } = await supabase
       .from('alocacoes')
       .select(`id, user_id, contract_id, os_id, atividade, horas_disponiveis, mes, ano, contratos ( codigo, nome, status_ativo, tipo, ciclo_inicio, ciclo_fim )`)
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .limit(20000);
 
     if (error) return console.error("Erro ao carregar alocações:", error);
     if (data) {
@@ -307,17 +308,20 @@ function TimesheetPage() {
       .from('timesheets')
       .select('*')
       .eq('user_id', userId)
-      .order('start_at', { ascending: false });
+      .order('start_at', { ascending: false })
+      .limit(20000);
 
     if (error) return toast.error("Erro ao puxar dados da nuvem.");
     if (data) {
-      const mapped: TimeEntry[] = data.map(row => ({
-        id: row.id, contractId: row.contract_id, contractName: row.contract_name,
-        activity: row.activity, notes: row.notes || undefined,
-        start: new Date(row.start_at).getTime(),
-        end: row.end_at ? new Date(row.end_at).getTime() : null,
-        edited: row.edited, os_id: row.os_id
-      }));
+      const mapped: TimeEntry[] = data.map(row => {
+        return {
+          id: row.id, contractId: row.contract_id, contractName: row.contract_name,
+          activity: row.activity, notes: row.notes || undefined,
+          start: new Date(row.start_at).getTime(),
+          end: row.end_at ? new Date(row.end_at).getTime() : null,
+          edited: row.edited, os_id: row.os_id
+        };
+      });
       setEntries(mapped);
     }
   };
@@ -329,11 +333,36 @@ function TimesheetPage() {
     return new Date();
   }, [daySelection]);
 
+  // 🌟 CORREÇÃO: Lista Global de Contratos para o Painel não ignorar meses passados
+  const allConsultorContracts = useMemo(() => {
+    const map = new Map();
+    allocations.forEach(a => {
+      if (a.contratos?.status_ativo) {
+        map.set(a.contract_id, {
+          id: a.contract_id, 
+          code: a.contratos.codigo, 
+          name: a.contratos.nome, 
+          tipo: a.contratos.tipo,
+          ciclo_inicio: a.contratos.ciclo_inicio,
+          ciclo_fim: a.contratos.ciclo_fim
+        });
+      }
+    });
+    return Array.from(map.values());
+  }, [allocations]);
+
+  // 🌟 DATA DE REFERÊNCIA UNIVERSAL: Usa o dia selecionado (hoje/ontem) ou a data do Painel Retroativo
+  const referenceDate = useMemo(() => {
+    return viewMode === "painel" ? new Date(`${panelDate}T12:00:00`) : daySelectionDate;
+  }, [viewMode, panelDate, daySelectionDate]);
+
   const contractsList = Array.from(new Map(
     allocations
       .filter(a => {
          if (!a.contratos?.status_ativo || a.atividade === 'Preço Fechado (Medição)') return false;
-         const expectedCycle = getCycleMonthYear(daySelectionDate, a.contratos.ciclo_inicio, a.contratos.ciclo_fim);
+         
+         // 🌟 CORREÇÃO: Usa a referenceDate para puxar os contratos ativos no mês correto!
+         const expectedCycle = getCycleMonthYear(referenceDate, a.contratos.ciclo_inicio, a.contratos.ciclo_fim);
          return a.mes === expectedCycle.month && a.ano === expectedCycle.year && a.horas_disponiveis > 0;
       })
       .map(a => [
@@ -356,8 +385,8 @@ function TimesheetPage() {
   const activeCycleForInput = useMemo(() => {
     const cIni = currentContractObjFull?.ciclo_inicio || 25;
     const cFim = currentContractObjFull?.ciclo_fim || 24;
-    return getCycleMonthYear(daySelectionDate, cIni, cFim);
-  }, [currentContractObjFull, daySelectionDate]);
+    return getCycleMonthYear(referenceDate, cIni, cFim);
+  }, [currentContractObjFull, referenceDate]);
 
   const filteredOsList = useMemo(() => {
       return osList.filter(os => {
@@ -425,7 +454,7 @@ function TimesheetPage() {
   }, [availableActivities]);
 
   const getContractCycleBounds = (cid: string) => {
-    const c = contractsList.find(x => x.id === cid);
+    const c = allConsultorContracts.find(x => x.id === cid);
     const cIni = c?.ciclo_inicio || 25;
     const cF = c?.ciclo_fim || 24;
     
@@ -453,16 +482,16 @@ function TimesheetPage() {
   const cycleBounds = useMemo(() => {
     const cIni = currentContractObjFull?.ciclo_inicio || 25;
     const cFim = currentContractObjFull?.ciclo_fim || 24;
-    const currentDay = daySelectionDate.getDate(); 
-    const currentMonth = daySelectionDate.getMonth(); 
-    const currentYear = daySelectionDate.getFullYear();
+    const currentDay = referenceDate.getDate(); 
+    const currentMonth = referenceDate.getMonth(); 
+    const currentYear = referenceDate.getFullYear();
     let start, end;
     if (cIni > cFim) {
       if (currentDay >= cIni) { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentMonth === 11 ? currentYear + 1 : currentYear, currentMonth === 11 ? 0 : currentMonth + 1, cFim, 23,59,59,999); } 
       else { start = new Date(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59,999); }
     } else { start = new Date(currentYear, currentMonth, cIni, 0,0,0); end = new Date(currentYear, currentMonth, cFim, 23,59,59,999); }
     return { start: start.getTime(), end: end.getTime() };
-  }, [currentContractObjFull, daySelectionDate]);
+  }, [currentContractObjFull, referenceDate]);
 
   const currentOsObj = osList.find(o => o.id === osId);
   const isIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
@@ -524,19 +553,19 @@ function TimesheetPage() {
   const horasTrabalhadasMesAtual = useMemo(() => {
     let sum = 0;
     entries.forEach(e => {
-       const cObj = contractsList.find(c => c.id === e.contractId);
+       const cObj = allConsultorContracts.find(c => c.id === e.contractId); // Usando a memória global
        if (cObj) {
            const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
            if (e.start >= cb.start && e.start <= cb.end) sum += ((e.end ?? Date.now()) - e.start) / 3600000;
        }
     });
     return sum;
-  }, [entries, panelMes, panelAno, contractsList]);
+  }, [entries, panelMes, panelAno, allConsultorContracts]);
 
   const resumoPorTipo = useMemo(() => {
     let fechado = 0; let horas = 0;
     entries.forEach(e => {
-      const cObj = contractsList.find(c => c.id === e.contractId);
+      const cObj = allConsultorContracts.find(c => c.id === e.contractId); // Usando a memória global
       if (cObj) {
         const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
         if (e.start >= cb.start && e.start <= cb.end) {
@@ -547,7 +576,7 @@ function TimesheetPage() {
       }
     });
     return { fechado: fechado / 3600000, horas: horas / 3600000 };
-  }, [entries, contractsList, panelMes, panelAno]);
+  }, [entries, allConsultorContracts, panelMes, panelAno]);
 
   const totalOrcadoMes = useMemo(() => {
     let totalOrcadoNesteCiclo = 0;
@@ -706,7 +735,7 @@ function TimesheetPage() {
 
       let hasData = false;
       entries.forEach(t => {
-        const cObj = contractsList.find(c => c.id === t.contractId);
+        const cObj = allConsultorContracts.find(c => c.id === t.contractId); // Usando a memória global
         if (cObj) {
            const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
            if (t.start >= cb.start && t.start <= cb.end) {
@@ -756,30 +785,78 @@ function TimesheetPage() {
 
   const handleEditEntry = async (id: string, newStart: number, newEnd: number, newNotes: string, newContractId?: string, newOsId?: string | null, newActivity?: string) => {
     const entryToEdit = entries.find(e => e.id === id);
-    if (entryToEdit) {
-       const activeCb = getContractCycleBounds(entryToEdit.contractId);
-       const pastCycleStart = new Date(activeCb.start);
-       const m = pastCycleStart.getMonth();
-       pastCycleStart.setMonth(m === 0 ? 11 : m - 1);
-       if (m === 0) pastCycleStart.setFullYear(pastCycleStart.getFullYear() - 1);
+    if (!entryToEdit) return;
+    
+    const activeCb = getContractCycleBounds(entryToEdit.contractId);
+    const pastCycleStart = new Date(activeCb.start);
+    const mo = pastCycleStart.getMonth();
+    pastCycleStart.setMonth(mo === 0 ? 11 : mo - 1);
+    if (mo === 0) pastCycleStart.setFullYear(pastCycleStart.getFullYear() - 1);
 
-       const now = new Date();
-       const isDia25 = now.getDate() === 25;
+    const now = new Date();
+    const isDia25 = now.getDate() === 25;
 
-       if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
-           if (!(isDia25 && entryToEdit.start >= pastCycleStart.getTime() && newStart >= pastCycleStart.getTime())) {
-               return toast.error("🚫 Régua Passada! Edição bloqueada pois o ciclo passado já foi liquidado.");
-           }
-       }
+    if (entryToEdit.start < activeCb.start || newStart < activeCb.start) {
+        if (!(isDia25 && entryToEdit.start >= pastCycleStart.getTime() && newStart >= pastCycleStart.getTime())) {
+            return toast.error("🚫 Régua Passada! Edição bloqueada pois o ciclo passado já foi liquidado.");
+        }
+    }
 
-       const entryDateStr = getLocalISODate(new Date(entryToEdit.start));
-       if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
-          return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
-       }
+    const entryDateStr = getLocalISODate(new Date(entryToEdit.start));
+    if (entryDateStr !== getTodayStr() && entryDateStr !== getYesterdayStr() && !authorizedDates.includes(entryDateStr)) {
+      return toast.error("Sem autorização para alterar datas passadas. Fale com seu gestor.");
     }
 
     if (newEnd <= newStart) return toast.error("A hora de fim deve ser posterior à hora de início.");
     if (newNotes.trim().length === 0) return toast.error("A observação é obrigatória.");
+
+    // 🌟 TRAVA DE ORÇAMENTO PARA EDIÇÃO DO CONSULTOR
+    const targetContractId = newContractId || entryToEdit.contractId;
+    const targetOsId = newOsId !== undefined ? newOsId : entryToEdit.os_id;
+    const targetContractType = contractsList.find(c => c.id === targetContractId)?.tipo || 'horas';
+    const isTargetComOs = targetContractType === 'continuado_com_os';
+    const targetOsObj = osList.find(o => o.id === targetOsId);
+    const isTargetIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(targetContractType) || targetOsObj?.codigo === '🛠️ Pequenos Suportes';
+
+    if (!isTargetIlimitado) {
+       const cObj = contractsList.find(c => c.id === targetContractId);
+       const entryCycle = getCycleMonthYear(new Date(newStart), cObj?.ciclo_inicio || 25, cObj?.ciclo_fim || 24);
+       
+       const targetAllocations = allocations.filter(a => 
+           a.contract_id === targetContractId && 
+           a.mes === entryCycle.month && 
+           a.ano === entryCycle.year && 
+           (!isTargetComOs || a.os_id === targetOsId)
+       );
+       const budgetMs = targetAllocations.reduce((sum, a) => sum + (a.horas_disponiveis * 3600 * 1000), 0);
+
+       const y = parseInt(entryCycle.year);
+       const m = parseInt(entryCycle.month);
+       const cIni = cObj?.ciclo_inicio || 25;
+       const cF = cObj?.ciclo_fim || 24;
+       let startB, endB;
+       if (cIni > cF) {
+           startB = new Date(m === 0 ? y - 1 : y, m === 0 ? 11 : m - 1, cIni, 0,0,0).getTime();
+           endB = new Date(y, m, cF, 23,59,59,999).getTime();
+       } else {
+           startB = new Date(y, m, cIni, 0,0,0).getTime();
+           endB = new Date(y, m, cF, 23,59,59,999).getTime();
+       }
+
+       let usedMs = entries.filter(e => e.contractId === targetContractId && (!isTargetComOs || e.os_id === targetOsId) && e.start >= startB && e.start <= endB).reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0);
+       
+       let oldDur = 0;
+       if (entryToEdit.contractId === targetContractId && (!isTargetComOs || entryToEdit.os_id === targetOsId) && entryToEdit.start >= startB && entryToEdit.start <= endB) {
+           oldDur = (entryToEdit.end ?? Date.now()) - entryToEdit.start;
+       }
+
+       const newDur = newEnd - newStart;
+       if (budgetMs > 0 && ((usedMs - oldDur) + newDur > budgetMs)) {
+           const remaining = Math.max(0, budgetMs - (usedMs - oldDur));
+           const rotuloTrava = isTargetComOs ? "na Demanda (OS)" : "no contrato";
+           return toast.error(`⚠️ Saldo insuficiente ${rotuloTrava}! Restam apenas ${(remaining / 3600000).toFixed(1)}h livres no ciclo para edição.`);
+       }
+    }
 
     setEntries((p) => p.map((e) => {
       if (e.id === id) {

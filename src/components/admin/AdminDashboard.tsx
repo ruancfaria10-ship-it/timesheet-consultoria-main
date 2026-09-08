@@ -400,6 +400,7 @@ export function AdminDashboard() {
   // Estados e Lógica do "Passar a Régua"
   const [isReguaModalOpen, setIsReguaModalOpen] = useState(false);
   const [reguaData, setReguaData] = useState<any[]>([]);
+  const [reguaAjustesData, setReguaAjustesData] = useState<any[]>([]); // <-- NOVO ESTADO AQUI
   const [liquidandoRegua, setLiquidandoRegua] = useState(false);
 
   const calcularSaldosPassados = () => {
@@ -408,7 +409,8 @@ export function AdminDashboard() {
     let currentMonth = now.getMonth();
     let currentYear = now.getFullYear();
 
-    const gorduras: any[] = [];
+    const resumoMap = new Map(); 
+    const ajustes: any[] = []; 
 
     allAlocacoes.forEach(aloc => {
        // Ignora Preço Fechado e Overhead / Pequenos Suportes dinâmicos
@@ -434,7 +436,15 @@ export function AdminDashboard() {
 
        if (isPast) {
            const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, aloc.mes, aloc.ano);
-           let times = allTimesheets.filter(t => t.user_id === aloc.user_id && t.contract_id === aloc.contract_id && t.activity === aloc.atividade && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+           
+           // Gasto específico DESSA disciplina
+           let times = allTimesheets.filter(t => 
+               t.user_id === aloc.user_id && 
+               t.contract_id === aloc.contract_id && 
+               (t.activity || '').trim().toLowerCase() === (aloc.atividade || '').trim().toLowerCase() && 
+               new Date(t.start_at).getTime() >= cb.start && 
+               new Date(t.start_at).getTime() <= cb.end
+           );
            
            if (cObj.tipo === 'continuado_com_os' && aloc.os_id) {
                times = times.filter(t => t.os_id === aloc.os_id);
@@ -442,34 +452,59 @@ export function AdminDashboard() {
 
            const gasto = times.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
 
-           if (aloc.horas_disponiveis > gasto) {
-               gorduras.push({
+           // Se houver QUALQUER diferença (sobra ou estouro), entra nos Ajustes
+           if (Math.abs(aloc.horas_disponiveis - gasto) > 0.01) {
+               ajustes.push({
                    alocId: aloc.id,
                    consultorNome: consultores.find(c => c.id === aloc.user_id)?.nome || 'Desconhecido',
                    contratoCodigo: cObj.codigo,
+                   atividade: aloc.atividade,
                    mes: aloc.mes,
                    ano: aloc.ano,
                    orcado: aloc.horas_disponiveis,
                    gasto: gasto,
-                   saldoRemanescente: aloc.horas_disponiveis - gasto
+                   diferenca: aloc.horas_disponiveis - gasto
                });
+
+               // Agrupa os valores para o menu de resumo superior (Visão do Contrato)
+               const key = `${aloc.user_id}_${aloc.contract_id}_${aloc.os_id || 'null'}_${aloc.mes}_${aloc.ano}`;
+               if (!resumoMap.has(key)) {
+                   resumoMap.set(key, {
+                       consultorNome: consultores.find(c => c.id === aloc.user_id)?.nome || 'Desconhecido',
+                       contratoCodigo: cObj.codigo,
+                       mes: aloc.mes,
+                       ano: aloc.ano,
+                       orcadoTotal: 0,
+                       gastoTotal: 0
+                   });
+               }
+               const group = resumoMap.get(key);
+               group.orcadoTotal += aloc.horas_disponiveis;
+               group.gastoTotal += gasto;
            }
        }
     });
 
-    setReguaData(gorduras);
+    // O menu de Resumo continua mostrando apenas os contratos com saldo global sobrando
+    const resumoFinal = Array.from(resumoMap.values())
+       .map(g => ({ ...g, saldoRemanescente: g.orcadoTotal - g.gastoTotal }))
+       .filter(g => g.saldoRemanescente > 0.01);
+
+    setReguaData(resumoFinal);
+    setReguaAjustesData(ajustes);
     setIsReguaModalOpen(true);
   };
 
   const liquidarPassado = async () => {
      setLiquidandoRegua(true);
      try {
-        const promises = reguaData.map(item =>
+        // Agora iteramos sobre TODAS as disciplinas divergentes (reguaAjustesData) para igualar no Supabase
+        const promises = reguaAjustesData.map(item =>
            supabase.from('alocacoes').update({ horas_disponiveis: item.gasto }).eq('id', item.alocId)
         );
         await Promise.all(promises);
-        await registrarLog("Saldos Liquidados", `Foram liquidadas e zeradas ${reguaData.length} alocações ociosas do passado na base de dados.`);
-        toast.success(`${reguaData.length} alocações passadas foram liquidadas com sucesso!`);
+        await registrarLog("Saldos Liquidados e Ajustados", `Foram equalizadas ${reguaAjustesData.length} alocações no banco de dados (Orçado = Gasto).`);
+        toast.success(`${reguaAjustesData.length} alocações foram ajustadas com sucesso!`);
         setIsReguaModalOpen(false);
         await carregarTudoParaDash();
      } catch (error) {
@@ -1150,18 +1185,25 @@ export function AdminDashboard() {
     if (menuAtivo === 'gestao') carregarAutorizacoes();
   }, [menuAtivo])
 
-  async function carregarTudoParaDash() {
-    setLoadingDash(true)
-    const { data: times } = await supabase.from('timesheets').select('*').not('end_at', 'is', null)
-    const { data: orcs } = await supabase.from('alocacoes').select('*')
-    const { data: meds } = await supabase.from('medicoes').select('*')
-    // 🌟 NOVO: Carrega as linhas de base para cálculo de Teto Vida Útil
-    const { data: lb } = await supabase.from('linha_base').select('*')
-    const { data: lbi } = await supabase.from('linha_base_items').select('*')
+  async function carregarTudoParaDash(silent = false) {
+    if (!silent) setLoadingDash(true);
+    try {
+      const { data: times } = await supabase.from('timesheets').select('*').order('start_at', { ascending: false }).limit(20000);
+      const { data: orcs } = await supabase.from('alocacoes').select('*').limit(20000);
+      const { data: meds } = await supabase.from('medicoes').select('*').limit(20000);
+      const { data: lb } = await supabase.from('linha_base').select('*').limit(20000);
+      const { data: lbi } = await supabase.from('linha_base_items').select('*').limit(20000);
 
-    setAllTimesheets(times || []); setAllAlocacoes(orcs || []); setAllMedicoes(meds || [])
-    setAllLinhasBase(lb || []); setAllLinhaBaseItems(lbi || []);
-    setLoadingDash(false)
+      setAllTimesheets(times || []); 
+      setAllAlocacoes(orcs || []); 
+      setAllMedicoes(meds || []);
+      setAllLinhasBase(lb || []); 
+      setAllLinhaBaseItems(lbi || []);
+    } catch (e) {
+      console.error("Erro ao carregar dados em massa:", e);
+    } finally {
+      if (!silent) setLoadingDash(false);
+    }
   }
 
   // 🌟 MOTOR INTELIGENTE: Calcula o Teto da Linha de Base (última versão) do Contrato ou do Consultor
@@ -1308,9 +1350,13 @@ export function AdminDashboard() {
       const buffer = e.target?.result as ArrayBuffer;
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(buffer);
-      const sheet = workbook.worksheets[0]; // Lê estritamente a primeira aba
+      const sheet = workbook.worksheets[0]; 
       const toInsertTimesheets: any[] = [];
       const pastAllocationsToInsert = new Map<string, any>();
+      
+      // 🌟 NOVO: Mapa para injetar as atividades na Linha de Base automaticamente
+      const baseUpdatesToInject = new Map<string, Set<string>>();
+      
       let errors = 0;
 
       sheet.eachRow((row, rowNumber) => {
@@ -1324,13 +1370,17 @@ export function AdminDashboard() {
           return cell.value ? cell.value.toString().trim() : '';
         };
 
-        // 🌟 NOVO PADRÃO DE COLUNAS ALINHADO COM A PLANILHA PADRÃO: 
-        // 1.Cons | 2.Data | 3.Cód | 4.Nome | 5.OS | 6.Disciplina | 7.Entrada | 8.Saída | 9.Obs
         const consultorNome = String(getVal(1));
         const dataVal = getVal(2);
         const contratoCodigo = String(getVal(3)).toUpperCase();
         const osCodigo = String(getVal(5)).toUpperCase();
-        const atividadeStr = String(getVal(6)) || 'Sem atividade específica';
+        
+        // 🌟 CORREÇÃO: Respeita fielmente a string do Excel para bater 100% com a Linha de Base
+        let atividadeStr = String(getVal(6)).trim();
+        if (!atividadeStr) {
+            atividadeStr = 'Sem atividade específica';
+        }
+        
         const inicioVal = getVal(7);
         const fimVal = getVal(8);
         const observacao = String(getVal(9));
@@ -1341,7 +1391,6 @@ export function AdminDashboard() {
 
         const parseTime = (val: any) => {
           if (val instanceof Date) return val.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-          // O Excel às vezes salva hora como fração do dia (ex: 0.5 = 12:00)
           if (typeof val === 'number') {
             const totalMs = Math.round(val * 24 * 60 * 60 * 1000);
             const h = Math.floor(totalMs / 3600000);
@@ -1359,7 +1408,7 @@ export function AdminDashboard() {
 
         let osId = null;
         if (osCodigo && osCodigo !== '-' && contrato) {
-          const os = osList.find(o => o.codigo === osCodigo && o.contract_id === contrato.id);
+          const os = osList.find(o => o.codigo.toUpperCase() === osCodigo && o.contract_id === contrato.id);
           if (os) osId = os.id;
         }
 
@@ -1382,7 +1431,6 @@ export function AdminDashboard() {
             notes: observacao, start_at: startDt.toISOString(), end_at: endDt.toISOString(), edited: true
           });
 
-          // 🌟 LÓGICA DE ALOCAÇÃO DE PASSADO (ITEM 3)
           const now = new Date();
           const currentDay = now.getDate();
           let currentM = now.getMonth();
@@ -1414,6 +1462,13 @@ export function AdminDashboard() {
              }
           }
 
+          // 🌟 PREPARA A INJEÇÃO NA LINHA DE BASE
+          const baseKey = `${consultor.id}_${contrato.id}_${osId || 'null'}`;
+          if (!baseUpdatesToInject.has(baseKey)) {
+              baseUpdatesToInject.set(baseKey, new Set());
+          }
+          baseUpdatesToInject.get(baseKey)!.add(atividadeStr);
+
         } catch (err) { errors++; }
       });
 
@@ -1424,8 +1479,51 @@ export function AdminDashboard() {
         
         const allocs = Array.from(pastAllocationsToInsert.values());
         if (allocs.length > 0 && !err1) {
-            // Em caso de múltiplas importações, insere a alocação fantasma para o passado bater o saldo
             await supabase.from('alocacoes').insert(allocs);
+        }
+
+        // 🌟 EXECUTA A INJEÇÃO NA LINHA DE BASE APÓS INSERIR OS DADOS
+        if (!err1 && baseUpdatesToInject.size > 0) {
+            for (const [key, activities] of baseUpdatesToInject.entries()) {
+                const [uId, cId, oIdStr] = key.split('_');
+                const oId = oIdStr === 'null' ? null : oIdStr;
+                
+                let query = supabase.from('linha_base').select('id').eq('contract_id', cId).order('versao', { ascending: false }).limit(1);
+                if (oId) query = query.eq('os_id', oId);
+                else query = query.is('os_id', null);
+                
+                const { data: bases } = await query;
+                if (bases && bases.length > 0) {
+                    const baseId = bases[0].id;
+                    const { data: items } = await supabase.from('linha_base_items').select('id, atividades').eq('base_id', baseId).eq('user_id', uId);
+                    
+                    if (items && items.length > 0) {
+                        const currentAtivs = items[0].atividades || [];
+                        let modified = false;
+                        const newAtivs = [...currentAtivs];
+                        
+                        activities.forEach(act => {
+                            if (!newAtivs.includes(act)) {
+                                newAtivs.push(act);
+                                modified = true;
+                            }
+                        });
+                        
+                        if (modified) {
+                            await supabase.from('linha_base_items').update({ atividades: newAtivs }).eq('id', items[0].id);
+                        }
+                    } else {
+                        // Se o consultor não estava na matriz, insere ele
+                        await supabase.from('linha_base_items').insert([{
+                            base_id: baseId,
+                            user_id: uId,
+                            horas_teto: 0,
+                            tipo_pagamento: 'horas',
+                            atividades: Array.from(activities)
+                        }]);
+                    }
+                }
+            }
         }
 
         if (!err1) { toast.success(`✅ ${toInsertTimesheets.length} apontamentos importados!\n❌ ${errors} linhas com erro.`); carregarTudoParaDash(); }
@@ -1492,41 +1590,61 @@ export function AdminDashboard() {
     const startMs = new Date(`${gestaoData}T${gestaoInicio}:00`).getTime();
     let endMs = new Date(`${gestaoData}T${gestaoFim}:00`).getTime();
     
-    // Se a hora final for 00:00 ou menor que a inicial, joga pro dia seguinte!
     if(endMs <= startMs) {
-      endMs += 24 * 60 * 60 * 1000; // Soma 24 horas em milissegundos
+      endMs += 24 * 60 * 60 * 1000; 
     }
 
     const contObj = contratos.find(c => c.id === gestaoContrato);
     if (contObj?.tipo === 'continuado_com_os' && !gestaoOs) return alert("Selecione uma Ordem de Serviço (OS) para este contrato.");
+
+    const durH = (endMs - startMs) / 3600000;
+    
+    // 🌟 TRAVA CONTÁBIL DO ADMIN
+    if (gestaoSaldos && !gestaoSaldos.isSemOs) {
+       if (gestaoSaldos.gastoGlobal + durH > gestaoSaldos.orcadoGlobal) {
+          return alert(`❌ Limite do Contrato Excedido!\n\nOrçado no Ciclo: ${gestaoSaldos.orcadoGlobal.toFixed(1)}h\nJá Consumido: ${gestaoSaldos.gastoGlobal.toFixed(1)}h\nTentativa: ${durH.toFixed(1)}h\nSaldo Livre: ${(gestaoSaldos.orcadoGlobal - gestaoSaldos.gastoGlobal).toFixed(1)}h`);
+       }
+    }
 
     const payload = {
       user_id: gestaoConsultor, contract_id: gestaoContrato, contract_name: `${contObj?.codigo} — ${contObj?.nome}`, 
       activity: gestaoAtividade, notes: gestaoNotes, start_at: new Date(startMs).toISOString(), end_at: new Date(endMs).toISOString(), edited: true,
       os_id: contObj?.tipo === 'continuado_com_os' ? gestaoOs : null
     };
+    
     setSalvando(true);
     try {
+      const cNome = consultores.find(c => c.id === gestaoConsultor)?.nome || 'Consultor';
+      const cContrato = contObj?.codigo || 'Desconhecido';
+      const dur = durH.toFixed(1);
+
       if(gestaoEditandoId) {
         await supabase.from('timesheets').update(payload).eq('id', gestaoEditandoId);
-        await registrarLog("Apontamento Forçado (Edição)", `O apontamento do consultor no contrato ${contObj?.codigo} foi editado de forma imperativa (Admin).`);
+        await registrarLog("Edição Forçada (Apontamento)", `O gestor alterou o apontamento de "${cNome.split(' ')[0]}" no contrato ${cContrato}. Nova Disciplina: ${gestaoAtividade}. Novo Horário: Dia ${gestaoData.split('-').reverse().join('/')}, das ${gestaoInicio} às ${gestaoFim} (${dur}h). OBS: ${gestaoNotes}`);
         toast.success("Atualizado com sucesso!"); setGestaoEditandoId(null);
       } else {
         await supabase.from('timesheets').insert([{ ...payload, id: crypto.randomUUID() }]);
-        await registrarLog("Apontamento Forçado (Criação)", `Foi inserido um apontamento manualmente via Gestão para o contrato ${contObj?.codigo}.`);
+        await registrarLog("Criação Forçada (Apontamento)", `O gestor lançou ${dur}h para "${cNome.split(' ')[0]}" no contrato ${cContrato} (Disciplina: ${gestaoAtividade}). Horário: Dia ${gestaoData.split('-').reverse().join('/')}, das ${gestaoInicio} às ${gestaoFim}. OBS: ${gestaoNotes}`);
         toast.success("Criado com sucesso!");
       }
-      setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); setGestaoOs(''); await carregarTudoParaDash();
+      
+      setGestaoInicio('08:00'); setGestaoFim('12:00'); setGestaoNotes(''); setGestaoOs(''); setGestaoData(getLocalISODate(new Date())); setGestaoConsultor(''); setGestaoContrato('');
+      await carregarTudoParaDash(true);
       if (isModalEdicaoOpen) setIsModalEdicaoOpen(false);
     } catch (e) { alert("Erro ao processar."); } finally { setSalvando(false); }
   }
 
   async function excluirApontamentoAdmin(id: string) {
     if(!window.confirm("Atenção: Deseja apagar este apontamento do sistema?")) return;
+    const t = allTimesheets.find(x => x.id === id);
     await supabase.from('timesheets').delete().eq('id', id); 
-    await registrarLog("Apontamento Excluído", `Um apontamento foi apagado permanentemente de forma imperativa (Painel do Gestor).`);
-    await carregarTudoParaDash();
-  }
+    if (t) {
+            const cNome = consultores.find(c => c.id === t.user_id)?.nome || 'Consultor';
+            const cContrato = contratos.find(c => c.id === t.contract_id)?.codigo || 'Desconhecido';
+            await registrarLog("Apontamento Excluído", `Admin excluiu apontamento de ${cNome} no contrato ${cContrato} do dia ${new Date(t.start_at).toLocaleDateString('pt-BR')} (${t.activity}).`);
+        }
+        await carregarTudoParaDash(true);
+      }
 
   function iniciarEdicaoApontamento(t: TimesheetLog) {
     setMenuAtivo('gestao');
@@ -1697,7 +1815,7 @@ export function AdminDashboard() {
       saldoGlobal: Number((orcadoGlobal - gastoGlobal).toFixed(2)),
       percentualGlobal: orcadoGlobal > 0 ? ((gastoGlobal / orcadoGlobal) * 100).toFixed(1) : '0', pieData
     }
-  }, [allTimesheets, allAlocacoes, dashMes, dashAno, dashContratosSelecionados, dashOs, dashConsultor, consultores, dashVisaoTipos, contratosVisao, contratos, osList])
+  }, [allTimesheets, allAlocacoes, dashMes, dashAno, dashContratosSelecionados, dashOs, dashConsultor, consultores, dashVisaoTipos, contratosVisao, contratos, osList, modoDataFiltro, dataInicioCustom, dataFimCustom])
 
   const exportarPainelConsultor = async (tipo: 'detalhada' | 'consolidada') => {
     const cObj = consultores.find(c => c.id === resConsId);
@@ -1891,7 +2009,7 @@ export function AdminDashboard() {
     }).filter(c => c.valorGrafico > 0).sort((a,b) => b.valorGrafico - a.valorGrafico)
 
     return { consultoresPagamento }
-  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, consultores, fatVisaoTipos, fatContratosVisao, contratos])
+  }, [allTimesheets, fatMes, fatAno, fatContratosSelecionados, consultores, fatVisaoTipos, fatContratosVisao, contratos, modoDataFiltro, dataInicioCustom, dataFimCustom])
 
   const radarAlertas = useMemo(() => {
     const ociosos: Array<{id: string, nome: string, trabalhadas: string, meta: number, percentual: string}> = []; 
@@ -5076,55 +5194,100 @@ export function AdminDashboard() {
 
         {/* MODAL: PASSAR A RÉGUA */}
         <Dialog open={isReguaModalOpen} onOpenChange={setIsReguaModalOpen}>
-          <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col bg-card">
+          <DialogContent className="max-w-4xl max-h-[85vh] flex flex-col bg-card">
             <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 text-amber-600"><Scissors className="w-5 h-5"/> Liquidar Saldos Remanescentes</DialogTitle>
+              <DialogTitle className="flex items-center gap-2 text-amber-600"><Scissors className="w-5 h-5"/> Liquidar e Igualar Saldos Remanescentes</DialogTitle>
             </DialogHeader>
-            <div className="flex-1 overflow-y-auto space-y-4 py-4 pr-2">
-              {reguaData.length === 0 ? (
-                 <p className="text-center text-muted-foreground text-sm py-8 border border-dashed rounded-lg">Não há saldos pendentes (gordura) em meses anteriores.</p>
-              ) : (
-                 <>
-                   <p className="text-sm text-muted-foreground leading-relaxed">
-                     Foram encontradas <strong className="text-foreground">{reguaData.length} alocações passadas</strong> com horas não utilizadas. Ao confirmar, o orçamento dessas disciplinas no passado será igualado ao que foi efetivamente trabalhado, zerando a gordura remanescente.
-                   </p>
-                   <div className="border rounded-md overflow-hidden text-xs">
+            <div className="flex-1 overflow-y-auto space-y-6 py-4 pr-2">
+              
+              {/* BLOCO 1: RESUMO DOS CONTRATOS */}
+              <div>
+                {reguaData.length === 0 ? (
+                   <p className="text-center text-muted-foreground text-sm py-4 border border-dashed rounded-lg">Não há contratos com saldo global pendente em meses anteriores.</p>
+                ) : (
+                   <>
+                     <p className="text-sm text-muted-foreground leading-relaxed mb-3">
+                       Foram encontrados <strong className="text-foreground">{reguaData.length} agrupamentos (Consultor x Contrato)</strong> no passado com saldo global positivo (gordura).
+                     </p>
+                     <div className="border rounded-md overflow-hidden text-xs">
+                       <table className="w-full text-left">
+                         <thead className="bg-muted/50">
+                           <tr>
+                             <th className="p-2.5 font-semibold">Consultor</th>
+                             <th className="p-2.5 font-semibold">Contrato</th>
+                             <th className="p-2.5 font-semibold">Ciclo (Mês/Ano)</th>
+                             <th className="p-2.5 text-right font-semibold">Saldo Pendente</th>
+                           </tr>
+                         </thead>
+                         <tbody className="divide-y max-h-40 overflow-y-auto">
+                           {reguaData.map((r, i) => (
+                             <tr key={i} className="hover:bg-muted/10">
+                               <td className="p-2.5 font-medium">{r.consultorNome}</td>
+                               <td className="p-2.5 font-mono text-primary">{r.contratoCodigo}</td>
+                               <td className="p-2.5 font-mono">{MESES_NOME[parseInt(r.mes)]}/{r.ano}</td>
+                               <td className="p-2.5 text-right font-bold text-amber-600">{r.saldoRemanescente.toFixed(1)}h</td>
+                             </tr>
+                           ))}
+                         </tbody>
+                       </table>
+                     </div>
+                     <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-xl flex justify-between items-center mt-2 shadow-sm">
+                       <span className="font-bold text-amber-700">Gordura Global a Liquidar:</span>
+                       <span className="font-mono text-xl font-black text-amber-700">{reguaData.reduce((sum, r) => sum + r.saldoRemanescente, 0).toFixed(1)}h</span>
+                     </div>
+                   </>
+                )}
+              </div>
+
+              {/* BLOCO 2: AJUSTE GRANULAR DE ATIVIDADES */}
+              {reguaAjustesData.length > 0 && (
+                 <div className="pt-4 border-t">
+                    <h4 className="font-bold text-sm text-foreground mb-2 flex items-center gap-2"><RefreshCw className="w-4 h-4 text-blue-600"/> Detalhamento: Ajustes por Disciplina</h4>
+                    <p className="text-xs text-muted-foreground mb-3">
+                       As <strong>{reguaAjustesData.length} disciplinas</strong> abaixo terão suas horas orçadas igualadas ao gasto real no banco de dados. Isso corrigirá sobras (zerando saldo) e compensará déficits (onde o gasto foi maior que o orçado).
+                    </p>
+                    <div className="border rounded-md overflow-hidden text-xs">
                      <table className="w-full text-left">
                        <thead className="bg-muted/50">
                          <tr>
                            <th className="p-2.5 font-semibold">Consultor</th>
-                           <th className="p-2.5 font-semibold">Contrato</th>
-                           <th className="p-2.5 font-semibold">Ciclo (Mês/Ano)</th>
-                           <th className="p-2.5 text-right font-semibold">Saldo Pendente</th>
+                           <th className="p-2.5 font-semibold">Contrato / Disciplina</th>
+                           <th className="p-2.5 text-right font-semibold">Orçado Atual</th>
+                           <th className="p-2.5 text-right font-semibold">Gasto Real</th>
+                           <th className="p-2.5 text-center font-semibold w-32">Ação do Sistema</th>
                          </tr>
                        </thead>
-                       <tbody className="divide-y max-h-72 overflow-y-auto">
-                         {reguaData.slice(0, 100).map((r, i) => (
+                       <tbody className="divide-y max-h-52 overflow-y-auto">
+                         {reguaAjustesData.map((r, i) => (
                            <tr key={i} className="hover:bg-muted/10">
                              <td className="p-2.5 font-medium">{r.consultorNome}</td>
-                             <td className="p-2.5 font-mono">{r.contratoCodigo}</td>
-                             <td className="p-2.5 font-mono">{MESES_NOME[parseInt(r.mes)]}/{r.ano}</td>
-                             <td className="p-2.5 text-right font-bold text-amber-600">{r.saldoRemanescente.toFixed(1)}h</td>
+                             <td className="p-2.5 flex flex-col">
+                               <span className="font-mono font-bold text-primary">{r.contratoCodigo}</span>
+                               <span className="text-muted-foreground truncate max-w-64" title={r.atividade}>{r.atividade}</span>
+                             </td>
+                             <td className="p-2.5 text-right font-mono">{r.orcado.toFixed(1)}h</td>
+                             <td className="p-2.5 text-right font-mono text-foreground font-bold">{r.gasto.toFixed(1)}h</td>
+                             <td className="p-2.5 text-center">
+                                {r.diferenca > 0 ? (
+                                   <Badge variant="outline" className="text-amber-600 bg-amber-500/10 border-amber-500/30 whitespace-nowrap">Liquida -{r.diferenca.toFixed(1)}h</Badge>
+                                ) : (
+                                   <Badge variant="outline" className="text-blue-600 bg-blue-500/10 border-blue-500/30 whitespace-nowrap">Cobre +{Math.abs(r.diferenca).toFixed(1)}h</Badge>
+                                )}
+                             </td>
                            </tr>
                          ))}
-                         {reguaData.length > 100 && (
-                           <tr><td colSpan={4} className="p-3 text-center text-muted-foreground italic bg-muted/5">E mais {reguaData.length - 100} registros...</td></tr>
-                         )}
                        </tbody>
                      </table>
                    </div>
-                   <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl flex justify-between items-center mt-2 shadow-sm">
-                     <span className="font-bold text-amber-700">Total Global de Horas a Liquidar:</span>
-                     <span className="font-mono text-2xl font-black text-amber-700">{reguaData.reduce((sum, r) => sum + r.saldoRemanescente, 0).toFixed(1)}h</span>
-                   </div>
-                 </>
+                 </div>
               )}
+
             </div>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setIsReguaModalOpen(false)}>Cancelar</Button>
-              <Button onClick={liquidarPassado} disabled={liquidandoRegua || reguaData.length === 0} className="bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
+              <Button onClick={liquidarPassado} disabled={liquidandoRegua || reguaAjustesData.length === 0} className="bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
                 {liquidandoRegua ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Check className="w-4 h-4 mr-2" />}
-                Confirmar e Passar a Régua
+                Igualar e Passar a Régua
               </Button>
             </DialogFooter>
           </DialogContent>
