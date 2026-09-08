@@ -1744,9 +1744,38 @@ export function AdminDashboard() {
     return acts.length > 0 ? acts as string[] : ['Sem atividade específica'];
   }, [gestaoContrato, gestaoConsultor, gestaoOs, allAlocacoes, contratos])
 
+  // 🌟 NOVA FUNÇÃO DE APOIO: Verifica se o Orçamento (Alocação) cai dentro do filtro selecionado
+  const isAllocationInFilter = (a: any) => {
+    if (modoDataFiltro === 'ciclo') return a.mes === dashMes && a.ano === dashAno;
+    
+    const cObj = contratos.find(c => c.id === a.contract_id);
+    if (!cObj) return false;
+    
+    const m = parseInt(a.mes);
+    const y = parseInt(a.ano);
+    const getValidDay = (y: number, m: number, d: number) => Math.min(d, new Date(y, m + 1, 0).getDate());
+    
+    let cStart, cEnd;
+    if (cObj.ciclo_inicio > cObj.ciclo_fim) {
+        const sm = m === 0 ? 11 : m - 1;
+        const sy = m === 0 ? y - 1 : y;
+        cStart = new Date(sy, sm, getValidDay(sy, sm, cObj.ciclo_inicio), 0, 0, 0).getTime();
+        cEnd = new Date(y, m, getValidDay(y, m, cObj.ciclo_fim), 23, 59, 59, 999).getTime();
+    } else {
+        cStart = new Date(y, m, getValidDay(y, m, cObj.ciclo_inicio), 0, 0, 0).getTime();
+        cEnd = new Date(y, m, getValidDay(y, m, cObj.ciclo_fim), 23, 59, 59, 999).getTime();
+    }
+
+    const intStart = new Date(dataInicioCustom + 'T00:00:00').getTime();
+    const intEnd = new Date(dataFimCustom + 'T23:59:59').getTime();
+
+    // Retorna true se a alocação cruzar com o período do intervalo
+    return cStart <= intEnd && cEnd >= intStart;
+  };
+
   const dashData = useMemo(() => {
     let fTimes = allTimesheets.filter(t => contratosVisao.some(cv => cv.id === t.contract_id))
-    let fAlocs = allAlocacoes.filter(a => a.mes === dashMes && a.ano === dashAno && contratosVisao.some(cv => cv.id === a.contract_id));
+    let fAlocs = allAlocacoes.filter(a => isAllocationInFilter(a) && contratosVisao.some(cv => cv.id === a.contract_id));
 
     if (dashContratosSelecionados.length > 0) {
       fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id)); 
@@ -4287,7 +4316,7 @@ export function AdminDashboard() {
                                       const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
                                       
                                       const fTimesCiclo = allTimesheets.filter(t => t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-                                      const fAlocsCiclo = allAlocacoes.filter(a => a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
+                                      const fAlocsCiclo = allAlocacoes.filter(a => a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && isAllocationInFilter(a));
                                       
                                       const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
                                       if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { m = m === 11 ? 0 : m + 1; if (m === 0) y++; }
@@ -4404,7 +4433,7 @@ export function AdminDashboard() {
                                  {(() => {
                                     const uid = dashConsultor;
                                     let fTimes = allTimesheets.filter(t => t.user_id === uid && contratosVisao.some(cv => cv.id === t.contract_id));
-                                    let fAlocs = allAlocacoes.filter(a => a.user_id === uid && a.mes === dashMes && a.ano === dashAno && contratosVisao.some(cv => cv.id === a.contract_id));
+                                    let fAlocs = allAlocacoes.filter(a => a.user_id === uid && isAllocationInFilter(a) && contratosVisao.some(cv => cv.id === a.contract_id));
                                     if (dashContratosSelecionados.length > 0) {
                                       fTimes = fTimes.filter(t => dashContratosSelecionados.includes(t.contract_id));
                                       fAlocs = fAlocs.filter(a => dashContratosSelecionados.includes(a.contract_id));
