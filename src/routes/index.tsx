@@ -121,6 +121,15 @@ function TimesheetPage() {
   const [daySelection, setDaySelection] = useState<"hoje" | "ontem">("hoje");
 
   const [viewMode, setViewMode] = useState<"timesheet" | "painel">("timesheet");
+  const [panelSubView, setPanelSubView] = useState<"resumo" | "extrato">("resumo"); // <-- DECLARADO AQUI NO TOPO!
+  
+  // Reseta a aba quando o consultor abre/fecha o painel
+  useEffect(() => {
+    if (viewMode === 'timesheet') {
+      setPanelModoData('ciclo');
+      setPanelSubView('resumo');
+    }
+  }, [viewMode]);
   
   const getTodayStr = () => getLocalISODate(new Date());
   const getYesterdayStr = () => { const d = new Date(); d.setDate(d.getDate() - 1); return getLocalISODate(d); };
@@ -149,6 +158,8 @@ function TimesheetPage() {
   const [panelModoData, setPanelModoData] = useState<'ciclo' | 'intervalo'>('ciclo');
   const [panelDataInicio, setPanelDataInicio] = useState<string>(getTodayStr());
   const [panelDataFim, setPanelDataFim] = useState<string>(getTodayStr());
+
+  
 
   // 🌟 BLINDAGEM: Reseta para 'ciclo' sempre que o consultor fechar/voltar do painel
   useEffect(() => {
@@ -213,7 +224,7 @@ function TimesheetPage() {
       }
       setAuthLoading(false);
     });
-
+  
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
       
@@ -283,13 +294,11 @@ function TimesheetPage() {
     if (data) {
       const rawData = data as unknown as AllocationRow[];
       
-      // --- NOVA TRAVA: FILTRA ALOCAÇÕES ZERADAS ---
-      // Como Overhead e Pequenos Suportes salvam 9999 no banco, eles passam automaticamente no > 0.
-      const validAllocations = rawData.filter(a => a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)');
-
-      setAllocations(validAllocations);
+      // 🌟 CORREÇÃO: Mantemos TODAS as alocações na memória global para não quebrar o histórico de meses passados ou Overhead zerado.
+      setAllocations(rawData);
       
-      const activeAllocations = validAllocations.filter(a => a.contratos?.status_ativo);
+      // Para definir o contrato inicial no dropdown, aí sim buscamos um válido
+      const activeAllocations = rawData.filter(a => a.contratos?.status_ativo && (a.horas_disponiveis > 0 || a.contratos.tipo === 'overhead'));
       if (activeAllocations.length > 0) {
         const savedContract = localStorage.getItem("engeprice_contractId");
         const isValidSaved = activeAllocations.some(a => a.contract_id === savedContract);
@@ -361,8 +370,9 @@ function TimesheetPage() {
       .filter(a => {
          if (!a.contratos?.status_ativo || a.atividade === 'Preço Fechado (Medição)') return false;
          
-         // 🌟 CORREÇÃO: Usa a referenceDate para puxar os contratos ativos no mês correto!
          const expectedCycle = getCycleMonthYear(referenceDate, a.contratos.ciclo_inicio, a.contratos.ciclo_fim);
+         
+         // 🌟 EXIGE ALOCAÇÃO: Se o Overhead ou Suporte estiver com 0h, o contrato some do lançador!
          return a.mes === expectedCycle.month && a.ano === expectedCycle.year && a.horas_disponiveis > 0;
       })
       .map(a => [
@@ -388,15 +398,19 @@ function TimesheetPage() {
     return getCycleMonthYear(referenceDate, cIni, cFim);
   }, [currentContractObjFull, referenceDate]);
 
+  // Modificado: Retorna APENAS as OS em que o consultor tem alocação ativa (horas > 0)
   const filteredOsList = useMemo(() => {
       return osList.filter(os => {
-        const isFechado = allocations.some(a => a.os_id === os.id && a.atividade === 'Preço Fechado (Medição)' && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
-        if (isFechado) return false;
-        
-        const hasAllocation = allocations.some(a => a.os_id === os.id && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year && a.horas_disponiveis > 0);
+        const hasAllocation = allocations.some(a => 
+          a.os_id === os.id && 
+          a.mes === activeCycleForInput.month && 
+          a.ano === activeCycleForInput.year && 
+          a.horas_disponiveis > 0 && // 🌟 TRAVA APLICADA AQUI TAMBÉM
+          a.atividade !== 'Preço Fechado (Medição)'
+        );
         return hasAllocation;
       });
-    }, [osList, allocations, activeCycleForInput]);
+  }, [osList, allocations, activeCycleForInput]);
 
   const availableActivities = useMemo(() => {
     const rawActivities = Array.from(new Set(
@@ -430,15 +444,16 @@ function TimesheetPage() {
 
       if (savedOsValida && savedOs) {
         setOsId(savedOs);
-      } else if (osDoContrato.length > 0 && !osDoContrato.find(o => o.id === osId)) {
+      } else if (osDoContrato.length > 0) {
+        // Se a OS salva não for válida, joga para a primeira válida
         setOsId(osDoContrato[0].id);
-      } else if (osDoContrato.length === 0) {
+      } else {
         setOsId("");
       }
     } else {
       setOsId(""); 
     }
-  }, [contractId, allocations, osList]);
+  }, [contractId, filteredOsList]); // Dependência atualizada
 
   useEffect(() => {
     const savedActivity = localStorage.getItem("engeprice_activity");
@@ -494,7 +509,7 @@ function TimesheetPage() {
   }, [currentContractObjFull, referenceDate]);
 
   const currentOsObj = osList.find(o => o.id === osId);
-  const isIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(currentContractType) || currentOsObj?.codigo === '🛠️ Pequenos Suportes';
+  const isIlimitado = false; // 🚫 FIM DAS HORAS INFINITAS
 
   const currentActivityAlloc = allocations.find(a => a.contract_id === contractId && a.atividade === activity && (!isComOs || a.os_id === osId) && a.mes === activeCycleForInput.month && a.ano === activeCycleForInput.year);
   const activityBudgetMs = currentActivityAlloc ? currentActivityAlloc.horas_disponiveis * 3600 * 1000 : 0;
@@ -712,6 +727,16 @@ function TimesheetPage() {
     // 🌟 BLINDAGEM DO USEMEMO: Adicionadas as 3 variáveis do intervalo no array de dependências!
   }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel, panelModoData, panelDataInicio, panelDataFim]);
 
+  // NOVO: Cálculo focado apenas nos apontamentos válidos do período para montar o Extrato
+  const extratoEntries = useMemo(() => {
+    return entries.filter(e => {
+       const cObj = allConsultorContracts.find(c => c.id === e.contractId);
+       if (!cObj) return false;
+       const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
+       return e.start >= cb.start && e.start <= cb.end;
+    }).sort((a, b) => b.start - a.start);
+  }, [entries, allConsultorContracts, panelMes, panelAno, panelModoData, panelDataInicio, panelDataFim]);
+
   const handleExportarExcelConsultor = async () => {
     try {
       const workbook = new ExcelJS.Workbook();
@@ -816,7 +841,9 @@ function TimesheetPage() {
     const targetContractType = contractsList.find(c => c.id === targetContractId)?.tipo || 'horas';
     const isTargetComOs = targetContractType === 'continuado_com_os';
     const targetOsObj = osList.find(o => o.id === targetOsId);
-    const isTargetIlimitado = ['continuado_sem_os', 'fechado', 'overhead'].includes(targetContractType) || targetOsObj?.codigo === '🛠️ Pequenos Suportes';
+    
+    // 🚫 FIM DAS HORAS INFINITAS: Removido overhead e pequenos suportes da exceção de edição!
+    const isTargetIlimitado = false; 
 
     if (!isTargetIlimitado) {
        const cObj = contractsList.find(c => c.id === targetContractId);
@@ -893,7 +920,11 @@ function TimesheetPage() {
     if (!notesValid) return toast.error("A observação é obrigatória para registrar as horas.");
 
     const startMs = getTimestampFromTimeFields(startTime, dateStr);
-    const endMs = getTimestampFromTimeFields(endTime, dateStr, true, startMs);
+    const endMs = getTimestampFromTimeFields(endTime, dateStr, false); // <-- Alterado: isEndTime=false (não joga dia seguinte automático)
+
+    if (endMs <= startMs) {
+      return toast.error("A hora de fim deve ser posterior à hora de início (Não é permitido cruzar a meia-noite).");
+    }
 
     const activeCb = getContractCycleBounds(contractId);
     const pastCycleStart = new Date(activeCb.start);
@@ -1221,8 +1252,29 @@ function TimesheetPage() {
                 </h2>
                 <p className="text-xs text-muted-foreground">Consulte seu andamento, saldos de contratos e preencha horas autorizadas.</p>
               </div>
+              
+              {/* 🌟 NOVO: TOGGLE DE ABAS DO PAINEL */}
+              <div className="flex bg-muted/50 p-1 rounded-lg border shadow-inner self-start md:self-auto">
+                <Button 
+                  variant={panelSubView === 'resumo' ? 'default' : 'ghost'} 
+                  size="sm" 
+                  onClick={() => setPanelSubView('resumo')}
+                  className="rounded-md font-bold h-8 text-xs"
+                >
+                  <BarChart3 className="w-3.5 h-3.5 mr-1.5" /> Resumo e Saldos
+                </Button>
+                <Button 
+                  variant={panelSubView === 'extrato' ? 'default' : 'ghost'} 
+                  size="sm" 
+                  onClick={() => setPanelSubView('extrato')}
+                  className="rounded-md font-bold h-8 text-xs"
+                >
+                  <History className="w-3.5 h-3.5 mr-1.5" /> Extrato de Horas
+                </Button>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2">
-                {/* Botões de alternância: Por Ciclo | Por Intervalo */}
+                {/* Botões de alternância: Por Ciclo | Por Intervalo (Mantenha o seu código original aqui...) */}
                 <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border">
                   <Button
                     size="sm"
@@ -1285,333 +1337,423 @@ function TimesheetPage() {
                 </Button>
               </div>
             </div>
-          
 
-            <div className="grid gap-4 md:grid-cols-3">
-              <Card className="md:col-span-2 shadow-sm">
-                <CardHeader className="pb-3 border-b flex flex-row items-center justify-between">
-                  <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-                    <BarChart3 className="w-4 h-4" /> Resumo do Ciclo Selecionado
-                  </CardTitle>
-                  <Button onClick={handleExportarExcelConsultor} variant="outline" size="sm" className="h-7 text-[10px] bg-green-500/10 text-green-700 border-green-500/20 hover:bg-green-500/20">
-                    <Download className="w-3 h-3 mr-1" /> EXPORTAR EXCEL
-                  </Button>
-                </CardHeader>
-                <CardContent className="pt-4 flex flex-col sm:flex-row items-center gap-8">
-                  <div className="w-32 h-32 relative shrink-0 flex items-center justify-center">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie data={pieData} startAngle={90} endAngle={-270} dataKey="value" cx="50%" cy="50%" innerRadius={35} outerRadius={60} stroke="none">
-                          {pieData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0'} />
-                          ))}
-                        </Pie>
-                        <RechartsTooltip 
-                            formatter={(v: number) => [`${v.toFixed(1)}h`, '']} 
-                            contentStyle={{ borderRadius: '8px', fontSize: '12px' }} 
-                            wrapperStyle={{ zIndex: 100 }} 
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                    
-                    <div className="absolute flex flex-col items-center justify-center pointer-events-none z-0">
-                       <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
-                    </div>
-                  </div>
-                  
-                  <div className="flex-1 w-full space-y-3">
-                    <div className="flex justify-between items-center border-b pb-2">
-                      <span className="text-xs font-semibold text-muted-foreground">Total Previsto no Ciclo</span>
-                      <span className="font-mono font-bold">
-                        {totalOrcadoMes.total.toFixed(1)}h
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center border-b pb-2">
-                      <span className="text-xs font-semibold text-blue-600 flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Já Entregue
-                      </span>
-                      <div className="text-right">
-                        <span className="font-mono font-bold text-blue-600">{horasTrabalhadasMesAtual.toFixed(1)}h</span>
-                        {totalOrcadoMes.total > 0 && (
-                           <span className="text-[10px] text-blue-600/70 ml-1 font-bold">({percentualGasto.toFixed(1)}%)</span>
+            {/* 🔥 AQUI COMEÇA A CONDIÇÃO DA NOVA ABA 🔥 */}
+            {panelSubView === 'resumo' ? (
+              <>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <Card className="md:col-span-2 shadow-sm">
+                    <CardHeader className="pb-3 border-b flex flex-row items-center justify-between">
+                      <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4" /> Resumo do Ciclo Selecionado
+                      </CardTitle>
+                      <Button onClick={handleExportarExcelConsultor} variant="outline" size="sm" className="h-7 text-[10px] bg-green-500/10 text-green-700 border-green-500/20 hover:bg-green-500/20">
+                        <Download className="w-3 h-3 mr-1" /> EXPORTAR EXCEL
+                      </Button>
+                    </CardHeader>
+                    <CardContent className="pt-4 flex flex-col sm:flex-row items-center gap-8">
+                      <div className="w-32 h-32 relative shrink-0 flex items-center justify-center">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie data={pieData} startAngle={90} endAngle={-270} dataKey="value" cx="50%" cy="50%" innerRadius={35} outerRadius={60} stroke="none">
+                              {pieData.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0'} />
+                              ))}
+                            </Pie>
+                            <RechartsTooltip 
+                                formatter={(v: number) => [`${v.toFixed(1)}h`, '']} 
+                                contentStyle={{ borderRadius: '8px', fontSize: '12px' }} 
+                                wrapperStyle={{ zIndex: 100 }} 
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        
+                        <div className="absolute flex flex-col items-center justify-center pointer-events-none z-0">
+                           <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
+                        </div>
+                      </div>
+                      
+                      <div className="flex-1 w-full space-y-3">
+                        <div className="flex justify-between items-center border-b pb-2">
+                          <span className="text-xs font-semibold text-muted-foreground">Total Previsto no Ciclo</span>
+                          <span className="font-mono font-bold">
+                            {totalOrcadoMes.total.toFixed(1)}h
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center border-b pb-2">
+                          <span className="text-xs font-semibold text-blue-600 flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Já Entregue
+                          </span>
+                          <div className="text-right">
+                            <span className="font-mono font-bold text-blue-600">{horasTrabalhadasMesAtual.toFixed(1)}h</span>
+                            {totalOrcadoMes.total > 0 && (
+                               <span className="text-[10px] text-blue-600/70 ml-1 font-bold">({percentualGasto.toFixed(1)}%)</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex justify-between items-center border-b pb-2">
+                          <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-slate-200"></span> Saldo a Entregar
+                          </span>
+                          <span className="font-mono font-bold">
+                            {saldoHorasMes.toFixed(1)}h
+                          </span>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="shadow-sm flex flex-col">
+                    <CardHeader className="pb-3 border-b">
+                      <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Status de Edição</CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-col justify-center flex-1 text-xs pt-4">
+                      <div className="flex items-center gap-3 bg-muted/20 p-4 rounded-xl border">
+                        {authorizedDates.length > 0 ? (
+                          <>
+                            <Unlock className="w-5 h-5 text-green-600 shrink-0" />
+                            <div>
+                              <p className="font-bold text-green-700 text-sm">Acesso Liberado</p>
+                              <p className="text-muted-foreground mt-0.5">Você possui {authorizedDates.length} data(s) abertas para ajuste no histórico.</p>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-5 h-5 text-amber-600 shrink-0" />
+                            <div>
+                              <p className="font-bold text-amber-700 text-sm">Painel Bloqueado</p>
+                              <p className="text-muted-foreground mt-0.5">Sem acessos retroativos no momento. <br/><br/><span className="font-bold">Lançamentos de hoje e ontem devem ser feitos na página principal.</span></p>
+                            </div>
+                          </>
                         )}
                       </div>
-                    </div>
-                    <div className="flex justify-between items-center border-b pb-2">
-                      <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-slate-200"></span> Saldo a Entregar
-                      </span>
-                      <span className="font-mono font-bold">
-                        {saldoHorasMes.toFixed(1)}h
-                      </span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="shadow-sm flex flex-col">
-                <CardHeader className="pb-3 border-b">
-                  <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Status de Edição</CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col justify-center flex-1 text-xs pt-4">
-                  <div className="flex items-center gap-3 bg-muted/20 p-4 rounded-xl border">
-                    {authorizedDates.length > 0 ? (
-                      <>
-                        <Unlock className="w-5 h-5 text-green-600 shrink-0" />
-                        <div>
-                          <p className="font-bold text-green-700 text-sm">Acesso Liberado</p>
-                          <p className="text-muted-foreground mt-0.5">Você possui {authorizedDates.length} data(s) abertas para ajuste no histórico.</p>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="w-5 h-5 text-amber-600 shrink-0" />
-                        <div>
-                          <p className="font-bold text-amber-700 text-sm">Painel Bloqueado</p>
-                          <p className="text-muted-foreground mt-0.5">Sem acessos retroativos no momento. <br/><br/><span className="font-bold">Lançamentos de hoje e ontem devem ser feitos na página principal.</span></p>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          
-            <div className="space-y-4 pt-4">
-              <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
-                <Briefcase className="w-4 h-4" /> Detalhamento de Saldo por Contrato
-              </h3>
+                    </CardContent>
+                  </Card>
+                </div>
               
-              <Accordion type="multiple" className="w-full space-y-3">
-                {detalhamentoAlocacoes.map(contract => (
-                  <AccordionItem key={contract.id} value={contract.id} className="border rounded-xl bg-card overflow-hidden shadow-sm">
-                    <AccordionTrigger className="px-4 py-3 hover:bg-muted/30 transition-colors data-[state=open]:bg-muted/10 hover:no-underline">
-                      <div className="flex flex-col md:flex-row md:items-center justify-between w-full text-left gap-4 pr-4">
-                        <div>
-                          <p className="text-sm font-bold text-primary">{contract.codigo} - {contract.nome}</p>
-                          <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">
-                            {contract.hasFechado ? 'PREÇO FECHADO' : contract.tipo.replace(/_/g, ' ')}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-6 text-xs">
-                          {panelModoData === 'ciclo' && (
-                            <div className="text-right">
-                              <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
-                              <p className="font-mono font-bold text-foreground">
-                                {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
+                <div className="space-y-4 pt-4">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
+                    <Briefcase className="w-4 h-4" /> Detalhamento de Saldo por Contrato
+                  </h3>
+                  
+                  <Accordion type="multiple" className="w-full space-y-3">
+                    {detalhamentoAlocacoes.map(contract => (
+                      <AccordionItem key={contract.id} value={contract.id} className="border rounded-xl bg-card overflow-hidden shadow-sm">
+                        <AccordionTrigger className="px-4 py-3 hover:bg-muted/30 transition-colors data-[state=open]:bg-muted/10 hover:no-underline">
+                          <div className="flex flex-col md:flex-row md:items-center justify-between w-full text-left gap-4 pr-4">
+                            <div>
+                              <p className="text-sm font-bold text-primary">{contract.codigo} - {contract.nome}</p>
+                              <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">
+                                {contract.hasFechado ? 'PREÇO FECHADO' : contract.tipo.replace(/_/g, ' ')}
                               </p>
                             </div>
-                          )}
-                          <div className="text-right">
-                            <p className="text-[10px] text-muted-foreground uppercase">Consumido</p>
-                            <p className="font-mono font-bold text-primary">{contract.totalGasto.toFixed(1)}{contract.hasFechado ? '%' : 'h'}</p>
+                            <div className="flex items-center gap-6 text-xs">
+                              {panelModoData === 'ciclo' && (
+                                <div className="text-right">
+                                  <p className="text-[10px] text-muted-foreground uppercase">Orçado no Ciclo</p>
+                                  <p className="font-mono font-bold text-foreground">
+                                    {contract.hasIlimitado && contract.totalOrcado === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalOrcado.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
+                                  </p>
+                                </div>
+                              )}
+                              <div className="text-right">
+                                <p className="text-[10px] text-muted-foreground uppercase">Consumido</p>
+                                <p className="font-mono font-bold text-primary">{contract.totalGasto.toFixed(1)}{contract.hasFechado ? '%' : 'h'}</p>
+                              </div>
+                              {panelModoData === 'ciclo' && (
+                                <div className="text-right">
+                                  <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
+                                  <p className={`font-mono font-bold ${contract.totalSaldo < 0 && !contract.hasIlimitado ? 'text-red-500' : 'text-green-600'}`}>
+                                    {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                          {panelModoData === 'ciclo' && (
-                            <div className="text-right">
-                              <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
-                              <p className={`font-mono font-bold ${contract.totalSaldo < 0 && !contract.hasIlimitado ? 'text-red-500' : 'text-green-600'}`}>
-                                {contract.hasIlimitado && contract.totalSaldo === 0 ? <span className="text-amber-600 flex items-center justify-end"><Wrench className="w-3 h-3"/></span> : `${contract.totalSaldo.toFixed(1)}${contract.hasFechado ? '%' : 'h'}`}
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </AccordionTrigger>
-                    
-                    <AccordionContent className="p-0 border-t bg-muted/5">
-                      {contract.osGroups.map((osGroup: any) => (
-                        <div key={osGroup.id} className="border-b last:border-0 border-dashed">
-                          {osGroup.id !== 'sem_os' && (
-                            <div className="bg-muted/10 px-4 py-2 border-b text-xs font-bold text-foreground/80 flex items-center gap-2">
-                              {osGroup.isSuportes ? <Wrench className="w-3.5 h-3.5 text-amber-600"/> : <FolderTree className="w-3.5 h-3.5" />} 
-                              <span className={osGroup.isSuportes ? "text-amber-700" : ""}>OS: {osGroup.codigo} {osGroup.nome ? `- ${osGroup.nome}` : ''}</span>
-                            </div>
-                          )}
-                          <div className="px-4 py-2 w-full overflow-x-auto">
-                            <table className="w-full text-xs text-left min-w-150">
-                              <thead>
-                                <tr className="text-muted-foreground/70">
-                                  <th className="pb-2 font-medium">Disciplina / Escopo</th>
-                                  {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Orçado</th>}
-                                  <th className="pb-2 font-medium text-right w-20">Consumido</th>
-                                  {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Saldo</th>}
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y">
-                                {osGroup.atividades.map((ativ: any, idx: number) => {
-                                  if (ativ.isFechado) {
-                                     return (
-                                        <tr key={idx} className="border-t border-green-500/20 bg-green-500/5 hover:bg-green-500/10">
-                                          <td className="py-2.5 font-medium text-green-700 flex items-center gap-1.5 pl-2"><Check className="w-3.5 h-3.5"/> Medição de Avanço (%)</td>
-                                          {panelModoData === 'ciclo' && <td className="py-2.5 text-right font-mono text-green-700">{ativ.orcado}%</td>}
-                                          <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto}%</td>
-                                          {panelModoData === 'ciclo' && <td className="py-2.5 text-right font-bold font-mono text-green-700">{ativ.saldo}%</td>}
-                                        </tr>
-                                     );
-                                  }
-
-                                  return (
-                                    <tr key={idx} className="border-t border-muted/50 hover:bg-muted/20">
-                                      <td className="py-2.5 font-medium">{ativ.nome}</td>
-                                      {panelModoData === 'ciclo' && (
-                                        <td className="py-2.5 text-right text-muted-foreground font-mono">
-                                          {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
-                                        </td>
-                                      )}
-                                      <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto.toFixed(1)}h</td>
-                                      {panelModoData === 'ciclo' && (
-                                        <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
-                                          {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
-                                        </td>
-                                      )}
+                        </AccordionTrigger>
+                        
+                        <AccordionContent className="p-0 border-t bg-muted/5">
+                          {contract.osGroups.map((osGroup: any) => (
+                            <div key={osGroup.id} className="border-b last:border-0 border-dashed">
+                              {osGroup.id !== 'sem_os' && (
+                                <div className="bg-muted/10 px-4 py-2 border-b text-xs font-bold text-foreground/80 flex items-center gap-2">
+                                  {osGroup.isSuportes ? <Wrench className="w-3.5 h-3.5 text-amber-600"/> : <FolderTree className="w-3.5 h-3.5" />} 
+                                  <span className={osGroup.isSuportes ? "text-amber-700" : ""}>OS: {osGroup.codigo} {osGroup.nome ? `- ${osGroup.nome}` : ''}</span>
+                                </div>
+                              )}
+                              <div className="px-4 py-2 w-full overflow-x-auto">
+                                <table className="w-full text-xs text-left min-w-150">
+                                  <thead>
+                                    <tr className="text-muted-foreground/70">
+                                      <th className="pb-2 font-medium">Disciplina / Escopo</th>
+                                      {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Orçado</th>}
+                                      <th className="pb-2 font-medium text-right w-20">Consumido</th>
+                                      {panelModoData === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Saldo</th>}
                                     </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                  </thead>
+                                  <tbody className="divide-y">
+                                    {osGroup.atividades.map((ativ: any, idx: number) => {
+                                      if (ativ.isFechado) {
+                                         return (
+                                            <tr key={idx} className="border-t border-green-500/20 bg-green-500/5 hover:bg-green-500/10">
+                                              <td className="py-3 font-medium text-green-700 pl-4">
+                                                <div className="flex items-center gap-1.5">
+                                                  <Check className="w-4 h-4"/> 
+                                                  Preço Fechado <span className="text-muted-foreground/70 hidden sm:inline">(Avanço Físico)</span>
+                                                  <span title="Você ganha por pacote de avanço aprovado pelo gestor (%). Não é necessário apontar horas diárias para esta rubrica." className="cursor-help"><HelpCircle className="w-3.5 h-3.5 text-green-600/60 hover:text-green-700 transition-colors" /></span>
+                                                </div>
+                                              </td>
+                                              {panelModoData === 'ciclo' && (
+                                                <td className="py-3 text-right font-mono text-green-700 pr-2" title="Medição de avanço registrada pelo Gestor neste mês">
+                                                   <span className="block text-[9px] uppercase font-bold opacity-60 tracking-wider mb-0.5">Neste Ciclo</span>
+                                                   {ativ.orcado}%
+                                                </td>
+                                              )}
+                                              <td className="py-3 text-right text-primary font-bold font-mono pr-2" title="Avanço total já pago na história deste contrato">
+                                                   <span className="block text-[9px] uppercase font-bold opacity-60 text-muted-foreground tracking-wider mb-0.5">Acumulado</span>
+                                                   {ativ.gasto}%
+                                              </td>
+                                              {panelModoData === 'ciclo' && (
+                                                <td className="py-3 text-right font-bold font-mono text-green-700 pr-4" title="Quanto falta para finalizar 100% do projeto">
+                                                   <span className="block text-[9px] uppercase font-bold opacity-60 text-muted-foreground tracking-wider mb-0.5">Saldo Final</span>
+                                                   {ativ.saldo}%
+                                                </td>
+                                              )}
+                                            </tr>
+                                         );
+                                      }
+
+                                      return (
+                                        <tr key={idx} className="border-t border-muted/50 hover:bg-muted/20">
+                                          <td className="py-2.5 font-medium">{ativ.nome}</td>
+                                          {panelModoData === 'ciclo' && (
+                                            <td className="py-2.5 text-right text-muted-foreground font-mono">
+                                              {ativ.isSuportes && ativ.orcado === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.orcado.toFixed(1)}h`}
+                                            </td>
+                                          )}
+                                          <td className="py-2.5 text-right text-primary font-bold font-mono">{ativ.gasto.toFixed(1)}h</td>
+                                          {panelModoData === 'ciclo' && (
+                                            <td className={`py-2.5 text-right font-bold font-mono ${ativ.saldo < 0 && !ativ.isSuportes ? 'text-red-500' : 'text-green-600'}`}>
+                                              {ativ.isSuportes && ativ.saldo === 0 ? <span className="flex items-center justify-end text-amber-600"><Wrench className="w-3 h-3"/></span> : `${ativ.saldo.toFixed(1)}h`}
+                                            </td>
+                                          )}
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          ))}
+                        </AccordionContent>
+                      </AccordionItem>
+                    ))}
+                  </Accordion>
+
+                  <div className="w-full pt-2">
+                    <Card className="shadow-sm bg-muted/10 border-dashed">
+                      <CardContent className="p-4 flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] uppercase font-bold text-muted-foreground">Horas Entregues no Ciclo</p>
+                          <p className="text-sm font-bold text-primary">Contratos por Hora e Dinâmicos</p>
+                        </div>
+                        <p className="text-2xl font-mono font-black text-primary">{resumoPorTipo.horas.toFixed(1)}h</p>
+                      </CardContent>
+                    </Card>
+                  </div>
+                </div>
+
+                <div className="grid gap-6 md:grid-cols-[1.2fr_1fr] items-start pt-6 border-t w-full">
+                  <div className="space-y-4 min-w-0 w-full">
+                    <Card className="shadow-sm">
+                      <CardHeader className="pb-4 border-b">
+                        <div className="flex flex-wrap items-center gap-4 justify-between">
+                          <div>
+                            <CardTitle className="text-base flex items-center gap-2"><Calendar className="w-4 h-4 text-primary" /> Histórico Autorizado</CardTitle>
+                            <CardDescription>Escolha o dia no calendário para consultar ou registrar apontamentos.</CardDescription>
+                          </div>
+                          <div className="w-full max-w-44">
+                            <Input type="date" value={panelDate} max={getTodayStr()} onChange={(e) => setPanelDate(e.target.value)} className="font-mono h-9 font-medium" />
                           </div>
                         </div>
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
-                ))}
-              </Accordion>
+                      </CardHeader>
+                      <CardContent className="pt-5">
+                        {isPanelDateUnlocked ? (
+                          <div className="space-y-6">
+                            {/* 🌟 NOVO: AVISO VISUAL DE MODO DE EDIÇÃO */}
+                            {editingRetroId ? (
+                              <div className="bg-orange-500/10 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-xs transition-all animate-in slide-in-from-top-2">
+                                <h3 className="font-bold text-orange-700 dark:text-orange-500 flex items-center gap-2"><Pencil className="w-4 h-4"/> Modo de Edição Ativo</h3>
+                                <p className="text-xs text-orange-600/80 dark:text-orange-400/80 mt-1">
+                                  Você está editando um apontamento já existente. Modifique o contrato, a OS, a disciplina ou o horário abaixo e salve.
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 text-green-700 p-3 rounded-xl text-xs font-semibold">
+                                <Unlock className="w-4 h-4" />
+                                <span>Esta data está desbloqueada. Você pode consultar, inserir ou excluir horas neste dia.</span>
+                              </div>
+                            )}
+                            {/* -------------------------------------- */}
+                            
+                            <div className={`space-y-6 ${editingRetroId ? 'p-4 border border-orange-500/30 rounded-xl bg-orange-500/5' : ''}`}>
+                              <TaskSelector
+                                contracts={contractsList}
+                                contractId={contractId}
+                                contractType={currentContractType}
+                                osList={filteredOsList}
+                                osId={osId}
+                                activity={activity}
+                                notes={notes}
+                                contractUsedMs={contractUsedMs}
+                                activityUsedMs={activityUsedMs}
+                                contractBudgetMs={contractBudgetMs}
+                                activityBudgetMs={activityBudgetMs}
+                                availableActivities={availableActivities}
+                                onContractChange={setContractId}
+                                onOsChange={setOsId}
+                                onActivityChange={setActivity}
+                                onNotesChange={setNotes}
+                                osUsedMs={osUsedMs}
+                                osBudgetMs={osBudgetMs}
+                              />
+                              
+                              <div className="grid gap-4 md:grid-cols-2 pt-4 border-t">
+                                <div className="space-y-1.5">
+                                  <Label>Horário de Início</Label>
+                                  <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+                                </div>
+                                <div className="space-y-1.5">
+                                  <Label>Horário de Fim</Label>
+                                  <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+                                </div>
+                              </div>
 
-              <div className="w-full pt-2">
-                <Card className="shadow-sm bg-muted/10 border-dashed">
-                  <CardContent className="p-4 flex items-center justify-between">
-                    <div>
-                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Horas Entregues no Ciclo</p>
-                      <p className="text-sm font-bold text-primary">Contratos por Hora e Dinâmicos</p>
-                    </div>
-                    <p className="text-2xl font-mono font-black text-primary">{resumoPorTipo.horas.toFixed(1)}h</p>
-                  </CardContent>
-                </Card>
-              </div>
-            </div>
+                              <Button onClick={handleAddPanelEntry} disabled={!notesValid || contractId === ""} className="w-full h-12 bg-primary">
+                                {editingRetroId ? (
+                                  <><Check className="w-4 h-4 mr-2" /> Atualizar Registro</>
+                                ) : (
+                                  <><Check className="w-4 h-4 mr-2" /> Gravar Registro no Dia {panelDate.split('-').reverse().join('/')}</>
+                                )}
+                              </Button>
 
-            <div className="grid gap-6 md:grid-cols-[1.2fr_1fr] items-start pt-6 border-t w-full">
-              <div className="space-y-4 min-w-0 w-full">
-                <Card className="shadow-sm">
-                  <CardHeader className="pb-4 border-b">
-                    <div className="flex flex-wrap items-center gap-4 justify-between">
-                      <div>
-                        <CardTitle className="text-base flex items-center gap-2"><Calendar className="w-4 h-4 text-primary" /> Histórico Autorizado</CardTitle>
-                        <CardDescription>Escolha o dia no calendário para consultar ou registrar apontamentos.</CardDescription>
-                      </div>
-                      <div className="w-full max-w-44">
-                        <Input type="date" value={panelDate} max={getTodayStr()} onChange={(e) => setPanelDate(e.target.value)} className="font-mono h-9 font-medium" />
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="pt-5">
-                    {isPanelDateUnlocked ? (
-                      <div className="space-y-6">
-                        {/* 🌟 NOVO: AVISO VISUAL DE MODO DE EDIÇÃO */}
-                        {editingRetroId ? (
-                          <div className="bg-orange-500/10 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-xs transition-all animate-in slide-in-from-top-2">
-                            <h3 className="font-bold text-orange-700 dark:text-orange-500 flex items-center gap-2"><Pencil className="w-4 h-4"/> Modo de Edição Ativo</h3>
-                            <p className="text-xs text-orange-600/80 dark:text-orange-400/80 mt-1">
-                              Você está editando um apontamento já existente. Modifique o contrato, a OS, a disciplina ou o horário abaixo e salve.
-                            </p>
+                              {editingRetroId && (
+                                <Button onClick={() => {
+                                   setEditingRetroId(null);
+                                   setNotes("");
+                                }} variant="outline" className="w-full h-10 mt-2 border-dashed hover:bg-muted/50">
+                                  Cancelar Edição
+                                </Button>
+                              )}
+                            </div>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 text-green-700 p-3 rounded-xl text-xs font-semibold">
-                            <Unlock className="w-4 h-4" />
-                            <span>Esta data está desbloqueada. Você pode consultar, inserir ou excluir horas neste dia.</span>
+                          <div className="py-12 px-4 border border-dashed rounded-xl text-center bg-red-500/5 border-red-500/10 max-w-xl mx-auto flex flex-col items-center justify-center">
+                            <Lock className="w-8 h-8 text-red-500 mb-3" />
+                            <h4 className="font-bold text-sm text-foreground">Data Bloqueada para Alterações</h4>
+                            <p className="text-xs text-muted-foreground mt-1 max-w-sm leading-relaxed">
+                              Não há autorizações ativas para inserir dados neste dia. Caso precise ajustar, solicite a liberação com o gestor do contrato.
+                            </p>
                           </div>
                         )}
-                        {/* -------------------------------------- */}
-                        
-                        <div className={`space-y-6 ${editingRetroId ? 'p-4 border border-orange-500/30 rounded-xl bg-orange-500/5' : ''}`}>
-                          <TaskSelector
-                            contracts={contractsList}
-                            contractId={contractId}
-                            contractType={currentContractType}
-                            osList={filteredOsList}
-                            osId={osId}
-                            activity={activity}
-                            notes={notes}
-                            contractUsedMs={contractUsedMs}
-                            activityUsedMs={activityUsedMs}
-                            contractBudgetMs={contractBudgetMs}
-                            activityBudgetMs={activityBudgetMs}
-                            availableActivities={availableActivities}
-                            onContractChange={setContractId}
-                            onOsChange={setOsId}
-                            onActivityChange={setActivity}
-                            onNotesChange={setNotes}
-                            osUsedMs={osUsedMs}
-                            osBudgetMs={osBudgetMs}
-                          />
-                          
-                          <div className="grid gap-4 md:grid-cols-2 pt-4 border-t">
-                            <div className="space-y-1.5">
-                              <Label>Horário de Início</Label>
-                              <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-                            </div>
-                            <div className="space-y-1.5">
-                              <Label>Horário de Fim</Label>
-                              <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
-                            </div>
-                          </div>
+                      </CardContent>
+                    </Card>
+                  </div>
 
-                          <Button onClick={handleAddPanelEntry} disabled={!notesValid || contractId === ""} className="w-full h-12 bg-primary">
-                            {editingRetroId ? (
-                              <><Check className="w-4 h-4 mr-2" /> Atualizar Registro</>
-                            ) : (
-                              <><Check className="w-4 h-4 mr-2" /> Gravar Registro no Dia {panelDate.split('-').reverse().join('/')}</>
-                            )}
-                          </Button>
+                  <div className="space-y-3 min-w-0 w-full">
+                    <div className="flex items-center justify-between border-b pb-2 mb-3">
+                      <h3 className="text-xs font-bold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5 truncate">
+                        <MessageSquare className="w-3.5 h-3.5 shrink-0" /> Lançamentos do Dia: {panelDate.split('-').reverse().join('/')}
+                      </h3>
+                      <Badge variant="secondary" className="font-mono shrink-0">{panelDayEntries.length} itens</Badge>
+                    </div>
 
-                          {editingRetroId && (
-                            <Button onClick={() => {
-                               setEditingRetroId(null);
-                               setNotes("");
-                            }} variant="outline" className="w-full h-10 mt-2 border-dashed hover:bg-muted/50">
-                              Cancelar Edição
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="py-12 px-4 border border-dashed rounded-xl text-center bg-red-500/5 border-red-500/10 max-w-xl mx-auto flex flex-col items-center justify-center">
-                        <Lock className="w-8 h-8 text-red-500 mb-3" />
-                        <h4 className="font-bold text-sm text-foreground">Data Bloqueada para Alterações</h4>
-                        <p className="text-xs text-muted-foreground mt-1 max-w-sm leading-relaxed">
-                          Não há autorizações ativas para inserir dados neste dia. Caso precise ajustar, solicite a liberação com o gestor do contrato.
-                        </p>
-                      </div>
+                    <div className={!isPanelDateUnlocked ? "opacity-50 pointer-events-none" : ""}>
+                      <RetroHistoryList 
+                        entries={panelDayEntries} 
+                        contracts={contractsList}
+                        osList={osList}
+                        allocations={allocations}
+                        panelDate={panelDate}
+                        onEdit={handleEditEntry} 
+                        onDelete={handleDeleteEntry} 
+                      />
+                    </div>
+                    
+                    {!isPanelDateUnlocked && (
+                      <p className="text-[10px] text-center text-red-500 mt-2 font-bold">⚠️ Liberação retroativa necessária para editar estes lançamentos.</p>
                     )}
-                  </CardContent>
-                </Card>
-              </div>
-
-              <div className="space-y-3 min-w-0 w-full">
-                <div className="flex items-center justify-between border-b pb-2 mb-3">
-                  <h3 className="text-xs font-bold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5 truncate">
-                    <MessageSquare className="w-3.5 h-3.5 shrink-0" /> Lançamentos do Dia: {panelDate.split('-').reverse().join('/')}
-                  </h3>
-                  <Badge variant="secondary" className="font-mono shrink-0">{panelDayEntries.length} itens</Badge>
+                  </div>
                 </div>
-
-                <div className={!isPanelDateUnlocked ? "opacity-50 pointer-events-none" : ""}>
-                  <RetroHistoryList 
-                    entries={panelDayEntries} 
-                    contracts={contractsList}
-                    osList={osList}
-                    allocations={allocations}
-                    panelDate={panelDate}
-                    onEdit={handleEditEntry} 
-                    onDelete={handleDeleteEntry} 
-                  />
-                </div>
-                
-                {!isPanelDateUnlocked && (
-                  <p className="text-[10px] text-center text-red-500 mt-2 font-bold">⚠️ Liberação retroativa necessária para editar estes lançamentos.</p>
-                )}
-              </div>
-            </div>
+              </>
+            ) : (
+              <Card className="shadow-sm border-primary/20 animate-in fade-in-50 w-full mt-4">
+                 <CardHeader className="bg-primary/5 border-b pb-4">
+                    <div className="flex justify-between items-center w-full">
+                      <div>
+                        <CardTitle className="text-base flex items-center gap-2 text-primary">
+                           <History className="w-4 h-4"/> Extrato Consolidado do Período
+                        </CardTitle>
+                        <CardDescription>
+                           Relação detalhada de todos os apontamentos deste ciclo/intervalo ({extratoEntries.length} registros totalizando {(extratoEntries.reduce((sum, e) => sum + ((e.end ?? Date.now()) - e.start), 0) / 3600000).toFixed(1)}h).
+                        </CardDescription>
+                      </div>
+                      <Button onClick={handleExportarExcelConsultor} variant="outline" size="sm" className="h-8 text-[11px] bg-green-500/10 text-green-700 border-green-500/20 hover:bg-green-500/20">
+                        <Download className="w-3.5 h-3.5 mr-1" /> EXPORTAR EXCEL
+                      </Button>
+                    </div>
+                 </CardHeader>
+                 <CardContent className="p-0 overflow-hidden w-full">
+                    <div className="w-full overflow-x-auto max-h-150 scrollbar-thin">
+                       <table className="w-full text-xs text-left min-w-175">
+                          <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0 backdrop-blur-md shadow-xs">
+                             <tr>
+                                <th className="px-4 py-3 w-28">Data</th>
+                                <th className="px-4 py-3 w-48">Contrato / Projeto</th>
+                                <th className="px-4 py-3 w-56">Disciplina / Escopo</th>
+                                <th className="px-4 py-3 min-w-50">Observação</th>
+                                <th className="px-4 py-3 text-right w-32">Horário</th>
+                                <th className="px-4 py-3 text-right w-24">Total</th>
+                             </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border/60">
+                             {extratoEntries.length === 0 ? (
+                                <tr><td colSpan={6} className="p-12 text-center text-muted-foreground border-dashed">Nenhum apontamento registrado neste período.</td></tr>
+                             ) : extratoEntries.map(e => {
+                                const s = new Date(e.start);
+                                const end = e.end ? new Date(e.end) : new Date();
+                                const dur = (end.getTime() - s.getTime()) / 3600000;
+                                const cObj = allConsultorContracts.find(c => c.id === e.contractId);
+                                const osObj = osList.find(o => o.id === e.os_id);
+                                return (
+                                   <tr key={e.id} className="hover:bg-muted/10 transition-colors">
+                                      <td className="px-4 py-3.5 font-medium whitespace-nowrap">{s.toLocaleDateString('pt-BR')}</td>
+                                      <td className="px-4 py-3.5">
+                                         <p className="font-bold text-primary truncate max-w-62.5" title={cObj ? `${cObj.code} - ${cObj.name}` : e.contractName}>
+                                            {cObj ? `${cObj.code} - ${cObj.name}` : e.contractName}
+                                         </p>
+                                         {osObj && (
+                                            <p className="text-[10px] text-amber-600 dark:text-amber-500 font-bold uppercase mt-0.5 truncate max-w-62.5" title={`OS: ${osObj.codigo} ${osObj.descricao ? `- ${osObj.descricao}` : ''}`}>
+                                               OS: {osObj.codigo} {osObj.descricao ? `- ${osObj.descricao}` : ''}
+                                            </p>
+                                         )}
+                                      </td>
+                                      <td className="px-4 py-3.5 font-medium truncate max-w-62.5" title={e.activity}>{e.activity}</td>
+                                      <td className="px-4 py-3.5 text-muted-foreground italic truncate max-w-75" title={e.notes}>{e.notes || '-'}</td>
+                                      <td className="px-4 py-3.5 text-right text-muted-foreground font-mono whitespace-nowrap">
+                                         {s.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})} - {end.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}
+                                      </td>
+                                      <td className="px-4 py-3.5 text-right font-bold text-foreground font-mono whitespace-nowrap">{dur.toFixed(1)}h</td>
+                                   </tr>
+                                )
+                             })}
+                          </tbody>
+                       </table>
+                    </div>
+                 </CardContent>
+              </Card>
+            )}
+            {/* 🔥 AQUI TERMINA A CONDIÇÃO DA NOVA ABA 🔥 */}
           </div>
         )}
         </div>

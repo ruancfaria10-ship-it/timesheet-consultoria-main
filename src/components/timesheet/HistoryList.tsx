@@ -50,19 +50,12 @@ export function HistoryList({
     return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   };
 
-  const getTimestampFromFields = (timeStr: string, day: "hoje" | "ontem", isEndTime: boolean = false, startMs?: number): number => {
+  const getTimestampFromFields = (timeStr: string, day: "hoje" | "ontem"): number => {
     const [hours, minutes] = timeStr.split(":").map(Number);
     const date = new Date();
     if (day === "ontem") { date.setDate(date.getDate() - 1); }
     date.setHours(hours, minutes, 0, 0);
-    const ms = date.getTime();
-
-    // Se for o horário final e virou a noite
-    if (isEndTime && startMs && ms <= startMs) {
-       date.setDate(date.getDate() + 1);
-       return date.getTime();
-    }
-    return ms;
+    return date.getTime();
   };
 
   const openEdit = (e: TimeEntry) => {
@@ -78,15 +71,82 @@ export function HistoryList({
 
   const cObj = contracts.find(c => c.id === editContractId);
   const isComOs = cObj?.tipo === 'continuado_com_os';
-  const availableOs = osList.filter(o => o.contract_id === editContractId);
 
+  // Helper para identificar o ciclo exato (mês/ano) do apontamento sendo editado
+  const editCycle = useMemo(() => {
+    if (!cObj) return { month: "", year: "" };
+    const d = new Date();
+    if (editDay === "ontem") d.setDate(d.getDate() - 1);
+    
+    const day = d.getDate();
+    let m = d.getMonth();
+    let y = d.getFullYear();
+    
+    if (cObj.ciclo_inicio > cObj.ciclo_fim && day >= cObj.ciclo_inicio) {
+      m = m === 11 ? 0 : m + 1;
+      if (m === 0) y++;
+    }
+    return { month: String(m), year: String(y) };
+  }, [editDay, cObj]);
+  
+  // Traz apenas as OSs vinculadas ao contrato E com alocação no CICLO ATUAL
+  const availableOs = useMemo(() => {
+    if (!editContractId || !isComOs) return [];
+    
+    const alocacoesNoCiclo = allocations.filter(a => 
+      a.contract_id === editContractId && 
+      a.mes === editCycle.month && 
+      a.ano === editCycle.year &&
+      (a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)')
+    );
+    
+    const osIdsAlocadas = new Set(alocacoesNoCiclo.map(a => a.os_id));
+    return osList.filter(o => o.contract_id === editContractId && osIdsAlocadas.has(o.id));
+  }, [editContractId, osList, isComOs, allocations, editCycle]);
+
+  // Traz apenas as atividades permitidas no contrato+OS NO CICLO ATUAL
   const availableActivities = useMemo(() => {
     if (!editContractId) return [];
+    
     const rawActivities = Array.from(new Set(
-      allocations.filter(a => a.contract_id === editContractId && (!isComOs || a.os_id === editOsId)).map(a => a.atividade)
+      allocations.filter(a => 
+        a.contract_id === editContractId && 
+        a.mes === editCycle.month && 
+        a.ano === editCycle.year &&
+        (!isComOs || a.os_id === editOsId)
+      ).map(a => a.atividade)
     ));
-    return rawActivities.sort();
-  }, [allocations, editContractId, editOsId, isComOs]);
+    
+    const cleanedActivities = rawActivities.filter(a => a !== 'Preço Fechado (Medição)');
+    return cleanedActivities.length > 0 ? cleanedActivities.sort() : ['Sem atividade específica'];
+  }, [allocations, editContractId, editOsId, isComOs, editCycle]);
+
+  // Quando o contrato muda, força a OS e a atividade a resetarem imediatamente baseando-se no ciclo
+  const handleContractChange = (newContractId: string) => {
+    setEditContractId(newContractId);
+    
+    const newContractObj = contracts.find(c => c.id === newContractId);
+    if (newContractObj?.tipo === 'continuado_com_os') {
+      const d = new Date();
+      if (editDay === "ontem") d.setDate(d.getDate() - 1);
+      const day = d.getDate();
+      let m = d.getMonth();
+      let y = d.getFullYear();
+      if (newContractObj.ciclo_inicio > newContractObj.ciclo_fim && day >= newContractObj.ciclo_inicio) {
+        m = m === 11 ? 0 : m + 1;
+        if (m === 0) y++;
+      }
+      
+      const alocsNoCiclo = allocations.filter(a => a.contract_id === newContractId && a.mes === String(m) && a.ano === String(y) && (a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)'));
+      const osIdsAlocadas = new Set(alocsNoCiclo.map(a => a.os_id));
+      const validOs = osList.filter(o => o.contract_id === newContractId && osIdsAlocadas.has(o.id));
+      
+      setEditOsId(validOs.length > 0 ? validOs[0].id : "");
+    } else {
+      setEditOsId("");
+    }
+    setEditActivity("");
+  };
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -162,7 +222,7 @@ export function HistoryList({
             
             <div className="space-y-1.5">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Contrato / Cliente</Label>
-              <Select value={editContractId} onValueChange={(v) => { setEditContractId(v); setEditOsId(""); setEditActivity(""); }}>
+              <Select value={editContractId} onValueChange={handleContractChange}>
                 <SelectTrigger><SelectValue placeholder="Selecione..." /></SelectTrigger>
                 <SelectContent className="z-9999">
                   {contracts.map(c => <SelectItem key={c.id} value={c.id}>{c.code} - {c.name}</SelectItem>)}
@@ -214,8 +274,28 @@ export function HistoryList({
             <Button variant="ghost" onClick={() => setEditing(null)}>Cancelar</Button>
             <Button onClick={() => {
                 if (!editing) return;
+                
+                // 1. BLOQUEIO DE ESTADO FANTASMA (Atividade)
+                if (!editActivity || !availableActivities.includes(editActivity)) {
+                   alert("Por favor, selecione uma Disciplina / Escopo válida para este contrato antes de salvar.");
+                   return;
+                }
+
+                // 2. BLOQUEIO DE OS FANTASMA
+                if (isComOs && (!editOsId || !availableOs.some(o => o.id === editOsId))) {
+                   alert("Por favor, selecione uma Ordem de Serviço válida para este contrato antes de salvar.");
+                   return;
+                }
+
+                // Sua lógica de tempo de hoje/ontem
                 const finalStart = getTimestampFromFields(editStart, editDay);
-                const finalEnd = getTimestampFromFields(editEnd, editDay, true, finalStart);
+                const finalEnd = getTimestampFromFields(editEnd, editDay);
+                
+                if (finalEnd <= finalStart) {
+                   alert("O horário de saída deve ser maior que o horário de entrada (não é permitido lançar virada de noite).");
+                   return;
+                }
+                
                 onEdit(editing.id, finalStart, finalEnd, editNotes, editContractId, isComOs ? editOsId : null, editActivity);
                 setEditing(null);
               }}>

@@ -55,15 +55,78 @@ export function RetroHistoryList({
 
   const cObj = contracts.find(c => c.id === editContractId);
   const isComOs = cObj?.tipo === 'continuado_com_os';
-  const availableOs = osList.filter(o => o.contract_id === editContractId);
 
+  // Helper para identificar o ciclo exato (mês/ano) do apontamento no painel retroativo
+  const editCycle = useMemo(() => {
+    if (!cObj || !panelDate) return { month: "", year: "" };
+    const [y_str, m_str, d_str] = panelDate.split('-');
+    const day = parseInt(d_str);
+    let m = parseInt(m_str) - 1;
+    let y = parseInt(y_str);
+    
+    if (cObj.ciclo_inicio > cObj.ciclo_fim && day >= cObj.ciclo_inicio) {
+      m = m === 11 ? 0 : m + 1;
+      if (m === 0) y++;
+    }
+    return { month: String(m), year: String(y) };
+  }, [panelDate, cObj]);
+
+  // Traz apenas as OSs vinculadas ao contrato E com alocação no CICLO ATUAL do painel
+  const availableOs = useMemo(() => {
+    if (!editContractId || !isComOs) return [];
+    
+    const alocacoesNoCiclo = allocations.filter(a => 
+      a.contract_id === editContractId && 
+      a.mes === editCycle.month && 
+      a.ano === editCycle.year &&
+      (a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)')
+    );
+    
+    const osIdsAlocadas = new Set(alocacoesNoCiclo.map(a => a.os_id));
+    return osList.filter(o => o.contract_id === editContractId && osIdsAlocadas.has(o.id));
+  }, [editContractId, osList, isComOs, allocations, editCycle]);
+
+  // Traz apenas as atividades permitidas no contrato+OS NO CICLO ATUAL do painel
   const availableActivities = useMemo(() => {
     if (!editContractId) return [];
+    
     const rawActivities = Array.from(new Set(
-      allocations.filter(a => a.contract_id === editContractId && (!isComOs || a.os_id === editOsId)).map(a => a.atividade)
+      allocations.filter(a => 
+        a.contract_id === editContractId && 
+        a.mes === editCycle.month && 
+        a.ano === editCycle.year &&
+        (!isComOs || a.os_id === editOsId)
+      ).map(a => a.atividade)
     ));
-    return rawActivities.sort();
-  }, [allocations, editContractId, editOsId, isComOs]);
+    
+    const cleanedActivities = rawActivities.filter(a => a !== 'Preço Fechado (Medição)');
+    return cleanedActivities.length > 0 ? cleanedActivities.sort() : ['Sem atividade específica'];
+  }, [allocations, editContractId, editOsId, isComOs, editCycle]);
+
+  // Quando o contrato muda, força a OS e a atividade a resetarem imediatamente
+  const handleContractChange = (newContractId: string) => {
+    setEditContractId(newContractId);
+    const newContractObj = contracts.find(c => c.id === newContractId);
+    if (newContractObj?.tipo === 'continuado_com_os') {
+      const [y_str, m_str, d_str] = panelDate.split('-');
+      const day = parseInt(d_str);
+      let m = parseInt(m_str) - 1;
+      let y = parseInt(y_str);
+      if (newContractObj.ciclo_inicio > newContractObj.ciclo_fim && day >= newContractObj.ciclo_inicio) {
+        m = m === 11 ? 0 : m + 1;
+        if (m === 0) y++;
+      }
+      
+      const alocacoesDesteContrato = allocations.filter(a => a.contract_id === newContractId && a.mes === String(m) && a.ano === String(y) && (a.horas_disponiveis > 0 || a.atividade === 'Preço Fechado (Medição)'));
+      const osIdsAlocadas = new Set(alocacoesDesteContrato.map(a => a.os_id));
+      const validOs = osList.filter(o => o.contract_id === newContractId && osIdsAlocadas.has(o.id));
+      
+      setEditOsId(validOs.length > 0 ? validOs[0].id : "");
+    } else {
+      setEditOsId("");
+    }
+    setEditActivity("");
+  };
 
   const renderEntryCard = (e: TimeEntry) => {
     const dur = (e.end ?? Date.now()) - e.start;
@@ -107,7 +170,7 @@ export function RetroHistoryList({
         <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Editar Apontamento (Retroativo)</DialogTitle></DialogHeader>
           <div className="space-y-4 pt-2">
-            <div className="space-y-1.5"><Label className="text-xs uppercase tracking-wider text-muted-foreground">Contrato / Cliente</Label><Select value={editContractId} onValueChange={(v) => { setEditContractId(v); setEditOsId(""); setEditActivity(""); }}><SelectTrigger><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent className="z-9999">{contracts.map(c => <SelectItem key={c.id} value={c.id}>{c.code} - {c.name}</SelectItem>)}</SelectContent></Select></div>
+            <div className="space-y-1.5"><Label className="text-xs uppercase tracking-wider text-muted-foreground">Contrato / Cliente</Label><Select value={editContractId} onValueChange={handleContractChange}><SelectTrigger><SelectValue placeholder="Selecione..." /></SelectTrigger><SelectContent className="z-9999">{contracts.map(c => <SelectItem key={c.id} value={c.id}>{c.code} - {c.name}</SelectItem>)}</SelectContent></Select></div>
             {isComOs && (<div className="space-y-1.5"><Label className="text-xs uppercase tracking-wider text-muted-foreground">Ordem de Serviço (OS)</Label><Select value={editOsId} onValueChange={(v) => { setEditOsId(v); setEditActivity(""); }}><SelectTrigger><SelectValue placeholder="Selecione a OS..." /></SelectTrigger><SelectContent className="z-9999">{availableOs.map(o => <SelectItem key={o.id} value={o.id}>{o.codigo} {o.descricao ? `- ${o.descricao}` : ''}</SelectItem>)}</SelectContent></Select></div>)}
             <div className="space-y-1.5"><Label className="text-xs uppercase tracking-wider text-muted-foreground">Disciplina / Escopo</Label><Select value={editActivity} onValueChange={setEditActivity} disabled={availableActivities.length === 0}><SelectTrigger><SelectValue placeholder={availableActivities.length === 0 ? "Nenhuma disciplina" : "Selecione..."} /></SelectTrigger><SelectContent className="z-9999">{availableActivities.map(a => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent></Select></div>
             
@@ -120,8 +183,25 @@ export function RetroHistoryList({
             <Button variant="ghost" onClick={() => setEditing(null)}>Cancelar</Button>
             <Button onClick={() => {
                 if (!editing) return;
+
+                // 1. BLOQUEIO DE ESTADO FANTASMA (Atividade)
+                // Impede salvar se a atividade não pertencer ao contrato selecionado
+                if (!editActivity || !availableActivities.includes(editActivity)) {
+                   alert("Por favor, selecione uma Disciplina / Escopo válida para este contrato antes de salvar.");
+                   return;
+                }
+
+                // 2. BLOQUEIO DE OS FANTASMA
+                // Impede salvar se for uma OS em que o consultor não tem horas alocadas
+                if (isComOs && (!editOsId || !availableOs.some(o => o.id === editOsId))) {
+                   alert("Por favor, selecione uma Ordem de Serviço válida para este contrato antes de salvar.");
+                   return;
+                }
+
+                // Lógica de tempo original (Corujão bloqueado/tratado pela sua função)
                 const finalStart = getTimestampFromFields(editStart, panelDate);
                 const finalEnd = getTimestampFromFields(editEnd, panelDate, true, finalStart);
+                
                 onEdit(editing.id, finalStart, finalEnd, editNotes, editContractId, isComOs ? editOsId : null, editActivity);
                 setEditing(null);
               }}>Salvar</Button>
