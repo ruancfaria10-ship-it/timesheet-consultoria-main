@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { 
   PlusCircle, ArrowRight, Trash2, 
   Loader2, Pencil, Check, X, Save, Sun, Moon, User, Layers, 
@@ -75,6 +76,24 @@ export function AdminDashboard() {
   const [salvando, setSalvando] = useState(false)
 
   const [consultores, setConsultores] = useState<Consultor[]>([])
+  
+  // 🌟 FASE 4: Estados para Criação/Edição de Consultores Convidados
+  const [isNovoConsultorModalOpen, setIsNovoConsultorModalOpen] = useState(false)
+  const [novoConsNome, setNovoConsNome] = useState('')
+  const [novoConsEspecialidade, setNovoConsEspecialidade] = useState('')
+  const [editandoConsId, setEditandoConsId] = useState<string | null>(null)
+  const [editConsNome, setEditConsNome] = useState('')
+  const [editConsEspecialidade, setEditConsEspecialidade] = useState('')
+
+  // 🌟 FASE 5: Memória de Alertas Ignorados (Check)
+  const [alertasAck, setAlertasAck] = useState<Record<string, string>>(() => {
+     try { return JSON.parse(localStorage.getItem('ep_alertas_ack') || '{}'); } catch { return {}; }
+  });
+  const handleAckAlert = (id: string, tipo: string) => {
+     const n = { ...alertasAck, [id]: tipo };
+     setAlertasAck(n); localStorage.setItem('ep_alertas_ack', JSON.stringify(n));
+  };
+  const handleClearAcks = () => { setAlertasAck({}); localStorage.removeItem('ep_alertas_ack'); };
   const [contratos, setContratos] = useState<Contrato[]>([])
   const [osList, setOsList] = useState<OrdemServico[]>([])
   
@@ -402,6 +421,7 @@ export function AdminDashboard() {
   const [isReguaModalOpen, setIsReguaModalOpen] = useState(false);
   const [reguaData, setReguaData] = useState<any[]>([]);
   const [reguaAjustesData, setReguaAjustesData] = useState<any[]>([]); // <-- NOVO ESTADO AQUI
+  const [reguaBaseAjustesData, setReguaBaseAjustesData] = useState<any[]>([]); // 🌟 FASE 2: Novo estado para ajustar o Teto da Matriz
   const [liquidandoRegua, setLiquidandoRegua] = useState(false);
 
   const calcularSaldosPassados = () => {
@@ -414,8 +434,8 @@ export function AdminDashboard() {
     const ajustes: any[] = []; 
 
     allAlocacoes.forEach(aloc => {
-       // Ignora Preço Fechado e Overhead / Pequenos Suportes dinâmicos
-       if (aloc.atividade === 'Preço Fechado (Medição)' || aloc.horas_disponiveis >= 9000 || aloc.horas_disponiveis <= 0) return;
+       // 🌟 CORREÇÃO: Agora ele lê TODAS as alocações (inclusive quem estava com 0h ou 9999h no passado)
+       if (aloc.atividade === 'Preço Fechado (Medição)') return;
 
        const cObj = contratos.find(c => c.id === aloc.contract_id);
        if (!cObj) return;
@@ -438,7 +458,6 @@ export function AdminDashboard() {
        if (isPast) {
            const cb = getCycleBoundsForContract(cObj.ciclo_inicio, cObj.ciclo_fim, aloc.mes, aloc.ano);
            
-           // Gasto específico DESSA disciplina
            let times = allTimesheets.filter(t => 
                t.user_id === aloc.user_id && 
                t.contract_id === aloc.contract_id && 
@@ -453,7 +472,7 @@ export function AdminDashboard() {
 
            const gasto = times.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000, 0);
 
-           // Se houver QUALQUER diferença (sobra ou estouro), entra nos Ajustes
+           // 🌟 CORREÇÃO: Se houver QUALQUER diferença (sobra ou déficit negativo), entra nos Ajustes
            if (Math.abs(aloc.horas_disponiveis - gasto) > 0.01) {
                ajustes.push({
                    alocId: aloc.id,
@@ -467,7 +486,6 @@ export function AdminDashboard() {
                    diferenca: aloc.horas_disponiveis - gasto
                });
 
-               // Agrupa os valores para o menu de resumo superior (Visão do Contrato)
                const key = `${aloc.user_id}_${aloc.contract_id}_${aloc.os_id || 'null'}_${aloc.mes}_${aloc.ano}`;
                if (!resumoMap.has(key)) {
                    resumoMap.set(key, {
@@ -486,26 +504,72 @@ export function AdminDashboard() {
        }
     });
 
-    // O menu de Resumo continua mostrando apenas os contratos com saldo global sobrando
+    // 🌟 CORREÇÃO: Permite que saldos negativos (déficits do passado) também entrem no resumo para correção
     const resumoFinal = Array.from(resumoMap.values())
        .map(g => ({ ...g, saldoRemanescente: g.orcadoTotal - g.gastoTotal }))
-       .filter(g => g.saldoRemanescente > 0.01);
+       .filter(g => Math.abs(g.saldoRemanescente) > 0.01);
+
+    // 🌟 FASE 2: Ajuste Inteligente do Teto da Linha de Base (Pequenos Suportes)
+    const baseAjustes: any[] = [];
+    const latestBasesMap = new Map();
+    
+    allLinhasBase.forEach(b => {
+       const key = `${b.contract_id}_${b.os_id || 'null'}`;
+       if (!latestBasesMap.has(key) || latestBasesMap.get(key).versao < b.versao) {
+           latestBasesMap.set(key, b);
+       }
+    });
+
+    Array.from(latestBasesMap.values()).forEach(base => {
+       const cObj = contratos.find(c => c.id === base.contract_id);
+       const osObj = osList.find(o => o.id === base.os_id);
+       
+       if (cObj && osObj && osObj.codigo === '🛠️ Pequenos Suportes') {
+           const items = allLinhaBaseItems.filter(i => i.base_id === base.id);
+           
+           items.forEach(item => {
+               let totalAlocadoCorrigido = 0;
+               allAlocacoes.filter(a => a.user_id === item.user_id && a.contract_id === base.contract_id && a.os_id === base.os_id && a.atividade !== 'Preço Fechado (Medição)').forEach(a => {
+                   const ajustePendente = ajustes.find(aj => aj.alocId === a.id);
+                   if (ajustePendente) totalAlocadoCorrigido += ajustePendente.gasto;
+                   else totalAlocadoCorrigido += Number(a.horas_disponiveis);
+               });
+                   
+               if (Math.abs(item.horas_teto - totalAlocadoCorrigido) > 0.01) {
+                   baseAjustes.push({
+                       itemId: item.id,
+                       consultorNome: consultores.find(c => c.id === item.user_id)?.nome || 'Desconhecido',
+                       contratoCodigo: cObj.codigo,
+                       osCodigo: osObj.codigo,
+                       orcado: item.horas_teto,
+                       novoTeto: totalAlocadoCorrigido,
+                       diferenca: item.horas_teto - totalAlocadoCorrigido
+                   });
+               }
+           });
+       }
+    });
 
     setReguaData(resumoFinal);
     setReguaAjustesData(ajustes);
+    setReguaBaseAjustesData(baseAjustes);
     setIsReguaModalOpen(true);
   };
 
   const liquidarPassado = async () => {
      setLiquidandoRegua(true);
      try {
-        // Agora iteramos sobre TODAS as disciplinas divergentes (reguaAjustesData) para igualar no Supabase
         const promises = reguaAjustesData.map(item =>
            supabase.from('alocacoes').update({ horas_disponiveis: item.gasto }).eq('id', item.alocId)
         );
-        await Promise.all(promises);
-        await registrarLog("Saldos Liquidados e Ajustados", `Foram equalizadas ${reguaAjustesData.length} alocações no banco de dados (Orçado = Gasto).`);
-        toast.success(`${reguaAjustesData.length} alocações foram ajustadas com sucesso!`);
+        const promisesBase = reguaBaseAjustesData.map(item =>
+           supabase.from('linha_base_items').update({ horas_teto: item.novoTeto }).eq('id', item.itemId)
+        );
+        
+        await Promise.all([...promises, ...promisesBase]);
+        
+        await registrarLog("Saldos Liquidados e Ajustados", `Foram equalizadas ${reguaAjustesData.length} alocações no banco de dados e ajustados ${reguaBaseAjustesData.length} tetos de Linha de Base (Pequenos Suportes).`);
+        toast.success(`Régua passada com sucesso! Todos os déficits e sobras foram corrigidos.`);
         setIsReguaModalOpen(false);
         await carregarTudoParaDash();
      } catch (error) {
@@ -566,7 +630,7 @@ export function AdminDashboard() {
     }]).select('*').single()
     if (error || !newContract) return alert("Erro ao criar contrato no banco de dados.");
     if (novoTipo === 'continuado_com_os') {
-       await supabase.from('ordens_servico').insert([{ contract_id: newContract.id, codigo: '🛠️ Pequenos Suportes', descricao: 'Serviços pontuais e assessoria (Saldo Dinâmico)', horas_previstas: 0, status_ativa: true }]);
+       await supabase.from('ordens_servico').insert([{ contract_id: newContract.id, codigo: '🛠️ Pequenos Suportes', descricao: 'Serviços pontuais e assessoria', horas_previstas: 0, status_ativa: true }]);
     }
     await registrarLog("Contrato Criado", `O contrato ${novoCodigo.toUpperCase()} (${novoNomeContrato}) foi gerado.`);
     setNovoCodigo(''); setNovoNomeContrato(''); setNovoTetoGlobal(0); carregarDadosDoBanco();
@@ -597,7 +661,63 @@ export function AdminDashboard() {
     toast.success("Consultor excluído com sucesso.");
     setLoading(false);
   }
-  
+
+  // 🌟 FASE 4: Função para Cadastrar Consultor (Preço Fechado / Convidado)
+  async function criarConsultorConvidado() {
+    if (!novoConsNome.trim()) return toast.error("O nome do consultor é obrigatório.");
+    setSalvando(true);
+    
+    const newId = crypto.randomUUID();
+    const { error } = await supabase.from('consultores').insert([{
+      id: newId,
+      nome: novoConsNome.trim(),
+      especialidade: novoConsEspecialidade.trim(),
+      is_convidado: true,
+      status_ativo: true, // Nasce ativo para aparecer na Matriz
+      perfil: 'consultor',
+      horas_minimas_mes: 0
+    }]);
+
+    setSalvando(false);
+
+    if (error) {
+       toast.error("Erro ao criar consultor: " + error.message);
+       return;
+    }
+
+    toast.success("Consultor Convidado criado com sucesso!");
+    await registrarLog("Novo Consultor (Preço Fechado)", `O gestor cadastrou o perfil de ${novoConsNome.trim()} como convidado (sem acesso ao app).`);
+    
+    setIsNovoConsultorModalOpen(false);
+    setNovoConsNome('');
+    setNovoConsEspecialidade('');
+    carregarDadosDoBanco();
+  }
+  // 🌟 FASE 4.1: Edição e Exclusão de Convidados
+  async function salvarEdicaoConvidado() {
+     if (!editConsNome.trim()) return toast.error("Nome obrigatório.");
+     setSalvando(true);
+     await supabase.from('consultores').update({ nome: editConsNome.trim(), especialidade: editConsEspecialidade.trim() }).eq('id', editandoConsId);
+     setConsultores(p => p.map(c => c.id === editandoConsId ? { ...c, nome: editConsNome.trim(), especialidade: editConsEspecialidade.trim() } : c));
+     await registrarLog("Consultor Editado", `O perfil do convidado ${editConsNome.trim()} foi atualizado.`);
+     setEditandoConsId(null);
+     setSalvando(false);
+     toast.success("Perfil atualizado com sucesso!");
+  }
+
+  async function apagarConvidado(id: string, nome: string) {
+     const { count } = await supabase.from('alocacoes').select('*', { count: 'exact', head: true }).eq('user_id', id);
+     if (count && count > 0) return alert(`❌ BLOQUEIO: O consultor ${nome} possui ${count} alocações no sistema. Para não quebrar a matriz e o histórico, você deve apenas INATIVÁ-LO na chave seletora.`);
+     
+     if (!window.confirm(`Excluir definitivamente o parceiro "${nome}"?`)) return;
+     setSalvando(true);
+     await supabase.from('consultores').delete().eq('id', id);
+     setConsultores(p => p.filter(c => c.id !== id));
+     await registrarLog("Consultor Excluído", `O perfil do parceiro ${nome} foi permanentemente deletado.`);
+     setSalvando(false);
+     toast.success("Parceiro excluído!");
+  }
+
   async function excluirContrato(id: string, nome: string) {
     const { count: countTimesheets } = await supabase.from('timesheets').select('*', { count: 'exact', head: true }).eq('contract_id', id);
     if (countTimesheets && countTimesheets > 0) return alert(`❌ BLOQUEIO:\n\nEste contrato possui ${countTimesheets} apontamentos de horas vinculados. Apenas inative-o.`);
@@ -994,7 +1114,7 @@ export function AdminDashboard() {
     const targetOsId = alocacaoOsId === 'global' ? null : (alocacaoOsId || null);
     const isSemOs = targetOsId ? osList.find(o => o.id === targetOsId)?.codigo === '🛠️ Pequenos Suportes' : false;
     const isOverheadTypeSave = cObj?.tipo === 'overhead';
-    const isDynamic = isSemOs || isOverheadTypeSave;
+    const isDynamic = false;
 
     // Traz todas as alocações da vida deste contrato para checar o TETO DA MATRIZ
     let queryAll = supabase.from('alocacoes').select('*').eq('contract_id', contratoAtivo);
@@ -1209,12 +1329,17 @@ export function AdminDashboard() {
     }
   }
 
-  // 🌟 MOTOR INTELIGENTE: Calcula o Teto da Linha de Base (última versão) do Contrato ou do Consultor
-  const getTetoBaseContrato = (contractId: string, userId?: string) => {
-    const basesDoContrato = allLinhasBase.filter(b => b.contract_id === contractId);
+  // 🌟 MOTOR INTELIGENTE: Calcula o Teto da Linha de Base do Contrato ou OS
+  const getTetoBaseContrato = (contractId: string, userId?: string, osIdFiltro?: string) => {
+    let basesDoContrato = allLinhasBase.filter(b => b.contract_id === contractId);
+    
+    // 🌟 CORREÇÃO: Lê a OS especificamente se ela for passada no filtro
+    if (osIdFiltro && osIdFiltro !== 'todas') {
+       basesDoContrato = basesDoContrato.filter(b => b.os_id === osIdFiltro);
+    }
+    
     if (basesDoContrato.length === 0) return 0;
 
-    // Mapeia apenas a versão mais recente de cada OS (ou global)
     const latestBasesMap = new Map();
     basesDoContrato.forEach(b => {
       const key = b.os_id || 'global';
@@ -1836,22 +1961,12 @@ export function AdminDashboard() {
 
       let orcadoAtual = 0;
       
-      if (cont.tipo === 'overhead' || cont.tipo === 'fechado') {
-         // Overhead e Preço Fechado não usam horas alocadas no painel de horas. O orçamento dinâmico iguala o gasto para não distorcer.
+      if (cont.tipo === 'fechado') {
          orcadoAtual = gastoAtual; 
       } else {
-         // Para Contratos Normais: Soma as horas dos Pequenos Suportes ou de Meses já passados direto do timesheet (sem duplicar)
-         const tDinamicoPassado = timesContrato.filter(t => {
-               const isSup = osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes';
-               return isSup;
-           });
-           const gastoDinamicoPassado = tDinamicoPassado.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-           
-           // Soma as horas alocadas explicitamente (Ignorando Suportes e Fechados)
-           const alocsFixas = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes');
-           const alocadoFixo = alocsFixas.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
-           
-           orcadoAtual = gastoDinamicoPassado + alocadoFixo;
+         // 🌟 FASE 2: Soma TODAS as horas alocadas explicitamente (Fim da exceção de Suportes/Overhead)
+         const alocsFixas = fAlocs.filter(a => a.contract_id === cont.id && a.atividade !== 'Preço Fechado (Medição)');
+         orcadoAtual = alocsFixas.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
       }
 
       orcadoGlobal += orcadoAtual;
@@ -1954,102 +2069,119 @@ export function AdminDashboard() {
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     saveAs(blob, `Relatorio_${tipo}_${cObj.nome.split(' ')[0]}_${MESES_NOME[parseInt(resConsMes)]}_${resConsAno}.xlsx`);
   }
+  // 🌟 FASE 5: Motor Hierárquico do Painel do Consultor
   const resumoConsultorData = useMemo(() => {
      if (!resConsId) return null;
      const consObj = consultores.find(c => c.id === resConsId);
      if (!consObj) return null;
 
+     const map = new Map<string, any>();
+     const tsUser = allTimesheets.filter(t => t.user_id === resConsId);
+     
+     // 🌟 CORREÇÃO: Usar o array 'contratos' para cruzar os dados, pois o Admin carrega as alocações de forma bruta
+     const alocsDoMes = allAlocacoes.filter(a => {
+        if (a.user_id !== resConsId || a.mes !== resConsMes || a.ano !== resConsAno) return false;
+        const cObj = contratos.find(c => c.id === a.contract_id);
+        return cObj?.status_ativo;
+     });
+
+     alocsDoMes.forEach(alloc => {
+       const cObj = contratos.find(c => c.id === alloc.contract_id);
+       if (!cObj) return;
+
+       if (!map.has(alloc.contract_id)) {
+         map.set(alloc.contract_id, {
+           id: alloc.contract_id, codigo: cObj.codigo, nome: cObj.nome,
+           tipo: cObj.tipo, inicio: cObj.ciclo_inicio, fim: cObj.ciclo_fim, osGroups: new Map()
+         });
+       }
+       const cData = map.get(alloc.contract_id);
+       const isComOs = cData.tipo === 'continuado_com_os';
+       const osKey = isComOs && alloc.os_id ? alloc.os_id : 'sem_os';
+       if (!cData.osGroups.has(osKey)) {
+         const osObj = osList.find(o => o.id === osKey);
+         cData.osGroups.set(osKey, { id: osKey, codigo: osObj?.codigo || '', nome: osObj?.descricao || '', atividades: [] });
+       }
+       cData.osGroups.get(osKey).atividades.push(alloc);
+     });
+     
+     tsUser.forEach(e => {
+       const cObj = contratos.find(c => c.id === e.contract_id);
+       if (!cObj || !cObj.status_ativo) return;
+       const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
+       if (new Date(e.start_at).getTime() >= cb.start && new Date(e.start_at).getTime() <= cb.end) {
+         if (!map.has(e.contract_id)) {
+           map.set(e.contract_id, {
+             id: cObj.id, codigo: cObj.codigo, nome: cObj.nome,
+             tipo: cObj.tipo, inicio: cObj.ciclo_inicio, fim: cObj.ciclo_fim, osGroups: new Map()
+           });
+         }
+         const cData = map.get(e.contract_id);
+         const isComOs = cData.tipo === 'continuado_com_os';
+         const osKey = isComOs && e.os_id ? e.os_id : 'sem_os';
+         if (!cData.osGroups.has(osKey)) {
+           const osObj = osList.find(o => o.id === osKey);
+           cData.osGroups.set(osKey, { id: osKey, codigo: osObj?.codigo || '', nome: osObj?.descricao || '', atividades: [] });
+         }
+         const osGroup = cData.osGroups.get(osKey);
+         if (!osGroup.atividades.some((a: any) => a.atividade === e.activity)) {
+            osGroup.atividades.push({ atividade: e.activity, horas_disponiveis: 0, contract_id: e.contract_id, os_id: osKey !== 'sem_os' ? osKey : null });
+         }
+       }
+     });
+
      let orcadoTotal = 0; let gastoTotal = 0;
-     const now = new Date(); const currentDay = now.getDate(); let m = now.getMonth(); let y = now.getFullYear();
-     const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
 
-     const contratosListados: Array<{id: string, codigo: string, nome: string, orcado: number, gasto: number, ilimitado: boolean, isFechado?: boolean}> = [];
-     const cEnvolvidos = new Set<string>();
+     const contratosListados = Array.from(map.values()).map(contract => {
+       let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasFechado = false;
+       const cb = getEffectiveBounds(contract.inicio, contract.fim, resConsMes, resConsAno);
 
-     // Puxa do que foi alocado E do que foi apontado (para garantir que meses passados, atuais e futuros apareçam)
-     allAlocacoes.filter(a => a.user_id === resConsId && a.mes === resConsMes && a.ano === resConsAno && contratos.find(c=>c.id===a.contract_id)?.status_ativo).forEach(a => cEnvolvidos.add(a.contract_id));
-     allTimesheets.filter(t => t.user_id === resConsId).forEach(t => {
-        const cObj = contratos.find(c => c.id === t.contract_id);
-        if (cObj?.status_ativo) {
-           const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
-           if (new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end) cEnvolvidos.add(cObj.id);
-        }
+       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
+         let totalOrcadoOs = 0; let totalGastoOs = 0;
+
+         const atividadesProcessadas = osGroup.atividades.map((a: any) => {
+           const isFechadoAtiv = a.atividade === 'Preço Fechado (Medição)' || contract.tipo === 'fechado';
+           if (isFechadoAtiv) {
+              hasFechado = true;
+              const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
+              const medidoMes = allMedicoes.find(m => m.user_id === resConsId && m.contract_id === contract.id && (osGroup.id !== 'sem_os' ? m.os_id === osGroup.id : true) && m.mes === resConsMes && m.ano === resConsAno)?.percentual || 0;
+              const medidoPassado = allMedicoes.filter(m => {
+                  if (m.user_id !== resConsId || m.contract_id !== contract.id) return false;
+                  if (osGroup.id !== 'sem_os' && m.os_id !== osGroup.id) return false;
+                  const mA = parseInt(m.ano); const mM = parseInt(m.mes);
+                  return mA < pA || (mA === pA && mM < pM);
+              }).reduce((sum, m) => sum + m.percentual, 0);
+              
+              totalOrcadoNum += medidoMes; totalGastoContrato += medidoPassado;
+              totalOrcadoOs += medidoMes; totalGastoOs += medidoPassado;
+              return { nome: a.atividade, orcado: medidoMes, gasto: medidoPassado, saldo: 100 - (medidoMes + medidoPassado), isFechado: true };
+           }
+
+           let filterCycle = tsUser.filter(e => e.contract_id === contract.id && e.activity === a.atividade && new Date(e.start_at).getTime() >= cb.start && new Date(e.start_at).getTime() <= cb.end);
+           if (contract.tipo === 'continuado_com_os' && osGroup.id !== 'sem_os') filterCycle = filterCycle.filter(e => e.os_id === osGroup.id);
+           
+           const gastoCicloH = filterCycle.reduce((sum, e) => sum + (((new Date(e.end_at || Date.now()).getTime()) - new Date(e.start_at).getTime())), 0) / 3600000;
+           const orcadoCicloH = Number(a.horas_disponiveis || 0);
+
+           totalGastoContrato += gastoCicloH; totalOrcadoNum += orcadoCicloH;
+           totalGastoOs += gastoCicloH; totalOrcadoOs += orcadoCicloH;
+           return { nome: a.atividade, orcado: orcadoCicloH, gasto: gastoCicloH, saldo: orcadoCicloH - gastoCicloH, isFechado: false };
+         });
+         
+         return { ...osGroup, totalOrcadoOs, totalGastoOs, atividades: atividadesProcessadas };
+       });
+
+       orcadoTotal += totalOrcadoNum; gastoTotal += totalGastoContrato;
+       return { ...contract, osGroups: osGroupsProcessed, totalOrcado: totalOrcadoNum, totalGasto: totalGastoContrato, hasFechado };
      });
 
-     cEnvolvidos.forEach(cid => {
-        const cObj = contratos.find(c => c.id === cid);
-        if (!cObj) return;
-        const cb = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, resConsMes, resConsAno);
-        
-        let isPast = false; let mm = m; let yy = y;
-        if (cObj.ciclo_inicio > cObj.ciclo_fim && currentDay >= cObj.ciclo_inicio) { mm = mm === 11 ? 0 : mm + 1; if (mm === 0) yy++; }
-        isPast = (pA < yy) || (pA === yy && pM < mm);
-
-        // Agrupa as OSs envolvidas
-        const tContrato = allTimesheets.filter(t => t.user_id === resConsId && t.contract_id === cid && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
-        const aContrato = allAlocacoes.filter(a => a.user_id === resConsId && a.contract_id === cid && a.mes === resConsMes && a.ano === resConsAno);
-        
-        const osEnvolvidas = new Set<string | null>();
-        tContrato.forEach(t => osEnvolvidas.add(t.os_id || null));
-        aContrato.forEach(a => osEnvolvidas.add(a.os_id || null));
-
-        osEnvolvidas.forEach(osid => {
-           let tOs = tContrato; let aOs = aContrato;
-           if (cObj.tipo === 'continuado_com_os') {
-              tOs = tContrato.filter(t => t.os_id === osid);
-              aOs = aContrato.filter(a => a.os_id === osid);
-           }
-           
-           const gastoH = tOs.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-           const osObj = osList.find(o => o.id === osid);
-           const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
-           const isFechado = cObj.tipo === 'fechado' || aOs.some(a => a.atividade === 'Preço Fechado (Medição)');
-           
-           if (isFechado) {
-               const pM = parseInt(resConsMes); const pA = parseInt(resConsAno);
-               const orcadoPerc = allMedicoes.find(m => m.user_id === resConsId && m.contract_id === cid && (osid ? m.os_id === osid : true) && m.mes === resConsMes && m.ano === resConsAno)?.percentual || 0;
-               const gastoPerc = allMedicoes.filter(m => {
-                   if (m.user_id !== resConsId || m.contract_id !== cid) return false;
-                   if (osid && m.os_id !== osid) return false;
-                   const mA = parseInt(m.ano); const mM = parseInt(m.mes);
-                   return mA < pA || (mA === pA && mM < pM);
-               }).reduce((sum, m) => sum + m.percentual, 0);
-               
-               const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
-               if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoPerc, gasto: gastoPerc, ilimitado: false, isFechado: true });
-               else {
-                  contratosListados[extIdx].orcado += orcadoPerc;
-                  contratosListados[extIdx].gasto += gastoPerc;
-                  contratosListados[extIdx].isFechado = true;
-               }
-           } else {
-               let orcadoH = 0;
-               if (isSuportes) orcadoH = gastoH;
-               else {
-                  orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
-               }
-
-               if (orcadoH > 0 || gastoH > 0) {
-                  orcadoTotal += orcadoH; gastoTotal += gastoH; // Adiciona apenas HORAS na sumário global
-                  const extIdx = contratosListados.findIndex(cl => cl.id === cObj.id);
-                  if (extIdx === -1) contratosListados.push({ id: cObj.id, codigo: cObj.codigo, nome: cObj.nome, orcado: orcadoH, gasto: gastoH, ilimitado: isSuportes });
-                  else {
-                     contratosListados[extIdx].orcado += orcadoH;
-                     contratosListados[extIdx].gasto += gastoH;
-                     if(isSuportes) contratosListados[extIdx].ilimitado = true;
-                  }
-               }
-           }
-        });
-     });
-
-     const saldoTotal = orcadoTotal - gastoTotal;
+     const saldoTotal = Math.max(0, orcadoTotal - gastoTotal);
      const percGasto = orcadoTotal > 0 ? (gastoTotal / orcadoTotal) * 100 : 0;
-     const pieData: Array<{name: string, value: number}> = [{name: 'Gasto', value: gastoTotal}, {name: 'Saldo', value: Math.max(0, saldoTotal)}].filter(d=>d.value>0);
+     const pieData = [{name: 'Gasto', value: gastoTotal}, {name: 'Saldo', value: saldoTotal}].filter(d=>d.value>0);
      if (pieData.length===0) pieData.push({name:'Zerado', value:1});
 
-     return { nome: consObj.nome, iniciais: consObj.nome.substring(0,2).toUpperCase(), meta: consObj.horas_minimas_mes, orcadoTotal, gastoTotal, saldoTotal: Math.max(0, saldoTotal), percGasto, pieData, contratosListados }
-  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores, modoDataFiltro, dataInicioCustom, dataFimCustom]);
+     return { nome: consObj.nome, iniciais: consObj.nome.substring(0,2).toUpperCase(), orcadoTotal, gastoTotal, saldoTotal, percGasto, pieData, contratosListados }
+  }, [resConsId, resConsMes, resConsAno, allAlocacoes, allTimesheets, contratos, osList, consultores, modoDataFiltro, dataInicioCustom, dataFimCustom, allMedicoes]);
 
   const fatContratosVisao = contratos.filter(c => fatVisaoTipos.includes(c.tipo) && (fatFonte === 'todas' ? true : c.fonte_pagamento === fatFonte))
   
@@ -2306,7 +2438,9 @@ export function AdminDashboard() {
       consultoresAtivos.forEach(cons => {
          const cb = getCycleBoundsForContract(cont.ciclo_inicio, cont.ciclo_fim, dashMes, dashAno);
          const isFechado = allAlocacoes.some(a => a.user_id === cons.id && a.contract_id === cont.id && a.mes === dashMes && a.ano === dashAno && a.atividade === 'Preço Fechado (Medição)') || cont.tipo === 'fechado';
-         const isSuportes = os?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cont.tipo);
+         
+         // 🌟 FASE 2: FIM DO INFINITO NA EXPORTAÇÃO EXECUTIVA
+         const isSuportes = false;
 
          if (isFechado) {
             const pM = parseInt(dashMes); 
@@ -2751,8 +2885,8 @@ export function AdminDashboard() {
                       <>
                         <div className="flex items-center gap-4">
                           <div><p className={`font-bold text-sm ${os.status_ativa === false ? 'text-muted-foreground' : 'text-amber-600'}`}>{os.codigo}</p><p className="text-xs text-muted-foreground mt-0.5">{os.descricao || 'Sem descrição cadastrada'}</p></div>
-                          <Badge variant="secondary" className={`border-none ml-4 text-[10px] uppercase ${os.status_ativa === false ? 'bg-red-500/10 text-red-600' : 'bg-amber-500/10 text-amber-600'}`}>
-                            {os.status_ativa === false ? 'Inativa' : (os.codigo === '🛠️ Pequenos Suportes' ? 'Ilimitado' : `Controlado pela Matriz`)}
+                          <Badge variant="secondary" className={`border-none ml-4 text-[10px] uppercase ${os.status_ativa === false ? 'bg-red-500/10 text-red-600' : 'bg-primary/10 text-primary'}`}>
+                            {os.status_ativa === false ? 'Inativa' : 'Controlado pela Matriz'}
                           </Badge>
                         </div>
                         {os.codigo !== '🛠️ Pequenos Suportes' && (
@@ -2948,7 +3082,7 @@ export function AdminDashboard() {
                                 <div className={`flex flex-col md:flex-row md:justify-between md:items-center gap-4 ${(!isSemOsType && !isFechado && !isOverheadType) ? 'border-b border-border/60 pb-4 mb-4' : ''}`}>
                                   <div>
                                       <h4 className="font-black text-base text-foreground mb-2">{cNome}</h4>
-                                      {(!isSemOsType && !isFechado && !isOverheadType) ? (
+                                      {(!isFechado) ? (
                                         <div className="flex items-center gap-3 text-[10px] uppercase tracking-wider font-mono bg-muted/40 p-1.5 rounded-lg border w-fit">
                                           <span className="text-primary font-bold px-2">Consumido: {gastoVidaH.toFixed(1)}h</span>
                                           <span className={`${saldoH < 0 ? 'bg-red-500 text-white' : 'bg-green-600 text-white'} px-2 py-0.5 rounded shadow-xs font-bold`}>Saldo Base: {saldoH.toFixed(1)}h</span>
@@ -2986,7 +3120,7 @@ export function AdminDashboard() {
                                   </div>
                                 </div>
                                 
-                                {(!isSemOsType && !isFechado) && (
+                                {(!isFechado) && (
                                   <div className="border-l-4 border-primary/20 pl-4 space-y-3 w-full p-3 rounded-r-xl border-y border-r transition-all bg-background/50">
                                     <div className="flex justify-between items-center text-xs">
                                         <span className="font-bold text-muted-foreground uppercase tracking-wider">Disciplinas / Escopo Atribuído</span>
@@ -3086,7 +3220,7 @@ export function AdminDashboard() {
                                          {isFechado && <Badge className="bg-amber-500/10 text-amber-700 text-[10px] uppercase border-none ml-2 shadow-xs" variant="secondary">Preço Fechado</Badge>}
                                       </h4>
                                       
-                                      {!isSemOsType && !isFechado && !isOverheadType && matrizRef && (
+                                      {!isFechado && matrizRef && (
                                          <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] uppercase font-mono tracking-wider bg-muted/30 p-1.5 rounded-lg border w-fit">
                                             <span className="text-primary font-bold px-2">Teto Matriz (OS): {matrizRef.horas_teto.toFixed(1)}h</span>
                                             <span className="text-muted-foreground border-l border-dashed pl-2">Global Alocado: {alocadoVidaLive.toFixed(1)}h</span>
@@ -3126,7 +3260,6 @@ export function AdminDashboard() {
                                          );
                                       })()}
 
-                                      {(isSemOsType || isOverheadType) && <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1 font-bold">Horas Ilimitadas (Escopo Dinâmico)</p>}
                                    </div>
                                    <div className="flex items-center gap-2">
                                      {isFechado ? (() => {
@@ -3167,7 +3300,7 @@ export function AdminDashboard() {
                                    </div>
                                  </div>
                                  
-                                 {(!isSemOsType && !isFechado && aloc.atividades.length > 0) && (
+                                 {(!isFechado && aloc.atividades.length > 0) && (
                                    <div className="pl-4 border-l-4 border-primary/20 space-y-2 mt-3 w-full bg-background p-3 rounded-r-xl shadow-xs">
                                      <div className="flex justify-between items-center text-xs mb-3">
                                         <span className="font-bold text-muted-foreground uppercase tracking-wider">{isOverheadType ? "Disciplinas do Overhead" : "Horas do Mês por Disciplina"}</span>
@@ -3208,70 +3341,71 @@ export function AdminDashboard() {
         {/* VIEW: EQUIPE & ACESSOS (FASE 4) */}
         {menuAtivo === 'equipe' && (
           <Card className="border-t-4 border-t-emerald-500 w-full shadow-sm">
-            <CardHeader className="border-b pb-4 bg-muted/5">
+            <CardHeader className="border-b pb-4 bg-muted/5 flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
                 <CardTitle className="flex items-center gap-2 text-emerald-700">
                   <Users className="w-5 h-5"/> Gestão de Equipe e Acessos
                   <span title="Gerencie o acesso da sua equipe. Use o botão de Recesso para pausar alertas de ociosidade de consultores em férias." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-emerald-500 transition-colors" /></span>
                 </CardTitle>
-                <CardDescription className="mt-1">Gerencie quem tem acesso ao aplicativo (Ativos/Inativos).</CardDescription>
+                <CardDescription className="mt-1">Gerencie quem tem acesso ao aplicativo e cadastre parceiros externos.</CardDescription>
               </div>
+              <Button onClick={() => setIsNovoConsultorModalOpen(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm gap-2">
+                 <UserCog className="w-4 h-4" /> Adicionar Convidado (Preço Fechado)
+              </Button>
             </CardHeader>
             <CardContent className="pt-6">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
                 {consultores.map(c => (
                   <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : (c.em_recesso ? 'bg-blue-500/5 border-blue-500/20' : 'bg-card')}`}>
                     <div className="flex items-start justify-between">
-                       <div className="flex items-center gap-3">
-                          {/* 🌟 NOVO SISTEMA DE UPLOAD DE AVATAR OTIMIZADO */}
-                          <div className="relative group cursor-pointer">
-                            <input 
-                              type="file" 
-                              accept="image/*" 
-                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" 
-                              title="Clique para alterar a foto"
-                              onChange={(e) => handleUploadAvatar(e, c.id)}
-                            />
-                            {c.avatar_url ? (
-                              <>
-                                <img 
-                                  src={c.avatar_url} 
-                                  alt="Avatar" 
-                                  className="w-10 h-10 rounded-full border border-primary/20 object-cover group-hover:opacity-50 transition-opacity" 
-                                  onError={(e) => {
-                                    e.currentTarget.style.display = 'none';
-                                    if (e.currentTarget.nextElementSibling) {
-                                      (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex';
-                                    }
-                                  }}
-                                />
-                                <div className="w-10 h-10 rounded-full bg-emerald-500/10 hidden items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20">
-                                   {c.nome.substring(0,2).toUpperCase()}
+                       {editandoConsId === c.id ? (
+                          <div className="flex flex-col gap-2 w-full pr-4">
+                             <Input value={editConsNome} onChange={e => setEditConsNome(e.target.value)} className="h-8 text-sm font-bold" placeholder="Nome Completo" />
+                             <Input value={editConsEspecialidade} onChange={e => setEditConsEspecialidade(e.target.value)} className="h-8 text-xs" placeholder="Especialidade / Cargo" />
+                             <div className="flex gap-2 mt-1">
+                                <Button size="sm" onClick={salvarEdicaoConvidado} className="h-7 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white"><Check className="w-3 h-3 mr-1"/> Salvar</Button>
+                                <Button size="sm" variant="ghost" onClick={() => setEditandoConsId(null)} className="h-7 text-[10px]">Cancelar</Button>
+                             </div>
+                          </div>
+                       ) : (
+                          <div className="flex items-center justify-between w-full">
+                             <div className="flex items-center gap-3">
+                                {/* SISTEMA DE UPLOAD DE AVATAR */}
+                                <div className="relative group cursor-pointer">
+                                  <input type="file" accept="image/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" title="Clique para alterar a foto" onChange={(e) => handleUploadAvatar(e, c.id)} />
+                                  {c.avatar_url ? (
+                                    <>
+                                      <img src={c.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full border border-primary/20 object-cover group-hover:opacity-50 transition-opacity" onError={(e) => { e.currentTarget.style.display = 'none'; if (e.currentTarget.nextElementSibling) (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'; }} />
+                                      <div className="w-10 h-10 rounded-full bg-emerald-500/10 hidden items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20">{c.nome.substring(0,2).toUpperCase()}</div>
+                                    </>
+                                  ) : (
+                                    <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">{c.nome.substring(0,2).toUpperCase()}</div>
+                                  )}
+                                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"><PlusCircle className="w-4 h-4 text-primary bg-background/80 rounded-full" /></div>
                                 </div>
-                              </>
-                            ) : (
-                              <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">
-                                 {c.nome.substring(0,2).toUpperCase()}
-                              </div>
-                            )}
-                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                               <PlusCircle className="w-4 h-4 text-primary bg-background/80 rounded-full" />
-                            </div>
+                                
+                                <div>
+                                  <span className="font-bold text-sm block leading-tight">{c.nome}</span>
+                                  <span className="text-[10px] text-muted-foreground block">{c.especialidade || 'Sem especialidade'}</span>
+                                  {c.is_convidado ? (
+                                     <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Preço Fechado)</Badge>
+                                  ) : c.em_recesso ? (
+                                     <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 text-[9px] mt-1 uppercase border-none">Em Recesso / Férias</Badge>
+                                  ) : (
+                                     <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
+                                  )}
+                                </div>
+                             </div>
+                             {c.is_convidado && (
+                               <div className="flex flex-col gap-1 ml-2">
+                                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-emerald-600" onClick={() => { setEditandoConsId(c.id); setEditConsNome(c.nome); setEditConsEspecialidade(c.especialidade || ''); }}><Pencil className="w-3.5 h-3.5"/></Button>
+                                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-red-500 hover:bg-red-500/10" onClick={() => apagarConvidado(c.id, c.nome)}><Trash2 className="w-3.5 h-3.5"/></Button>
+                               </div>
+                             )}
                           </div>
-                          {/* ------------------------------------ */}
-                          
-                          <div>
-                            <span className="font-bold text-sm block leading-tight">{c.nome}</span>
-                            {c.is_convidado ? (
-                               <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Controle Interno)</Badge>
-                            ) : c.em_recesso ? (
-                               <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 text-[9px] mt-1 uppercase border-none">Em Recesso / Férias</Badge>
-                            ) : (
-                               <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
-                            )}
-                          </div>
-                       </div>
+                       )}
                     </div>
+                    
                     
                     <div className="flex items-center justify-between border-t pt-3 mt-1">
                       <div className="flex items-center gap-2">
@@ -3308,6 +3442,44 @@ export function AdminDashboard() {
                 ))}
               </div>
             </CardContent>
+            {/* 🌟 FASE 4: Modal de Criação de Consultor Convidado */}
+            <Dialog open={isNovoConsultorModalOpen} onOpenChange={setIsNovoConsultorModalOpen}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2 text-emerald-700"><UserCog className="w-5 h-5"/> Novo Perfil (Sem Login)</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-xs text-emerald-800 dark:text-emerald-400 mb-4">
+                    Este tipo de perfil é ideal para parceiros de <strong>Preço Fechado</strong>. Eles aparecerão na Matriz, Folha e Exportações, mas não terão e-mail, senha e não poderão usar o aplicativo.
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="nome">Nome Completo do Consultor</Label>
+                    <Input 
+                      id="nome" 
+                      placeholder="Ex: João Silva da Engenharia" 
+                      value={novoConsNome} 
+                      onChange={(e) => setNovoConsNome(e.target.value)} 
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="especialidade">Especialidade / Cargo (Opcional)</Label>
+                    <Input 
+                      id="especialidade" 
+                      placeholder="Ex: Projetista Estrutural" 
+                      value={novoConsEspecialidade} 
+                      onChange={(e) => setNovoConsEspecialidade(e.target.value)} 
+                    />
+                  </div>
+                </div>
+                <DialogFooter className="sm:justify-between">
+                  <Button variant="ghost" onClick={() => setIsNovoConsultorModalOpen(false)}>Cancelar</Button>
+                  <Button onClick={criarConsultorConvidado} disabled={salvando} className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm">
+                    {salvando ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Check className="w-4 h-4 mr-2" />}
+                    Cadastrar Parceiro
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </Card>
         )}
 
@@ -3702,63 +3874,80 @@ export function AdminDashboard() {
                  </div>
 
                  {/* TABELA DE CONTRATOS DO CONSULTOR */}
+                 {/* 🌟 FASE 5: ÁRVORE DE DETALHAMENTO COM ACORDEÃO */}
                  <div className="md:col-span-8">
                     <Card className="h-full shadow-sm">
                       <CardHeader className="border-b pb-4 bg-muted/5">
-                        <CardTitle className="text-sm font-bold flex items-center gap-2"><Briefcase className="w-4 h-4"/> Alocações do Consultor neste Ciclo</CardTitle>
+                        <CardTitle className="text-sm font-bold flex items-center gap-2"><Briefcase className="w-4 h-4"/> Alocações e Apontamentos neste Ciclo</CardTitle>
                       </CardHeader>
-                      <CardContent className="p-0 overflow-y-auto max-h-150">
+                      <CardContent className="p-4 overflow-y-auto max-h-150 bg-muted/5">
                         {resumoConsultorData.contratosListados.length === 0 ? (
-                           <div className="p-8 text-center text-muted-foreground text-xs">Este consultor não possui horas alocadas ou consumidas neste mês.</div>
+                           <div className="p-8 text-center text-muted-foreground text-xs border border-dashed rounded-xl bg-card">Este consultor não possui horas alocadas ou consumidas neste período.</div>
                         ) : (
-                           <table className="w-full text-sm text-left">
-                              <thead className="bg-muted/30 text-xs uppercase text-muted-foreground sticky top-0 z-10 backdrop-blur-md">
-                                 <tr>
-                                    <th className="px-4 py-3 font-semibold">Projeto / Contrato</th>
-                                    {modoDataFiltro === 'ciclo' && <th className="px-4 py-3 font-semibold text-right w-24">Orçado</th>}
-                                    <th className="px-4 py-3 font-semibold text-right w-24">Gasto</th>
-                                    {modoDataFiltro === 'ciclo' && <th className="px-4 py-3 font-semibold text-right w-24">Saldo</th>}
-                                 </tr>
-                              </thead>
-                              <tbody className="divide-y">
-                                 {resumoConsultorData.contratosListados.map(ct => (
-                                    <tr key={ct.id} className="hover:bg-muted/10 transition-colors">
-                                       <td className="px-4 py-4">
-                                          <p className="font-bold text-primary leading-tight">{ct.codigo}</p>
-                                          <p className="text-[10px] text-muted-foreground mt-0.5 truncate max-w-50">{ct.nome}</p>
-                                       </td>
+                           <Accordion type="multiple" className="w-full space-y-3">
+                             {resumoConsultorData.contratosListados.map(ct => (
+                               <AccordionItem key={ct.id} value={ct.id} className="border rounded-xl bg-card overflow-hidden shadow-sm">
+                                 <AccordionTrigger className="px-4 py-3 hover:bg-muted/30 data-[state=open]:bg-muted/10 hover:no-underline">
+                                   <div className="flex flex-col md:flex-row md:items-center justify-between w-full text-left gap-4 pr-4">
+                                     <div>
+                                       <p className="text-sm font-bold text-primary">{ct.codigo} - {ct.nome}</p>
+                                       <p className="text-[10px] uppercase font-semibold text-muted-foreground mt-0.5">{ct.hasFechado ? 'PREÇO FECHADO (%)' : ct.tipo.replace(/_/g, ' ')}</p>
+                                     </div>
+                                     <div className="flex items-center gap-6 text-xs shrink-0">
                                        {modoDataFiltro === 'ciclo' && (
-                                         <td className="px-4 py-4 text-right font-mono text-muted-foreground">
-                                            {ct?.isFechado ? (
-                                              <div title="O que está sendo medido e faturado NESTE ciclo" className="cursor-help">
-                                                <span className="block text-[9px] uppercase text-amber-600 font-bold mb-0.5 tracking-wider">Neste Ciclo</span>
-                                                {ct.orcado.toFixed(1)}%
-                                              </div>
-                                            ) : (ct.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${ct.orcado.toFixed(1)}h`)}
-                                         </td>
+                                         <div className="text-right">
+                                           <p className="text-[10px] text-muted-foreground uppercase">Orçado</p>
+                                           <p className="font-mono font-bold">{ct.totalOrcado.toFixed(1)}{ct.hasFechado ? '%' : 'h'}</p>
+                                         </div>
                                        )}
-                                       <td className={`px-4 py-4 text-right font-mono font-bold ${ct?.isFechado ? 'text-primary' : 'text-red-500'}`}>
-                                          {ct?.isFechado ? (
-                                            <div title="Soma total do que já foi medido no passado (Histórico)" className="cursor-help">
-                                              <span className="block text-[9px] uppercase text-muted-foreground font-bold mb-0.5 tracking-wider">Acumulado Passado</span>
-                                              {ct.gasto.toFixed(1)}%
-                                            </div>
-                                          ) : `${ct.gasto.toFixed(1)}h`}
-                                       </td>
+                                       <div className="text-right">
+                                         <p className="text-[10px] text-muted-foreground uppercase">Consumido</p>
+                                         <p className="font-mono font-bold text-red-500">{ct.totalGasto.toFixed(1)}{ct.hasFechado ? '%' : 'h'}</p>
+                                       </div>
                                        {modoDataFiltro === 'ciclo' && (
-                                         <td className={`px-4 py-4 text-right font-mono font-bold ${ct.ilimitado ? 'text-amber-500' : (ct?.isFechado ? (100 - ct.orcado - ct.gasto < 0 ? 'text-red-500' : 'text-blue-600') : (ct.orcado - ct.gasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
-                                            {ct?.isFechado ? (
-                                              <div title="O que falta faturar para concluir 100% da entrega" className="cursor-help">
-                                                <span className="block text-[9px] uppercase text-muted-foreground font-bold mb-0.5 tracking-wider">A Entregar</span>
-                                                {(100 - ct.orcado - ct.gasto).toFixed(1)}%
-                                              </div>
-                                            ) : (ct.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(ct.orcado - ct.gasto).toFixed(1)}h`)}
-                                         </td>
+                                         <div className="text-right">
+                                           <p className="text-[10px] text-muted-foreground uppercase">Saldo</p>
+                                           <p className={`font-mono font-bold ${ct.hasFechado ? (100 - ct.totalOrcado - ct.totalGasto < 0 ? 'text-red-500' : 'text-blue-600') : (ct.totalOrcado - ct.totalGasto < 0 ? 'text-red-500' : 'text-green-600')}`}>
+                                             {ct.hasFechado ? (100 - ct.totalOrcado - ct.totalGasto).toFixed(1) + '%' : (ct.totalOrcado - ct.totalGasto).toFixed(1) + 'h'}
+                                           </p>
+                                         </div>
                                        )}
-                                    </tr>
-                                 ))}
-                              </tbody>
-                           </table>
+                                     </div>
+                                   </div>
+                                 </AccordionTrigger>
+                                 <AccordionContent className="p-0 border-t bg-muted/5">
+                                   {ct.osGroups.map((osGroup: any) => (
+                                     <div key={osGroup.id} className="border-b last:border-0 border-dashed">
+                                       {osGroup.id !== 'sem_os' && (
+                                         <div className="bg-muted/10 px-4 py-2 border-b text-xs font-bold text-foreground/80 flex items-center justify-between gap-2">
+                                           <div className="flex items-center gap-2"><FolderTree className="w-3.5 h-3.5"/> <span>OS: {osGroup.codigo} {osGroup.nome ? `- ${osGroup.nome}` : ''}</span></div>
+                                           <div className="flex gap-4 font-mono text-[10px] text-muted-foreground">
+                                              {modoDataFiltro === 'ciclo' && <span>Orç: {osGroup.totalOrcadoOs.toFixed(1)}{ct.hasFechado ? '%' : 'h'}</span>}
+                                              <span>Gast: <span className="text-red-500 font-bold">{osGroup.totalGastoOs.toFixed(1)}{ct.hasFechado ? '%' : 'h'}</span></span>
+                                           </div>
+                                         </div>
+                                       )}
+                                       <div className="px-4 py-2 w-full overflow-x-auto">
+                                         <table className="w-full text-xs text-left">
+                                           <thead><tr className="text-muted-foreground/70"><th className="pb-2 font-medium">Disciplina / Escopo</th>{modoDataFiltro === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Orçado</th>}<th className="pb-2 font-medium text-right w-20">Consumido</th>{modoDataFiltro === 'ciclo' && <th className="pb-2 font-medium text-right w-20">Saldo</th>}</tr></thead>
+                                           <tbody className="divide-y">
+                                             {osGroup.atividades.map((ativ: any, idx: number) => (
+                                               <tr key={idx} className={`border-t border-muted/50 transition-colors ${ativ.isFechado ? 'bg-green-500/5 hover:bg-green-500/10' : 'hover:bg-muted/20'}`}>
+                                                 <td className={`py-2.5 font-medium ${ativ.isFechado ? 'text-green-700 flex items-center gap-1.5' : ''}`}>{ativ.isFechado && <Check className="w-4 h-4"/>} {ativ.nome}</td>
+                                                 {modoDataFiltro === 'ciclo' && <td className={`py-2.5 text-right font-mono ${ativ.isFechado ? 'text-green-700' : 'text-muted-foreground'}`}>{ativ.orcado.toFixed(1)}{ativ.isFechado ? '%' : 'h'}</td>}
+                                                 <td className={`py-2.5 text-right font-mono font-bold ${ativ.isFechado ? 'text-primary' : 'text-red-500'}`}>{ativ.gasto.toFixed(1)}{ativ.isFechado ? '%' : 'h'}</td>
+                                                 {modoDataFiltro === 'ciclo' && <td className={`py-2.5 text-right font-mono font-bold ${ativ.isFechado ? 'text-green-700' : (ativ.saldo < 0 ? 'text-red-500' : 'text-green-600')}`}>{ativ.saldo.toFixed(1)}{ativ.isFechado ? '%' : 'h'}</td>}
+                                               </tr>
+                                             ))}
+                                           </tbody>
+                                         </table>
+                                       </div>
+                                     </div>
+                                   ))}
+                                 </AccordionContent>
+                               </AccordionItem>
+                             ))}
+                           </Accordion>
                         )}
                       </CardContent>
                     </Card>
@@ -3888,10 +4077,17 @@ export function AdminDashboard() {
                       return isWithinCycle(t.start_at, dashMes, dashAno, cont.ciclo_inicio, cont.ciclo_fim);
                     });
 
-                    // --- NÍVEL 2: APONTAMENTOS DE UM CONTRATO ESPECÍFICO ---
+                    // --- NÍVEL 2: APONTAMENTOS DE UMA OS / CONTRATO ESPECÍFICO ---
                     if (drilldownContractId) {
-                       const contSelecionado = contratos.find(c => c.id === drilldownContractId);
-                       const logsDoContrato = logsDrilldown.filter(t => t.contract_id === drilldownContractId);
+                       const cIdExtracted = drilldownContractId.split('_')[0];
+                       const osIdExtracted = drilldownContractId.includes('_') ? drilldownContractId.substring(drilldownContractId.indexOf('_') + 1) : null;
+                       const contSelecionado = contratos.find(c => c.id === cIdExtracted);
+                       
+                       const logsDoContrato = logsDrilldown.filter(t => {
+                           if (t.contract_id !== cIdExtracted) return false;
+                           if (osIdExtracted) return t.os_id === osIdExtracted;
+                           return !t.os_id || t.os_id === 'null';
+                       });
                        logsDoContrato.sort((a,b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime());
 
                        return (
@@ -3958,16 +4154,28 @@ export function AdminDashboard() {
                        );
                     }
 
-                    // --- NÍVEL 1: CONSOLIDADO POR CONTRATO (Como era antes, porém com clique) ---
-                    const contratosMap = new Map<string, { id: string; codigo: string; nome: string; totalHoras: number }>();
+                    // --- NÍVEL 1: CONSOLIDADO POR CONTRATO / OS (FASE 3) ---
+                    const contratosMap = new Map<string, { id: string; codigo: string; nome: string; osCodigo: string; osDescricao: string; totalHoras: number }>();
                     logsDrilldown.forEach(t => {
                       const cont = contratos.find(c => c.id === t.contract_id);
                       if (!cont) return;
+                      
+                      const osObj = osList.find(o => o.id === t.os_id);
+                      const key = t.os_id ? `${cont.id}_${t.os_id}` : cont.id;
+                      
                       const duration = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
-                      if (!contratosMap.has(cont.id)) {
-                        contratosMap.set(cont.id, { id: cont.id, codigo: cont.codigo, nome: cont.nome, totalHoras: 0 });
+                      
+                      if (!contratosMap.has(key)) {
+                        contratosMap.set(key, { 
+                          id: key,  // 🌟 CORREÇÃO: Passa a chave composta correta para o Nível 2
+                          codigo: cont.codigo, 
+                          nome: cont.nome, 
+                          osCodigo: osObj ? osObj.codigo : '',
+                          osDescricao: osObj ? osObj.descricao : '',
+                          totalHoras: 0 
+                        });
                       }
-                      contratosMap.get(cont.id)!.totalHoras += duration;
+                      contratosMap.get(key)!.totalHoras += duration;
                     });
 
                     const listaConsolidada = Array.from(contratosMap.values()).sort((a, b) => b.totalHoras - a.totalHoras);
@@ -3982,12 +4190,12 @@ export function AdminDashboard() {
                             Fechar Detalhamento ✕
                           </Button>
                         </div>
-                        <div className="border rounded-xl overflow-hidden bg-card max-h-60 overflow-y-auto w-full overflow-x-auto">
+                        <div className="border rounded-xl overflow-hidden bg-card max-h-60 overflow-y-auto w-full overflow-x-auto shadow-inner">
                           <table className="w-full min-w-max text-xs text-left">
                             <thead className="bg-muted/40 font-semibold text-muted-foreground sticky top-0">
                               <tr>
-                                <th className="p-2.5 w-28">Código</th>
-                                <th className="p-2.5">Nome do Contrato</th>
+                                <th className="p-2.5 w-32">Código</th>
+                                <th className="p-2.5">Nome do Contrato / OS</th>
                                 <th className="p-2.5 text-right w-28">Horas Totais</th>
                                 <th className="p-2.5 w-12 text-center"></th>
                               </tr>
@@ -3997,10 +4205,16 @@ export function AdminDashboard() {
                                 <tr><td colSpan={4} className="p-4 text-center text-muted-foreground">Nenhum apontamento consolidado neste ciclo.</td></tr>
                               ) : listaConsolidada.map((item, idx) => (
                                 <tr key={idx} className="hover:bg-muted/20 cursor-pointer transition-colors" onClick={() => setDrilldownContractId(item.id)}>
-                                  <td className="p-2.5 font-bold text-primary font-mono">{item.codigo}</td>
-                                  <td className="p-2.5 font-medium text-foreground">{item.nome}</td>
-                                  <td className="p-2.5 text-right font-mono font-bold text-primary">{item.totalHoras.toFixed(1)}h</td>
-                                  <td className="p-2.5 text-center text-muted-foreground"><ChevronRight className="w-4 h-4 mx-auto" /></td>
+                                  <td className="p-2.5 font-bold text-primary font-mono flex flex-col gap-1">
+                                    <span>{item.codigo}</span>
+                                    {item.osCodigo && <span className="text-[9px] text-amber-600 dark:text-amber-500 font-bold uppercase bg-amber-500/10 px-1.5 py-0.5 rounded w-fit">OS: {item.osCodigo}</span>}
+                                  </td>
+                                  <td className="p-2.5 font-medium text-foreground">
+                                    <span className="block truncate max-w-64">{item.nome}</span>
+                                    {item.osDescricao && <span className="block text-[10px] text-muted-foreground truncate max-w-64 mt-0.5">{item.osDescricao}</span>}
+                                  </td>
+                                  <td className="p-2.5 text-right font-mono font-bold text-primary align-middle">{item.totalHoras.toFixed(1)}h</td>
+                                  <td className="p-2.5 text-center text-muted-foreground align-middle"><ChevronRight className="w-4 h-4 mx-auto" /></td>
                                 </tr>
                               ))}
                             </tbody>
@@ -4175,9 +4389,9 @@ export function AdminDashboard() {
                     const tetoLinhaBase = getTetoBaseContrato(cObj.id);
                     const tetoContratoBase = Number(cObj.teto_global_horas > 0 ? cObj.teto_global_horas : tetoLinhaBase);
 
-                    // 2. Total Alocado (Vida Útil) — ignora somatório fantasma se for Overhead
-                    const totalAlocadoVida = isOverhead ? 0 : (allAlocacoes || [])
-                      .filter(a => a.contract_id === cObj.id && a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes')
+                    // 2. Total Alocado (Vida Útil) — soma TUDO (Fim da exceção de Overhead)
+                    const totalAlocadoVida = (allAlocacoes || [])
+                      .filter(a => a.contract_id === cObj.id && a.atividade !== 'Preço Fechado (Medição)')
                       .reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
 
                     // 3. Indicadores da VIDA ÚTIL
@@ -4185,36 +4399,23 @@ export function AdminDashboard() {
                       .filter(t => t.contract_id === cObj.id)
                       .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
                     
-                    const saldoVidaUtil = (isOverhead || tetoContratoBase <= 0) ? 0 : (tetoContratoBase - gastoVidaUtil);
-                    const percVidaUtil = isOverhead ? '100' : (tetoContratoBase > 0 ? ((gastoVidaUtil / tetoContratoBase) * 100).toFixed(1) : '0.0');
+                    // Se tetoContratoBase for 0 (ex: Overhead sem teto fixo), usamos as alocações da vida como teto de referência
+                    const tetoReferenciaVida = tetoContratoBase > 0 ? tetoContratoBase : totalAlocadoVida;
+                    const saldoVidaUtil = tetoReferenciaVida - gastoVidaUtil;
+                    const percVidaUtil = tetoReferenciaVida > 0 ? ((gastoVidaUtil / tetoReferenciaVida) * 100).toFixed(1) : '0.0';
 
-                    // 4. CÁLCULO DO CICLO (Tratando OS Ilimitada, Suportes e Overhead)
+                    // 4. CÁLCULO DO CICLO
                     const cycleBounds = getEffectiveBounds(cObj.ciclo_inicio, cObj.ciclo_fim, dashMes, dashAno);
                     const fTimesCiclo = allTimesheets.filter(t => t.contract_id === cObj.id && (dashOs !== 'todas' ? t.os_id === dashOs : true) && new Date(t.start_at).getTime() >= cycleBounds.start && new Date(t.start_at).getTime() <= cycleBounds.end);
                     const fAlocsCiclo = allAlocacoes.filter(a => a.contract_id === cObj.id && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.mes === dashMes && a.ano === dashAno);
                     
                     const gastoCiclo = fTimesCiclo.reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
                     
-                    const osSelecionadaObj = osList.find(o => o.id === dashOs);
-                    const isOsIlimitada = osSelecionadaObj?.codigo === '🛠️ Pequenos Suportes';
-                    const isCicloTotalmenteIlimitado = isOverhead || isOsIlimitada;
-
-                    let orcadoCiclo = 0;
-                    if (isCicloTotalmenteIlimitado) {
-                      orcadoCiclo = gastoCiclo;
-                    } else {
-                      const alocadoFixoCiclo = fAlocsCiclo
-                        .filter(a => a.atividade !== 'Preço Fechado (Medição)' && osList.find(o => o.id === a.os_id)?.codigo !== '🛠️ Pequenos Suportes')
+                    const orcadoCiclo = fAlocsCiclo
+                        .filter(a => a.atividade !== 'Preço Fechado (Medição)')
                         .reduce((sum, a) => sum + Number(a.horas_disponiveis || 0), 0);
-                      
-                      const gastoEmSuportesCiclo = fTimesCiclo
-                        .filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes')
-                        .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
 
-                      orcadoCiclo = alocadoFixoCiclo + gastoEmSuportesCiclo;
-                    }
-
-                    const saldoCiclo = isCicloTotalmenteIlimitado ? 0 : (orcadoCiclo - gastoCiclo);
+                    const saldoCiclo = orcadoCiclo - gastoCiclo;
                     const percCiclo = orcadoCiclo > 0 ? ((gastoCiclo / orcadoCiclo) * 100).toFixed(1) : '0.0';
 
                     return (
@@ -4252,35 +4453,23 @@ export function AdminDashboard() {
                           {/* BLOCO VIDA ÚTIL */}
                           <div className="bg-background/50 dark:bg-muted/20 p-3 rounded-xl border border-border/40">
                             <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Total Contrato (Base)</span>
-                            <span className="font-bold text-foreground text-base font-mono mt-0.5 block">
-                              {isOverhead ? (
-                                <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
-                              ) : (tetoContratoBase > 0 ? `${tetoContratoBase.toFixed(1)}h` : "0.0h")}
-                            </span>
+                            <span className="font-bold text-foreground text-base font-mono mt-0.5 block">{tetoReferenciaVida.toFixed(1)}h</span>
                           </div>
 
                           <div className="bg-background/50 dark:bg-muted/20 p-3 rounded-xl border border-border/40">
                             <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Total Alocado (Vida)</span>
-                            <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
-                              {isOverhead ? (
-                                <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
-                              ) : (totalAlocadoVida > 0 ? `${totalAlocadoVida.toFixed(1)}h` : "0.0h")}
-                            </span>
+                            <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">{totalAlocadoVida.toFixed(1)}h</span>
                           </div>
 
                           <div className="bg-red-500/5 p-3 rounded-xl border border-red-500/15">
                             <span className="text-[10px] text-red-600/80 dark:text-red-400 uppercase block font-semibold">Consumido (Vida Útil)</span>
-                            <span className="font-bold text-red-600 dark:text-red-400 text-base font-mono mt-0.5 block">
-                              {gastoVidaUtil.toFixed(1)}h
-                            </span>
+                            <span className="font-bold text-red-600 dark:text-red-400 text-base font-mono mt-0.5 block">{gastoVidaUtil.toFixed(1)}h</span>
                           </div>
 
                           <div className="bg-green-500/5 p-3 rounded-xl border border-green-500/15">
                             <span className="text-[10px] text-green-700 dark:text-green-400 uppercase block font-semibold">Saldo (Vida Útil)</span>
-                            <span className={`font-bold text-base font-mono mt-0.5 block ${isOverhead ? 'text-amber-500' : (saldoVidaUtil < 0 ? 'text-red-500' : 'text-green-600 dark:text-green-400')}`}>
-                              {isOverhead ? (
-                                <span className="flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Livre</span>
-                              ) : `${saldoVidaUtil.toFixed(1)}h`}
+                            <span className={`font-bold text-base font-mono mt-0.5 block ${saldoVidaUtil < 0 ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
+                              {saldoVidaUtil.toFixed(1)}h
                             </span>
                           </div>
 
@@ -4289,34 +4478,24 @@ export function AdminDashboard() {
                             <>
                               <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
                                 <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Orçado no Ciclo</span>
-                                <span className="font-bold text-foreground/90 text-base font-mono mt-0.5 flex items-center gap-1">
-                                  {isCicloTotalmenteIlimitado ? (
-                                    <span className="text-amber-500 flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Dinâmico</span>
-                                  ) : `${orcadoCiclo.toFixed(1)}h`}
-                                </span>
+                                <span className="font-bold text-foreground/90 text-base font-mono mt-0.5 block">{orcadoCiclo.toFixed(1)}h</span>
                               </div>
 
                               <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
                                 <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Consumido no Ciclo</span>
-                                <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
-                                  {gastoCiclo.toFixed(1)}h
-                                </span>
+                                <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">{gastoCiclo.toFixed(1)}h</span>
                               </div>
 
                               <div className="bg-muted/10 p-3 rounded-xl border border-border/30">
                                 <span className="text-[10px] text-muted-foreground uppercase block font-semibold">Saldo no Ciclo (Mês)</span>
-                                <span className={`font-bold text-base font-mono mt-0.5 block ${isCicloTotalmenteIlimitado ? 'text-amber-500' : (saldoCiclo < 0 ? 'text-red-500' : 'text-blue-600 dark:text-blue-400')}`}>
-                                  {isCicloTotalmenteIlimitado ? (
-                                    <span className="flex items-center gap-1 text-sm"><Wrench className="w-3.5 h-3.5"/> Livre</span>
-                                  ) : `${saldoCiclo.toFixed(1)}h`}
+                                <span className={`font-bold text-base font-mono mt-0.5 block ${saldoCiclo < 0 ? 'text-red-500' : 'text-blue-600 dark:text-blue-400'}`}>
+                                  {saldoCiclo.toFixed(1)}h
                                 </span>
                               </div>
 
                               <div className="bg-blue-500/5 p-3 rounded-xl border border-blue-500/15">
                                 <span className="text-[10px] text-blue-600/80 dark:text-blue-400 uppercase block font-semibold">Avanço no Ciclo (%)</span>
-                                <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">
-                                  {isCicloTotalmenteIlimitado ? '100%' : `${percCiclo}%`}
-                                </span>
+                                <span className="font-bold text-blue-600 dark:text-blue-400 text-base font-mono mt-0.5 block">{percCiclo}%</span>
                               </div>
                             </>
                           ) : (
@@ -4412,15 +4591,22 @@ export function AdminDashboard() {
                                         const isFechado = cObj.tipo === 'fechado' || uAlocsCiclo.some(a => a.atividade === 'Preço Fechado (Medição)');
                                         
                                         // --- 1. INDICADORES DA VIDA ÚTIL DO CONSULTOR ---
-                                        const uTetoBase = getTetoBaseContrato(cid, c.id);
+                                        const uTetoBase = getTetoBaseContrato(cid, c.id, dashOs);
                                         const uGastoVida = allTimesheets
                                           .filter(t => t.user_id === c.id && t.contract_id === cid && (dashOs !== 'todas' ? t.os_id === dashOs : true))
                                           .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
-                                        const uSaldoVida = uTetoBase > 0 ? (uTetoBase - uGastoVida) : 0;
-                                        const uPercVida = uTetoBase > 0 ? ((uGastoVida / uTetoBase) * 100).toFixed(1) : '0.0';
+
+                                        // Se Teto Base for 0, usa as alocações da vida como teto de referência absoluto
+                                        const totalAlocadoVidaCons = allAlocacoes
+                                          .filter(a => a.user_id === c.id && a.contract_id === cid && (dashOs !== 'todas' ? a.os_id === dashOs : true) && a.atividade !== 'Preço Fechado (Medição)')
+                                          .reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
+
+                                        const tetoRefVidaCons = uTetoBase > 0 ? uTetoBase : totalAlocadoVidaCons;
+                                        const uSaldoVida = tetoRefVidaCons - uGastoVida;
+                                        const uPercVida = tetoRefVidaCons > 0 ? ((uGastoVida / tetoRefVidaCons) * 100).toFixed(1) : '0.0';
 
                                         // --- 2. INDICADORES DO CICLO SELECIONADO ---
-                                        let uGastoCiclo = 0; let uOrcadoCiclo = 0; let hasIlim = false;
+                                        let uGastoCiclo = 0; let uOrcadoCiclo = 0;
 
                                         if (isFechado) {
                                             const pM = parseInt(dashMes); const pA = parseInt(dashAno);
@@ -4433,57 +4619,32 @@ export function AdminDashboard() {
                                             }).reduce((sum, m) => sum + m.percentual, 0);
                                         } else {
                                             uGastoCiclo = uTimesCiclo.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                            uAlocsCiclo.forEach(a => {
-                                              const osObj = osList.find(o => o.id === a.os_id);
-                                              const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
-                                              if (isSuportes) {
-                                                 hasIlim = true;
-                                                 const tAtiv = uTimesCiclo.filter(t => t.activity === a.atividade && (a.os_id ? t.os_id === a.os_id : true));
-                                                 uOrcadoCiclo += tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                              } else {
-                                                 uOrcadoCiclo += Number(a.horas_disponiveis);
-                                              }
-                                            });
-                                            if (uAlocsCiclo.length === 0) {
-                                               const tSup = uTimesCiclo.filter(t => osList.find(o => o.id === t.os_id)?.codigo === '🛠️ Pequenos Suportes');
-                                               if (tSup.length > 0) {
-                                                  hasIlim = true;
-                                                  uOrcadoCiclo += tSup.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                                               }
-                                            }
+                                            uOrcadoCiclo = uAlocsCiclo.filter(a => a.atividade !== 'Preço Fechado (Medição)').reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
                                         }
                                         
-                                        // Esconde o consultor apenas se não tiver absolutamente nenhum número (nem vida, nem ciclo)
-                                        if (uTetoBase === 0 && uGastoVida === 0 && uOrcadoCiclo === 0 && uGastoCiclo === 0) return null;
+                                        // Esconde o consultor apenas se não tiver nenhum número (nem vida, nem ciclo)
+                                        if (tetoRefVidaCons === 0 && uGastoVida === 0 && uOrcadoCiclo === 0 && uGastoCiclo === 0) return null;
 
                                         return (
                                           <tr key={c.id} className="hover:bg-muted/20 transition-colors font-mono">
                                             <td className="px-4 py-3 font-semibold font-sans text-foreground">{c.nome}</td>
                                             
-                                            {/* VIDA ÚTIL */}
-                                            <td className="px-3 py-3 text-right text-foreground/80">
-                                              {cObj.tipo === 'overhead' ? (
-                                                <span className="flex justify-end text-amber-500"><Wrench className="w-3.5 h-3.5"/></span>
-                                              ) : (uTetoBase > 0 ? `${uTetoBase.toFixed(1)}h` : "-")}
-                                            </td>
+                                            {/* VIDA ÚTIL COMPLETAMENTE LIMPA */}
+                                            <td className="px-3 py-3 text-right text-foreground/80">{tetoRefVidaCons > 0 ? `${tetoRefVidaCons.toFixed(1)}h` : "0.0h"}</td>
                                             <td className="px-3 py-3 text-right text-red-600 font-bold">{uGastoVida.toFixed(1)}h</td>
                                             <td className={`px-3 py-3 text-right font-bold ${uSaldoVida < 0 ? 'text-red-500' : 'text-green-600'}`}>
-                                              {cObj.tipo === 'overhead' ? (
-                                                <span className="flex justify-end text-amber-500"><Wrench className="w-3.5 h-3.5"/></span>
-                                              ) : (uTetoBase > 0 ? `${uSaldoVida.toFixed(1)}h` : "-")}
+                                              {`${uSaldoVida.toFixed(1)}h`}
                                             </td>
-                                            <td className="px-3 py-3 text-right font-black text-primary">
-                                              {cObj.tipo === 'overhead' ? '-' : `${uPercVida}%`}
-                                            </td>
+                                            <td className="px-3 py-3 text-right font-black text-primary">{`${uPercVida}%`}</td>
 
                                             {/* CICLO SELECIONADO */}
                                             {modoDataFiltro === 'ciclo' && (
-                                              <td className="px-3 py-3 text-right text-muted-foreground bg-muted/10">{isFechado ? `${uOrcadoCiclo.toFixed(1)}%` : (hasIlim ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${uOrcadoCiclo.toFixed(1)}h`)}</td>
+                                              <td className="px-3 py-3 text-right text-muted-foreground bg-muted/10">{isFechado ? `${uOrcadoCiclo.toFixed(1)}%` : `${uOrcadoCiclo.toFixed(1)}h`}</td>
                                             )}
                                             <td className={`px-3 py-3 text-right font-bold bg-muted/10 ${isFechado ? 'text-primary' : 'text-red-500'}`}>{isFechado ? `${uGastoCiclo.toFixed(1)}%` : `${uGastoCiclo.toFixed(1)}h`}</td>
                                             {modoDataFiltro === 'ciclo' && (
-                                              <td className={`px-4 py-3 text-right font-bold bg-muted/10 ${hasIlim ? 'text-amber-500' : (isFechado ? (100 - uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600') : (uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
-                                                {isFechado ? `${(100 - uOrcadoCiclo - uGastoCiclo).toFixed(1)}%` : (hasIlim ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(uOrcadoCiclo - uGastoCiclo).toFixed(1)}h`)}
+                                              <td className={`px-4 py-3 text-right font-bold bg-muted/10 ${isFechado ? (100 - uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600') : (uOrcadoCiclo - uGastoCiclo < 0 ? 'text-red-500' : 'text-blue-600')}`}>
+                                                {isFechado ? `${(100 - uOrcadoCiclo - uGastoCiclo).toFixed(1)}%` : `${(uOrcadoCiclo - uGastoCiclo).toFixed(1)}h`}
                                               </td>
                                             )}
                                           </tr>
@@ -4555,16 +4716,13 @@ export function AdminDashboard() {
                                           if (a.os_id) tAtiv = tAtiv.filter(t => t.os_id === a.os_id);
                                           gasto = tAtiv.reduce((sum, t) => sum + (new Date(t.end_at!).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
                                           
-                                          isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
-                                          if (isSuportes) orcado = gasto;
-                                          else {
-                                            orcado = Number(a.horas_disponiveis);
-                                          }
+                                          // 🌟 FASE 2/4: Puxa apenas as horas reais e ignora qualquer regra de chavinha de suporte/overhead
+                                          orcado = Number(a.horas_disponiveis);
                                       }
 
                                       if (orcado === 0 && gasto === 0) return null;
 
-                                      return { contrato: cObj.codigo, nomeContrato: cObj.nome, os: osObj?.codigo || '-', atividade: a.atividade, orcado, gasto, ilimitado: isSuportes, isFechado };
+                                      return { contrato: cObj.codigo, nomeContrato: cObj.nome, os: osObj?.codigo || '-', atividade: a.atividade, orcado, gasto, ilimitado: false, isFechado };
                                     });
 
                                     const validRows = rows.filter(r => r !== null);
@@ -4596,13 +4754,13 @@ export function AdminDashboard() {
                                                    {item.isFechado ? 'Medição de Avanço (%)' : item.atividade}
                                                 </td>
                                                 <td className="px-4 py-2 text-right font-mono text-muted-foreground">
-                                                   {item.isFechado ? `${item.orcado.toFixed(1)}%` : (item.ilimitado ? <span className="flex justify-end text-amber-500"><Wrench className="w-3 h-3"/></span> : `${item.orcado.toFixed(1)}h`)}
+                                                   {item.isFechado ? `${item.orcado.toFixed(1)}%` : `${item.orcado.toFixed(1)}h`}
                                                 </td>
                                                 <td className={`px-4 py-2 text-right font-mono font-bold ${item.isFechado ? 'text-primary' : 'text-red-500'}`}>
                                                    {item.isFechado ? `${item.gasto.toFixed(1)}%` : `${item.gasto.toFixed(1)}h`}
                                                 </td>
-                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.ilimitado ? 'text-amber-500' : (item.isFechado ? (100 - item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600') : (item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600'))}`}>
-                                                   {item.isFechado ? `${(100 - item.orcado - item.gasto).toFixed(1)}%` : (item.ilimitado ? <span className="flex justify-end"><Wrench className="w-3 h-3"/></span> : `${(item.orcado - item.gasto).toFixed(1)}h`)}
+                                                <td className={`px-4 py-2 text-right font-mono font-bold ${item.isFechado ? (100 - item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600') : (item.orcado - item.gasto < 0 ? 'text-red-500' : 'text-blue-600')}`}>
+                                                   {item.isFechado ? `${(100 - item.orcado - item.gasto).toFixed(1)}%` : `${(item.orcado - item.gasto).toFixed(1)}h`}
                                                 </td>
                                              </tr>
                                           ))}
@@ -4827,21 +4985,37 @@ export function AdminDashboard() {
                            </div>
                            <div className="text-sm text-foreground/90 leading-relaxed mt-1">
                              {(() => {
-                               // Quebra o texto rastreando o padrão "de [X] para [Y]"
-                               const partes = log.detalhes.split(/(de \[[^\]]*\] para \[[^\]]*\])/g);
-                               return partes.map((parte, idx) => {
-                                 const match = parte.match(/de \[(.*?)\] para \[(.*?)\]/);
-                                 if (match) {
-                                   return (
-                                     <span key={idx} className="inline-flex items-center gap-1 mx-1 align-middle">
-                                        <span className="bg-red-500/10 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded text-xs line-through truncate max-w-37.5" title={match[1]}>{match[1] || 'vazio'}</span>
-                                        <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
-                                        <span className="bg-green-500/10 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded text-xs font-bold truncate max-w-37.5" title={match[2]}>{match[2] || 'vazio'}</span>
-                                     </span>
-                                   );
-                                 }
-                                 return <span key={idx}>{parte}</span>;
-                               });
+                                // Se for edição "de-para", usa os crachás de seta
+                                const matchEdicao = log.detalhes.match(/de \[(.*?)\] para \[(.*?)\]/);
+                                if (matchEdicao) {
+                                  const partes = log.detalhes.split(/(de \[[^\]]*\] para \[[^\]]*\])/g);
+                                  return partes.map((parte, idx) => {
+                                    const m = parte.match(/de \[(.*?)\] para \[(.*?)\]/);
+                                    if (m) {
+                                      return (
+                                        <span key={idx} className="inline-flex items-center gap-1.5 mx-1 align-middle bg-muted/30 px-1.5 py-0.5 rounded-md border border-dashed">
+                                          <span className="bg-red-500/10 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded text-[11px] line-through truncate max-w-40" title={m[1]}>{m[1] || 'vazio'}</span>
+                                          <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
+                                          <span className="bg-green-500/10 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded text-[11px] font-bold truncate max-w-40" title={m[2]}>{m[2] || 'vazio'}</span>
+                                        </span>
+                                      );
+                                    }
+                                    return <span key={idx} className="text-foreground/90">{parte}</span>;
+                                  });
+                                }
+
+                                // Se não for edição, pinta palavras-chave dinamicamente
+                                const text = log.detalhes;
+                                const coloredWords = text.split(/(\b(?:criado|criada|gerado|gerada|excluído|excluída|apagado|apagada|inativo|ativo|renomeada|atualizado|atualizada)\b|"[^"]*"|\([^)]*\)|[A-Z]+-\d+)/i);
+
+                                return coloredWords.map((word, i) => {
+                                   const wLower = word.toLowerCase();
+                                   if (['criado', 'criada', 'gerado', 'gerada', 'ativo'].includes(wLower)) return <span key={i} className="text-green-600 dark:text-green-400 font-bold">{word}</span>;
+                                   if (['excluído', 'excluída', 'apagado', 'apagada', 'inativo'].includes(wLower)) return <span key={i} className="text-red-600 dark:text-red-400 font-bold line-through ml-1 mr-1">{word}</span>;
+                                   if (['renomeada', 'atualizado', 'atualizada'].includes(wLower)) return <span key={i} className="text-blue-600 dark:text-blue-400 font-bold">{word}</span>;
+                                   if (word.startsWith('"') || word.startsWith('(') || word.match(/^[A-Z]+-\d+$/)) return <span key={i} className="text-primary font-bold">{word}</span>;
+                                   return <span key={i} className="text-foreground/90">{word}</span>;
+                                });
                              })()}
                            </div>
                            <p className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mt-3 bg-muted/40 w-fit px-2 py-1 rounded">
@@ -5057,15 +5231,17 @@ export function AdminDashboard() {
                 const perc = (gastoVida / tetoBase) * 100;
                 if (perc >= 80) {
                   listaAlertasContratos.push({
+                    alertaId: `ct-${c.id}`, // 🌟 Adicione esta linha em todos os push de Contrato
                     tipo: 'critico',
-                    titulo: `Contrato em Risco de Estouro (80%): ${c.codigo}`,
+                    titulo: `Contrato em Risco (80%): ${c.codigo} — ${c.nome}`,
                     desc: `Consumido ${gastoVida.toFixed(1)}h de ${tetoBase.toFixed(1)}h (${perc.toFixed(1)}%). Avaliar fechamento ou aditivo.`,
                     contractId: c.id
                   });
                 } else if (perc >= 50) {
                   listaAlertasContratos.push({
+                    alertaId: `ct-${c.id}`, // 🌟 Adicione esta linha em todos os push de Contrato
                     tipo: 'atencao',
-                    titulo: `Checkpoint de Contrato (50%): ${c.codigo}`,
+                    titulo: `Checkpoint de Contrato (50%): ${c.codigo} — ${c.nome}`,
                     desc: `Consumido ${gastoVida.toFixed(1)}h de ${tetoBase.toFixed(1)}h (${perc.toFixed(1)}%). Checar se a entrega está nos trilhos.`,
                     contractId: c.id
                   });
@@ -5074,7 +5250,7 @@ export function AdminDashboard() {
 
               // Se for Assessoria (continuado_com_os), checa também cada OS individualmente
               if (c.tipo === 'continuado_com_os') {
-                osList.filter(o => o.contract_id === c.id && o.status_ativa && o.codigo !== '🛠️ Pequenos Suportes').forEach(os => {
+                osList.filter(o => o.contract_id === c.id && o.status_ativa).forEach(os => {
                   const prevOs = Number(os.horas_previstas || 0);
                   const gastoOs = allTimesheets
                     .filter(t => t.os_id === os.id)
@@ -5084,17 +5260,19 @@ export function AdminDashboard() {
                     const percOs = (gastoOs / prevOs) * 100;
                     if (percOs >= 80) {
                       listaAlertasContratos.push({
+                        alertaId: `os-${os.id}`, // 🌟 Adicione esta linha em todos os push de OS
                         tipo: 'critico',
-                        titulo: `OS em Risco (80%): ${os.codigo} — ${c.codigo}`,
-                        desc: `Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
+                        titulo: `OS em Risco (80%): ${os.codigo} ${os.descricao ? '- ' + os.descricao : ''}`,
+                        desc: `Contrato: ${c.codigo} — ${c.nome}. Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
                         contractId: c.id,
                         osId: os.id
                       });
                     } else if (percOs >= 50) {
                       listaAlertasContratos.push({
+                        alertaId: `os-${os.id}`, // 🌟 Adicione esta linha em todos os push de OS
                         tipo: 'atencao',
-                        titulo: `Checkpoint de OS (50%): ${os.codigo} — ${c.codigo}`,
-                        desc: `Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
+                        titulo: `Checkpoint de OS (50%): ${os.codigo} ${os.descricao ? '- ' + os.descricao : ''}`,
+                        desc: `Contrato: ${c.codigo} — ${c.nome}. Demanda consumiu ${gastoOs.toFixed(1)}h de ${prevOs.toFixed(1)}h (${percOs.toFixed(1)}%).`,
                         contractId: c.id,
                         osId: os.id
                       });
@@ -5172,16 +5350,9 @@ export function AdminDashboard() {
                     }
                     
                     const gastoH = tOs.reduce((sum, t) => sum + (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()), 0) / 3600000;
-                    const osObj = osList.find(o => o.id === osid);
-                    const isSuportes = osObj?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(cObj.tipo);
                     
-                    let orcadoH = 0;
-                    if (isSuportes) {
-                       orcadoH = gastoH; 
-                    } else {
-                       orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
-                       if (orcadoH >= 9000) orcadoH = gastoH; 
-                    }
+                    // 🌟 FASE 2: FIM DO INFINITO NO RADAR DE EQUIPE
+                    const orcadoH = aOs.reduce((sum, a) => sum + Number(a.horas_disponiveis), 0);
 
                     if (orcadoH > 0 || gastoH > 0) {
                        orcadoTotal += orcadoH;
@@ -5201,6 +5372,7 @@ export function AdminDashboard() {
 
                  if (percConsultor >= 80) {
                     listaAlertasConsultores.push({
+                      alertaId: `usr-${u.id}`, // 🌟 Adicione esta linha em todos os push de Consultores
                        tipo: 'critico',
                        titulo: `Risco de Estouro (Consumo: ${percConsultor.toFixed(0)}% | Tempo do Ciclo: ${avancoCicloPerc.toFixed(0)}%) — ${u.nome}`,
                        desc: `Consumiu ${gastoTotal.toFixed(1)}h de ${orcadoTotal.toFixed(1)}h. ${analiseRitmo}`,
@@ -5208,6 +5380,7 @@ export function AdminDashboard() {
                     });
                  } else if (percConsultor >= 50) {
                     listaAlertasConsultores.push({
+                      alertaId: `usr-${u.id}`, // 🌟 Adicione esta linha em todos os push de Consultores
                        tipo: 'atencao',
                        titulo: `Checkpoint (Consumo: ${percConsultor.toFixed(0)}% | Tempo do Ciclo: ${avancoCicloPerc.toFixed(0)}%) — ${u.nome}`,
                        desc: `Consumiu ${gastoTotal.toFixed(1)}h de ${orcadoTotal.toFixed(1)}h. ${analiseRitmo}`,
@@ -5216,39 +5389,43 @@ export function AdminDashboard() {
                  }
               }
             });
+            // 🌟 FASE 4: Ordenar alertas Críticos (Vermelhos) primeiro
+            listaAlertasContratos.sort((a, b) => a.tipo === 'critico' ? -1 : 1);
+            listaAlertasConsultores.sort((a, b) => a.tipo === 'critico' ? -1 : 1);
+
+            const visiveisContratos = listaAlertasContratos.filter(a => alertasAck[a.alertaId] !== a.tipo);
+            const visiveisConsultores = listaAlertasConsultores.filter(a => alertasAck[a.alertaId] !== a.tipo);
+            const ocultosCount = (listaAlertasContratos.length - visiveisContratos.length) + (listaAlertasConsultores.length - visiveisConsultores.length);
 
             return (
               <div className="space-y-8 animate-in fade-in-50">
                 {/* CABEÇALHO DO RADAR */}
                 <div className="bg-linear-to-r from-primary/10 via-background to-transparent p-6 rounded-2xl border border-primary/20 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                   <div>
-                    <Badge className="bg-primary text-white font-mono uppercase text-[10px] mb-1.5">
-                      GOVERNANÇA EXECUTIVA
-                    </Badge>
-                    <h2 className="text-xl font-bold tracking-tight text-foreground flex items-center gap-2">
-                      Radar de Alertas (Checkpoints 50% & 80%)
-                      <span title="Monitoramento automático que cruza o tempo do ciclo com o consumo de horas da equipe e da demanda." className="cursor-help"><HelpCircle className="w-5 h-5 text-muted-foreground hover:text-primary transition-colors" /></span>
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Monitoramento ativo para gestores: acompanhamento de marcos de saúde de Contratos, OSs e Equipe no ciclo.
-                    </p>
+                    <Badge className="bg-primary text-white font-mono uppercase text-[10px] mb-1.5 border-none">GOVERNANÇA EXECUTIVA</Badge>
+                    <h2 className="text-xl font-bold tracking-tight text-foreground flex items-center gap-2">Radar de Alertas</h2>
                   </div>
+                  {ocultosCount > 0 && (
+                    <Button variant="outline" size="sm" onClick={handleClearAcks} className="text-xs h-8 text-muted-foreground hover:text-foreground">
+                      Restaurar {ocultosCount} Alertas Ocultos
+                    </Button>
+                  )}
                 </div>
 
                 {/* --- SEÇÃO 1: ALERTAS DE VIDA ÚTIL (CONTRATOS E OSs) --- */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
                     <span>1. Saúde de Contratos e Demandas (Vida Útil)</span>
-                    <Badge variant="secondary" className="font-mono">{listaAlertasContratos.length}</Badge>
+                    <Badge variant="secondary" className="font-mono">{visiveisContratos.length}</Badge>
                   </h3>
 
-                  {listaAlertasContratos.length === 0 ? (
+                  {visiveisContratos.length === 0 ? (
                     <div className="p-8 text-center border border-dashed rounded-2xl bg-card text-muted-foreground text-xs">
                       Nenhum contrato ou OS atingiu os marcos de 50% ou 80% de consumo da vida útil no momento.
                     </div>
                   ) : (
                     <div className="grid gap-3 md:grid-cols-2">
-                      {listaAlertasContratos.map((a, i) => (
+                      {visiveisContratos.map((a, i) => (
                         <div key={i} className={`p-4 rounded-xl border flex flex-col justify-between gap-4 shadow-xs transition-all ${
                           a.tipo === 'critico' ? 'bg-red-500/5 border-red-500/20' : 'bg-amber-500/5 border-amber-500/20'
                         }`}>
@@ -5266,7 +5443,10 @@ export function AdminDashboard() {
                             </div>
                           </div>
 
-                          <div className="flex justify-end pt-2 border-t border-dashed border-border/60">
+                          <div className="flex justify-between items-center pt-3 mt-1 border-t border-dashed border-border/60">
+                            <Button size="sm" variant="ghost" className="text-xs h-8 text-muted-foreground hover:bg-muted/50" onClick={() => handleAckAlert(a.alertaId, a.tipo)}>
+                              <Check className="w-3.5 h-3.5 mr-1" /> Marcar Ciente
+                            </Button>
                             <Button 
                               size="sm" 
                               variant="outline" 
@@ -5277,7 +5457,7 @@ export function AdminDashboard() {
                                 setMenuAtivo('dash-global');
                               }}
                             >
-                              <span>Ver Visão Global do Contrato</span>
+                              <span>Ver Visão Global</span>
                             </Button>
                           </div>
                         </div>
@@ -5290,16 +5470,16 @@ export function AdminDashboard() {
                 <div className="space-y-3">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 border-b pb-2">
                     <span>2. Consumo de Alocação da Equipe (Tempo do Ciclo: {avancoCicloPerc.toFixed(0)}%)</span>
-                    <Badge variant="secondary" className="font-mono">{listaAlertasConsultores.length}</Badge>
+                    <Badge variant="secondary" className="font-mono">{visiveisConsultores.length}</Badge>
                   </h3>
 
-                  {listaAlertasConsultores.length === 0 ? (
+                  {visiveisConsultores.length === 0 ? (
                     <div className="p-8 text-center border border-dashed rounded-2xl bg-card text-muted-foreground text-xs">
                       Nenhum consultor atingiu 50% ou 80% da sua alocação no mês selecionado.
                     </div>
                   ) : (
                     <div className="grid gap-3 md:grid-cols-2">
-                      {listaAlertasConsultores.map((a, i) => (
+                      {visiveisConsultores.map((a, i) => (
                         <div key={i} className={`p-4 rounded-xl border flex flex-col justify-between gap-4 shadow-xs transition-all ${
                           a.tipo === 'critico' ? 'bg-red-500/5 border-red-500/20' : 'bg-blue-500/5 border-blue-500/20'
                         }`}>
@@ -5317,7 +5497,10 @@ export function AdminDashboard() {
                             </div>
                           </div>
 
-                          <div className="flex justify-end pt-2 border-t border-dashed border-border/60">
+                          <div className="flex justify-between items-center pt-3 mt-1 border-t border-dashed border-border/60">
+                            <Button size="sm" variant="ghost" className="text-xs h-8 text-muted-foreground hover:bg-muted/50" onClick={() => handleAckAlert(a.alertaId, a.tipo)}>
+                              <Check className="w-3.5 h-3.5 mr-1" /> Marcar Ciente
+                            </Button>
                             <Button 
                               size="sm" 
                               variant="outline" 
@@ -5328,7 +5511,7 @@ export function AdminDashboard() {
                                 setMenuAtivo('alocacoes');
                               }}
                             >
-                              <span>Ajustar Alocação / Matriz</span>
+                              <span>Ajustar Matriz</span>
                             </Button>
                           </div>
                         </div>
@@ -5381,7 +5564,7 @@ export function AdminDashboard() {
                        </table>
                      </div>
                      <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-xl flex justify-between items-center mt-2 shadow-sm">
-                       <span className="font-bold text-amber-700">Gordura Global a Liquidar:</span>
+                       <span className="font-bold text-amber-700">Saldo Total de Ajuste (Liquidar Sobras / Cobrir Déficits):</span>
                        <span className="font-mono text-xl font-black text-amber-700">{reguaData.reduce((sum, r) => sum + r.saldoRemanescente, 0).toFixed(1)}h</span>
                      </div>
                    </>
@@ -5430,11 +5613,45 @@ export function AdminDashboard() {
                    </div>
                  </div>
               )}
+              {/* BLOCO 3: AJUSTE DA MATRIZ (PEQUENOS SUPORTES) */}
+              {reguaBaseAjustesData.length > 0 && (
+                 <div className="pt-4 border-t">
+                    <h4 className="font-bold text-sm text-foreground mb-2 flex items-center gap-2"><FolderTree className="w-4 h-4 text-green-600"/> Detalhamento: Tetos da Matriz (Pequenos Suportes)</h4>
+                    <p className="text-xs text-muted-foreground mb-3">
+                       As <strong>{reguaBaseAjustesData.length} alocações</strong> abaixo terão seus tetos na Matriz atualizados para corresponder à soma de todas as horas já distribuídas ao longo da vida útil. Isso corrigirá os saldos negativos gerados pela mudança de regra (fim do infinito).
+                    </p>
+                    <div className="border rounded-md overflow-hidden text-xs">
+                     <table className="w-full text-left">
+                       <thead className="bg-muted/50">
+                         <tr>
+                           <th className="p-2.5 font-semibold">Consultor</th>
+                           <th className="p-2.5 font-semibold">Contrato / OS</th>
+                           <th className="p-2.5 text-right font-semibold">Teto Antigo</th>
+                           <th className="p-2.5 text-right font-semibold">Novo Teto Real</th>
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y max-h-40 overflow-y-auto">
+                         {reguaBaseAjustesData.map((r, i) => (
+                           <tr key={i} className="hover:bg-muted/10">
+                             <td className="p-2.5 font-medium">{r.consultorNome}</td>
+                             <td className="p-2.5 flex flex-col">
+                               <span className="font-mono font-bold text-primary">{r.contratoCodigo}</span>
+                               <span className="text-muted-foreground text-[10px]">{r.osCodigo}</span>
+                             </td>
+                             <td className="p-2.5 text-right font-mono text-red-500 line-through">{r.orcado.toFixed(1)}h</td>
+                             <td className="p-2.5 text-right font-mono text-green-600 font-bold">{r.novoTeto.toFixed(1)}h</td>
+                           </tr>
+                         ))}
+                       </tbody>
+                     </table>
+                   </div>
+                 </div>
+              )}
 
             </div>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setIsReguaModalOpen(false)}>Cancelar</Button>
-              <Button onClick={liquidarPassado} disabled={liquidandoRegua || reguaAjustesData.length === 0} className="bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
+              <Button onClick={liquidarPassado} disabled={liquidandoRegua || (reguaAjustesData.length === 0 && reguaBaseAjustesData.length === 0)} className="bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
                 {liquidandoRegua ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Check className="w-4 h-4 mr-2" />}
                 Igualar e Passar a Régua
               </Button>

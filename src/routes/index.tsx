@@ -342,11 +342,12 @@ function TimesheetPage() {
     return new Date();
   }, [daySelection]);
 
-  // 🌟 CORREÇÃO: Lista Global de Contratos para o Painel não ignorar meses passados
+  // 🌟 CORREÇÃO: Lista Global de Contratos para o Painel não ignorar meses passados e inativos
   const allConsultorContracts = useMemo(() => {
     const map = new Map();
     allocations.forEach(a => {
-      if (a.contratos?.status_ativo) {
+      // Removido a trava de status_ativo para manter o histórico vivo
+      if (a.contratos) {
         map.set(a.contract_id, {
           id: a.contract_id, 
           code: a.contratos.codigo, 
@@ -575,7 +576,7 @@ function TimesheetPage() {
        }
     });
     return sum;
-  }, [entries, panelMes, panelAno, allConsultorContracts]);
+  }, [entries, panelMes, panelAno, allConsultorContracts, panelModoData, panelDataInicio, panelDataFim]);
 
   const resumoPorTipo = useMemo(() => {
     let fechado = 0; let horas = 0;
@@ -591,32 +592,21 @@ function TimesheetPage() {
       }
     });
     return { fechado: fechado / 3600000, horas: horas / 3600000 };
-  }, [entries, allConsultorContracts, panelMes, panelAno]);
+  }, [entries, allConsultorContracts, panelMes, panelAno, panelModoData, panelDataInicio, panelDataFim]);
 
   const totalOrcadoMes = useMemo(() => {
     let totalOrcadoNesteCiclo = 0;
-    let hasIlimitado = false;
 
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno && a.atividade !== 'Preço Fechado (Medição)');
 
     alocsDoMes.forEach(alloc => {
-       const cb = getEffectivePanelBounds(alloc.contratos!.ciclo_inicio, alloc.contratos!.ciclo_fim);
-       const isComOsCheck = alloc.contratos!.tipo === 'continuado_com_os';
-       const osObjCheck = isComOsCheck && alloc.os_id ? osList.find(o => o.id === alloc.os_id) : null;
-       const isSuportesCheck = osObjCheck?.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'fechado', 'overhead'].includes(alloc.contratos!.tipo);
-       
-       if (isSuportesCheck) {
-          hasIlimitado = true;
-          let filterEntries = entries.filter(e => e.contractId === alloc.contract_id && e.activity === alloc.atividade && e.start >= cb.start && e.start <= cb.end);
-          if (isComOsCheck && alloc.os_id) filterEntries = filterEntries.filter(e => e.os_id === alloc.os_id);
-          const gastoCiclo = filterEntries.reduce((sum, e) => sum + (((e.end ?? Date.now()) - e.start)), 0) / 3600000;
-          totalOrcadoNesteCiclo += gastoCiclo;
-       } else {
+       // 🌟 FASE 2: Apenas preço fechado é diferente, TODO o resto soma horas reais alocadas
+       if (alloc.contratos!.tipo !== 'fechado') {
           totalOrcadoNesteCiclo += alloc.horas_disponiveis;
        }
     });
-    return { total: totalOrcadoNesteCiclo, hasIlimitado };
-  }, [allocations, osList, entries, panelMes, panelAno]);
+    return { total: totalOrcadoNesteCiclo, hasIlimitado: false };
+  }, [allocations, entries, panelMes, panelAno, panelModoData, panelDataInicio, panelDataFim]);
 
   const saldoHorasMes = Math.max(0, totalOrcadoMes.total - horasTrabalhadasMesAtual);
   const percentualGasto = totalOrcadoMes.total > 0 ? (horasTrabalhadasMesAtual / totalOrcadoMes.total) * 100 : 0;
@@ -628,13 +618,18 @@ function TimesheetPage() {
   }, [horasMinimasMes, totalOrcadoMes.total]);
 
   const pieData = useMemo(() => {
+    if (panelModoData === 'intervalo') {
+        if (horasTrabalhadasMesAtual === 0) return [{ name: 'Sem Registros', value: 1 }];
+        return [{ name: 'Consumido no Período', value: Number(horasTrabalhadasMesAtual.toFixed(1)) }];
+    }
+
     if (totalOrcadoMes.total === 0) return [{ name: 'Sem Registros', value: 1 }];
     const d = [
       { name: 'Já Entregue', value: Number(horasTrabalhadasMesAtual.toFixed(1)) },
       { name: 'Saldo a Entregar', value: Number(saldoHorasMes.toFixed(1)) }
     ].filter(i => i.value > 0);
     return d.length > 0 ? d : [{ name: 'Sem Registros', value: 1 }];
-  }, [horasTrabalhadasMesAtual, saldoHorasMes, totalOrcadoMes]);
+  }, [horasTrabalhadasMesAtual, saldoHorasMes, totalOrcadoMes, panelModoData]);
 
   const isPanelDateUnlocked = useMemo(() => authorizedDates.includes(panelDate), [panelDate, authorizedDates]);
 
@@ -652,6 +647,7 @@ function TimesheetPage() {
   const detalhamentoAlocacoes = useMemo(() => {
     const map = new Map<string, any>();
     
+    // 1. Constrói com base nas alocações formais do mês
     const alocsDoMes = allocations.filter(a => a.contratos?.status_ativo && a.mes === panelMes && a.ano === panelAno);
 
     alocsDoMes.forEach(alloc => {
@@ -671,14 +667,49 @@ function TimesheetPage() {
       cData.osGroups.get(osKey).atividades.push(alloc);
     });
     
+    // 2. 🌟 CORREÇÃO OVERHEAD: Injeta contratos/disciplinas que tiveram APONTAMENTOS, mesmo sem alocação
+    entries.forEach(e => {
+      const cObj = allConsultorContracts.find(c => c.id === e.contractId);
+      if (!cObj) return;
+      
+      const cb = getEffectivePanelBounds(cObj.ciclo_inicio, cObj.ciclo_fim);
+      if (e.start >= cb.start && e.start <= cb.end) {
+        if (!map.has(e.contractId)) {
+          map.set(e.contractId, {
+            id: cObj.id, codigo: cObj.code, nome: cObj.name,
+            tipo: cObj.tipo, inicio: cObj.ciclo_inicio, fim: cObj.ciclo_fim, osGroups: new Map()
+          });
+        }
+        const cData = map.get(e.contractId);
+        const isComOs = cData.tipo === 'continuado_com_os';
+        const osKey = isComOs && e.os_id ? e.os_id : 'sem_os';
+        
+        if (!cData.osGroups.has(osKey)) {
+          const osObj = osList.find(o => o.id === osKey);
+          cData.osGroups.set(osKey, { id: osKey, codigo: osObj?.codigo || '', nome: osObj?.descricao || '', atividades: [] });
+        }
+        
+        const osGroup = cData.osGroups.get(osKey);
+        const hasAtiv = osGroup.atividades.some((a: any) => a.atividade === e.activity);
+        if (!hasAtiv) {
+           osGroup.atividades.push({
+              atividade: e.activity,
+              horas_disponiveis: 0,
+              contract_id: e.contractId,
+              os_id: osKey !== 'sem_os' ? osKey : null
+           });
+        }
+      }
+    });
+
     return Array.from(map.values()).map(contract => {
       let totalGastoContrato = 0; let totalOrcadoNum = 0; let hasIlimitado = false; let hasFechado = false;
-      // 🌟 USA O MOTOR INTELIGENTE: Responde instantaneamente às datas do calendário de intervalo!
       const cb = getEffectivePanelBounds(contract.inicio, contract.fim);
 
       const osGroupsProcessed = Array.from(contract.osGroups.values()).map((osGroup: any) => {
-        const isSuportes = osGroup.codigo === '🛠️ Pequenos Suportes' || ['continuado_sem_os', 'overhead'].includes(contract.tipo);
-        if (isSuportes) hasIlimitado = true;
+        // 🌟 FASE 2: Morte do infinito no detalhamento
+        const isSuportes = false;
+        hasIlimitado = false;
 
         const atividadesProcessadas = osGroup.atividades.map((a: any) => {
           const isFechadoAtiv = a.atividade === 'Preço Fechado (Medição)' || contract.tipo === 'fechado';
@@ -724,8 +755,7 @@ function TimesheetPage() {
         hasFechado
       };
     });
-    // 🌟 BLINDAGEM DO USEMEMO: Adicionadas as 3 variáveis do intervalo no array de dependências!
-  }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel, panelModoData, panelDataInicio, panelDataFim]);
+  }, [allocations, entries, panelMes, panelAno, osList, medicoesPainel, panelModoData, panelDataInicio, panelDataFim, allConsultorContracts]);
 
   // NOVO: Cálculo focado apenas nos apontamentos válidos do período para montar o Extrato
   const extratoEntries = useMemo(() => {
@@ -1345,7 +1375,7 @@ function TimesheetPage() {
                   <Card className="md:col-span-2 shadow-sm">
                     <CardHeader className="pb-3 border-b flex flex-row items-center justify-between">
                       <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-                        <BarChart3 className="w-4 h-4" /> Resumo do Ciclo Selecionado
+                        <BarChart3 className="w-4 h-4" /> {panelModoData === 'intervalo' ? 'Resumo do Período' : 'Resumo do Ciclo Selecionado'}
                       </CardTitle>
                       <Button onClick={handleExportarExcelConsultor} variant="outline" size="sm" className="h-7 text-[10px] bg-green-500/10 text-green-700 border-green-500/20 hover:bg-green-500/20">
                         <Download className="w-3 h-3 mr-1" /> EXPORTAR EXCEL
@@ -1357,7 +1387,7 @@ function TimesheetPage() {
                           <PieChart>
                             <Pie data={pieData} startAngle={90} endAngle={-270} dataKey="value" cx="50%" cy="50%" innerRadius={35} outerRadius={60} stroke="none">
                               {pieData.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={entry.name === 'Já Entregue' ? '#3b82f6' : '#e2e8f0'} />
+                                <Cell key={`cell-${index}`} fill={entry.name === 'Sem Registros' ? '#e2e8f0' : (entry.name === 'Saldo a Entregar' ? '#e2e8f0' : '#3b82f6')} />
                               ))}
                             </Pie>
                             <RechartsTooltip 
@@ -1369,36 +1399,52 @@ function TimesheetPage() {
                         </ResponsiveContainer>
                         
                         <div className="absolute flex flex-col items-center justify-center pointer-events-none z-0">
-                           <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
+                           {panelModoData === 'intervalo' ? (
+                              <span className="text-[10px] font-black text-foreground uppercase tracking-wider">TOTAL</span>
+                           ) : (
+                              <span className="text-[14px] font-black text-foreground">{percentualGasto.toFixed(0)}%</span>
+                           )}
                         </div>
                       </div>
                       
                       <div className="flex-1 w-full space-y-3">
-                        <div className="flex justify-between items-center border-b pb-2">
-                          <span className="text-xs font-semibold text-muted-foreground">Total Previsto no Ciclo</span>
-                          <span className="font-mono font-bold">
-                            {totalOrcadoMes.total.toFixed(1)}h
-                          </span>
-                        </div>
-                        <div className="flex justify-between items-center border-b pb-2">
-                          <span className="text-xs font-semibold text-blue-600 flex items-center gap-1.5">
-                            <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Já Entregue
-                          </span>
-                          <div className="text-right">
-                            <span className="font-mono font-bold text-blue-600">{horasTrabalhadasMesAtual.toFixed(1)}h</span>
-                            {totalOrcadoMes.total > 0 && (
-                               <span className="text-[10px] text-blue-600/70 ml-1 font-bold">({percentualGasto.toFixed(1)}%)</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex justify-between items-center border-b pb-2">
-                          <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
-                            <span className="w-2.5 h-2.5 rounded-full bg-slate-200"></span> Saldo a Entregar
-                          </span>
-                          <span className="font-mono font-bold">
-                            {saldoHorasMes.toFixed(1)}h
-                          </span>
-                        </div>
+                        {panelModoData === 'ciclo' ? (
+                           <>
+                             <div className="flex justify-between items-center border-b pb-2">
+                               <span className="text-xs font-semibold text-muted-foreground">Total Previsto no Ciclo</span>
+                               <span className="font-mono font-bold">
+                                 {totalOrcadoMes.total.toFixed(1)}h
+                               </span>
+                             </div>
+                             <div className="flex justify-between items-center border-b pb-2">
+                               <span className="text-xs font-semibold text-blue-600 flex items-center gap-1.5">
+                                 <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Já Entregue
+                               </span>
+                               <div className="text-right">
+                                 <span className="font-mono font-bold text-blue-600">{horasTrabalhadasMesAtual.toFixed(1)}h</span>
+                                 {totalOrcadoMes.total > 0 && (
+                                    <span className="text-[10px] text-blue-600/70 ml-1 font-bold">({percentualGasto.toFixed(1)}%)</span>
+                                 )}
+                               </div>
+                             </div>
+                             <div className="flex justify-between items-center border-b pb-2">
+                               <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                                 <span className="w-2.5 h-2.5 rounded-full bg-slate-200"></span> Saldo a Entregar
+                               </span>
+                               <span className="font-mono font-bold">
+                                 {saldoHorasMes.toFixed(1)}h
+                               </span>
+                             </div>
+                           </>
+                        ) : (
+                           <div className="flex flex-col justify-center h-full space-y-2 pb-2">
+                             <span className="text-xs font-semibold text-muted-foreground">Total Trabalhado no Período</span>
+                             <span className="font-mono font-black text-3xl text-blue-600">
+                                {horasTrabalhadasMesAtual.toFixed(1)}h
+                             </span>
+                             <p className="text-[10px] text-muted-foreground mt-2 border-t pt-2 border-dashed">Saldos orçamentários (Previsto x Restante) não são aplicáveis na visão por intervalo de dias flexível.</p>
+                           </div>
+                        )}
                       </div>
                     </CardContent>
                   </Card>
