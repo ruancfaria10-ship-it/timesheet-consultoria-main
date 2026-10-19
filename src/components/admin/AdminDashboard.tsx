@@ -3703,18 +3703,20 @@ export function AdminDashboard() {
                     });
 
                     if (capModoVisao === 'mensal') {
-                      // Opção A: Distribuição Mensal
+                      // Opção A: Distribuição Mensal (Barras refletem o Total Alocado no Ciclo)
                       const saldoMensal = Math.max(0, orcadoMes - gastoMes);
-                      const valorExibido = isPastCycle ? Number(gastoMes.toFixed(1)) : Number(saldoMensal.toFixed(1));
+                      const alocadoExibido = isPastCycle && orcadoMes === 0
+                        ? Number(gastoMes.toFixed(1))
+                        : Number(orcadoMes.toFixed(1));
 
-                      ponto[`saldo_${cons.id}`] = valorExibido;
-                      ponto[`orcado_${cons.id}`] = Number(orcadoMes.toFixed(1));
+                      ponto[`saldo_${cons.id}`] = alocadoExibido;
+                      ponto[`orcado_${cons.id}`] = alocadoExibido;
                       ponto.detalhesConsultor[cons.id] = {
                         modo: 'mensal',
                         isPastCycle,
-                        orcadoMes: Number(orcadoMes.toFixed(1)),
+                        orcadoMes: alocadoExibido,
                         gastoMes: Number(gastoMes.toFixed(1)),
-                        saldoExibido: valorExibido,
+                        saldoExibido: Number(saldoMensal.toFixed(1)),
                         meta,
                       };
 
@@ -4002,7 +4004,7 @@ export function AdminDashboard() {
                           <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                             <div className="flex items-center gap-4 text-xs text-muted-foreground">
                               <span className="flex items-center gap-1.5 font-semibold">
-                                <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" /> Barra Sólida = {capModoVisao === 'mensal' ? 'Saldo Mensal (ou Entregue no Passado)' : 'Estoque Disponível no Teto da Matriz'}
+                                <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" /> Barra Sólida = {capModoVisao === 'mensal' ? 'Horas Alocadas no Ciclo' : 'Estoque Disponível no Teto da Matriz'}
                               </span>
                               <span className="flex items-center gap-1.5 font-semibold">
                                 <span className="w-5 border-t-2 border-dashed border-emerald-500 inline-block" /> Linha Tracejada = Hora Meta do Consultor
@@ -4130,7 +4132,7 @@ export function AdminDashboard() {
                                     <Bar
                                       key={`bar-${cons.id}`}
                                       dataKey={`saldo_${cons.id}`}
-                                      name={`${primeiroNome} (${capModoVisao === 'mensal' ? 'Saldo' : 'Teto Disp.'})`}
+                                      name={`${primeiroNome} (${capModoVisao === 'mensal' ? 'Alocado' : 'Teto Disp.'})`}
                                       fill={cor}
                                       radius={[4, 4, 0, 0]}
                                       maxBarSize={45}
@@ -4220,7 +4222,7 @@ export function AdminDashboard() {
                                             {!ciclo.isPastCycle && (
                                               <span className={`block text-[10px] mt-0.5 ${faltaTrabalho ? 'text-red-500 font-bold' : 'text-muted-foreground'}`}>
                                                 {capModoVisao === 'mensal'
-                                                  ? `Aloc: ${valOrcado.toFixed(0)}h (${diff >= 0 ? `+${diff.toFixed(0)}h meta` : `Faltam ${Math.abs(diff).toFixed(0)}h`})`
+                                                  ? `Saldo: ${(det?.saldoExibido ?? 0).toFixed(0)}h (${diff >= 0 ? `+${diff.toFixed(0)}h meta` : `Faltam ${Math.abs(diff).toFixed(0)}h`})`
                                                   : `${det?.jaAlocadoAcimaDaMeta ? `Aloc: ${valOrcado.toFixed(0)}h` : `Proj. Meta: -${meta.toFixed(0)}h`} (${diff >= 0 ? `Restam ${det?.saldoAposMeta ?? 0}h` : `Faltam ${Math.abs(diff).toFixed(0)}h`})`}
                                               </span>
                                             )}
