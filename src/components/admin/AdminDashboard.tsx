@@ -23,7 +23,8 @@ import {
 } from 'lucide-react'
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
-  ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area 
+  ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area,
+  ComposedChart, Line, Legend
 } from 'recharts'
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -84,6 +85,32 @@ export function AdminDashboard() {
   const [editandoConsId, setEditandoConsId] = useState<string | null>(null)
   const [editConsNome, setEditConsNome] = useState('')
   const [editConsEspecialidade, setEditConsEspecialidade] = useState('')
+
+  // 🌟 Sub-abas dentro de Equipe & Acessos ('membros' | 'capacidade' | 'performance')
+  const [subAbaEquipe, setSubAbaEquipe] = useState<'membros' | 'capacidade' | 'performance'>('membros')
+
+  // 🌟 FASE 2: Estados do Gráfico de Projeção de Saldos por Ciclos
+  const [capModoVisao, setCapModoVisao] = useState<'mensal' | 'matriz'>('mensal')
+  const [capQtdCiclos, setCapQtdCiclos] = useState<string>('3')
+  const [capConsultoresIds, setCapConsultoresIds] = useState<string[]>([])
+  const [capMesInicio, setCapMesInicio] = useState<string>(() => {
+    const now = new Date();
+    const m = now.getDate() >= 25 ? (now.getMonth() === 11 ? 0 : now.getMonth() + 1) : now.getMonth();
+    return m.toString();
+  })
+  const [capAnoInicio, setCapAnoInicio] = useState<string>(() => {
+    const now = new Date();
+    const y = now.getDate() >= 25 && now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+    return y.toString();
+  })
+
+  // Inicializa o gráfico selecionando automaticamente os consultores ativos (não-convidados)
+  useEffect(() => {
+    if (consultores.length > 0 && capConsultoresIds.length === 0) {
+      const ativos = consultores.filter(c => c.status_ativo !== false && !c.is_convidado).map(c => c.id);
+      if (ativos.length > 0) setCapConsultoresIds(ativos);
+    }
+  }, [consultores])
 
   // 🌟 FASE 5: Memória de Alertas Ignorados (Check)
   const [alertasAck, setAlertasAck] = useState<Record<string, string>>(() => {
@@ -1301,7 +1328,7 @@ export function AdminDashboard() {
   // AUTORIZAÇÕES RETROATIVAS E CARREGAMENTOS GLOBAIS
   // ==========================================
   useEffect(() => { 
-    if (['alocacoes', 'dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor', 'performance-consultores'].includes(menuAtivo)) {
+    if (['alocacoes', 'dash-mensal', 'dash-global', 'alertas', 'gestao', 'faturamento-cliente', 'resumo-consultor', 'equipe'].includes(menuAtivo)) {
       carregarTudoParaDash();
       setModoDataFiltro('ciclo'); // 🌟 BLINDAGEM: Sempre volta para o Ciclo Mensal ao trocar de aba!
     }
@@ -2710,7 +2737,6 @@ export function AdminDashboard() {
             <div className="space-y-1">
               <button onClick={() => setMenuAtivo('resumo-consultor')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'resumo-consultor' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel Consultor" : ""}><Contact2 className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Consultor</span>}</button>
               <button onClick={() => setMenuAtivo('dash-global')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'dash-global' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Painel Contratos" : ""}><Layers className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Painel Contratos</span>}</button>
-              <button onClick={() => setMenuAtivo('performance-consultores')} className={`w-full px-3 py-2 text-xs font-medium rounded-lg flex items-center transition-colors ${!isAdminSidebarOpen ? 'justify-center' : 'gap-2.5 text-left'} ${menuAtivo === 'performance-consultores' ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`} title={!isAdminSidebarOpen ? "Performance da Equipe" : ""}><Activity className="w-4 h-4 shrink-0"/> {isAdminSidebarOpen && <span className="truncate">Performance Equipe</span>}</button>
             </div>
           </div>
           <div>
@@ -3338,110 +3364,1061 @@ export function AdminDashboard() {
           </div>
         )}
 
-        {/* VIEW: EQUIPE & ACESSOS (FASE 4) */}
+        {/* VIEW: EQUIPE & ACESSOS (COM SUB-ABAS: MEMBROS, PROJEÇÃO DE CICLOS E PERFORMANCE) */}
         {menuAtivo === 'equipe' && (
           <Card className="border-t-4 border-t-emerald-500 w-full shadow-sm">
-            <CardHeader className="border-b pb-4 bg-muted/5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <CardHeader className="border-b pb-4 bg-muted/5 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
               <div>
                 <CardTitle className="flex items-center gap-2 text-emerald-700">
-                  <Users className="w-5 h-5"/> Gestão de Equipe e Acessos
-                  <span title="Gerencie o acesso da sua equipe. Use o botão de Recesso para pausar alertas de ociosidade de consultores em férias." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-emerald-500 transition-colors" /></span>
+                  <Users className="w-5 h-5"/> Gestão de Equipe, Capacidade e Performance
+                  <span title="Gerencie acessos, metas mensais de horas, projeção de saldos futuros e curva de velocidade da equipe." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-emerald-500 transition-colors" /></span>
                 </CardTitle>
-                <CardDescription className="mt-1">Gerencie quem tem acesso ao aplicativo e cadastre parceiros externos.</CardDescription>
+                <CardDescription className="mt-1">Controle permissões, defina a hora meta de cada consultor e acompanhe saldos e entregas.</CardDescription>
               </div>
-              <Button onClick={() => setIsNovoConsultorModalOpen(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm gap-2">
-                 <UserCog className="w-4 h-4" /> Adicionar Convidado (Preço Fechado)
-              </Button>
+
+              <div className="flex flex-wrap items-center gap-3">
+                {/* SELETOR DE SUB-ABAS */}
+                <div className="flex bg-muted/60 p-1 rounded-lg border shadow-inner">
+                  <Button
+                    variant={subAbaEquipe === 'membros' ? 'default' : 'ghost'}
+                    size="sm"
+                    onClick={() => setSubAbaEquipe('membros')}
+                    className="rounded-md font-bold h-8 text-xs gap-1.5"
+                  >
+                    <Users className="w-3.5 h-3.5" /> Acessos & Metas
+                  </Button>
+                  <Button
+                    variant={subAbaEquipe === 'capacidade' ? 'default' : 'ghost'}
+                    size="sm"
+                    onClick={() => setSubAbaEquipe('capacidade')}
+                    className="rounded-md font-bold h-8 text-xs gap-1.5"
+                  >
+                    <CalendarDays className="w-3.5 h-3.5" /> Projeção de Saldos (Ciclos)
+                  </Button>
+                  <Button
+                    variant={subAbaEquipe === 'performance' ? 'default' : 'ghost'}
+                    size="sm"
+                    onClick={() => setSubAbaEquipe('performance')}
+                    className="rounded-md font-bold h-8 text-xs gap-1.5"
+                  >
+                    <Activity className="w-3.5 h-3.5" /> Performance Equipe
+                  </Button>
+                </div>
+
+                {subAbaEquipe === 'membros' && (
+                  <Button onClick={() => setIsNovoConsultorModalOpen(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm gap-2 h-9 text-xs">
+                    <UserCog className="w-4 h-4" /> Adicionar Convidado (Preço Fechado)
+                  </Button>
+                )}
+              </div>
             </CardHeader>
+
             <CardContent className="pt-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
-                {consultores.map(c => (
-                  <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : (c.em_recesso ? 'bg-blue-500/5 border-blue-500/20' : 'bg-card')}`}>
-                    <div className="flex items-start justify-between">
-                       {editandoConsId === c.id ? (
-                          <div className="flex flex-col gap-2 w-full pr-4">
-                             <Input value={editConsNome} onChange={e => setEditConsNome(e.target.value)} className="h-8 text-sm font-bold" placeholder="Nome Completo" />
-                             <Input value={editConsEspecialidade} onChange={e => setEditConsEspecialidade(e.target.value)} className="h-8 text-xs" placeholder="Especialidade / Cargo" />
-                             <div className="flex gap-2 mt-1">
-                                <Button size="sm" onClick={salvarEdicaoConvidado} className="h-7 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white"><Check className="w-3 h-3 mr-1"/> Salvar</Button>
-                                <Button size="sm" variant="ghost" onClick={() => setEditandoConsId(null)} className="h-7 text-[10px]">Cancelar</Button>
-                             </div>
-                          </div>
-                       ) : (
-                          <div className="flex items-center justify-between w-full">
-                             <div className="flex items-center gap-3">
-                                {/* SISTEMA DE UPLOAD DE AVATAR */}
-                                <div className="relative group cursor-pointer">
-                                  <input type="file" accept="image/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" title="Clique para alterar a foto" onChange={(e) => handleUploadAvatar(e, c.id)} />
-                                  {c.avatar_url ? (
-                                    <>
-                                      <img src={c.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full border border-primary/20 object-cover group-hover:opacity-50 transition-opacity" onError={(e) => { e.currentTarget.style.display = 'none'; if (e.currentTarget.nextElementSibling) (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'; }} />
-                                      <div className="w-10 h-10 rounded-full bg-emerald-500/10 hidden items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20">{c.nome.substring(0,2).toUpperCase()}</div>
-                                    </>
-                                  ) : (
-                                    <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">{c.nome.substring(0,2).toUpperCase()}</div>
-                                  )}
-                                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"><PlusCircle className="w-4 h-4 text-primary bg-background/80 rounded-full" /></div>
-                                </div>
-                                
-                                <div>
-                                  <span className="font-bold text-sm block leading-tight">{c.nome}</span>
-                                  <span className="text-[10px] text-muted-foreground block">{c.especialidade || 'Sem especialidade'}</span>
-                                  {c.is_convidado ? (
-                                     <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Preço Fechado)</Badge>
-                                  ) : c.em_recesso ? (
-                                     <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 text-[9px] mt-1 uppercase border-none">Em Recesso / Férias</Badge>
-                                  ) : (
-                                     <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
-                                  )}
-                                </div>
-                             </div>
-                             {c.is_convidado && (
-                               <div className="flex flex-col gap-1 ml-2">
-                                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-emerald-600" onClick={() => { setEditandoConsId(c.id); setEditConsNome(c.nome); setEditConsEspecialidade(c.especialidade || ''); }}><Pencil className="w-3.5 h-3.5"/></Button>
-                                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-red-500 hover:bg-red-500/10" onClick={() => apagarConvidado(c.id, c.nome)}><Trash2 className="w-3.5 h-3.5"/></Button>
+              {/* SUB-ABA 1: MEMBROS, ACESSOS E HORA META */}
+              {subAbaEquipe === 'membros' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full animate-in fade-in-50">
+                  {consultores.map(c => (
+                    <div key={c.id} className={`border p-4 rounded-xl flex flex-col gap-4 shadow-sm transition-colors ${!c.status_ativo ? 'bg-muted/40 opacity-75' : c.is_convidado ? 'bg-amber-500/5 border-amber-500/20' : (c.em_recesso ? 'bg-blue-500/5 border-blue-500/20' : 'bg-card')}`}>
+                      <div className="flex items-start justify-between">
+                         {editandoConsId === c.id ? (
+                            <div className="flex flex-col gap-2 w-full pr-4">
+                               <Input value={editConsNome} onChange={e => setEditConsNome(e.target.value)} className="h-8 text-sm font-bold" placeholder="Nome Completo" />
+                               <Input value={editConsEspecialidade} onChange={e => setEditConsEspecialidade(e.target.value)} className="h-8 text-xs" placeholder="Especialidade / Cargo" />
+                               <div className="flex gap-2 mt-1">
+                                  <Button size="sm" onClick={salvarEdicaoConvidado} className="h-7 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white"><Check className="w-3 h-3 mr-1"/> Salvar</Button>
+                                  <Button size="sm" variant="ghost" onClick={() => setEditandoConsId(null)} className="h-7 text-[10px]">Cancelar</Button>
                                </div>
-                             )}
+                            </div>
+                         ) : (
+                            <div className="flex items-center justify-between w-full">
+                               <div className="flex items-center gap-3">
+                                  {/* SISTEMA DE UPLOAD DE AVATAR */}
+                                  <div className="relative group cursor-pointer">
+                                    <input type="file" accept="image/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" title="Clique para alterar a foto" onChange={(e) => handleUploadAvatar(e, c.id)} />
+                                    {c.avatar_url ? (
+                                      <>
+                                        <img src={c.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full border border-primary/20 object-cover group-hover:opacity-50 transition-opacity" onError={(e) => { e.currentTarget.style.display = 'none'; if (e.currentTarget.nextElementSibling) (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'; }} />
+                                        <div className="w-10 h-10 rounded-full bg-emerald-500/10 hidden items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20">{c.nome.substring(0,2).toUpperCase()}</div>
+                                      </>
+                                    ) : (
+                                      <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-700 font-bold border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">{c.nome.substring(0,2).toUpperCase()}</div>
+                                    )}
+                                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"><PlusCircle className="w-4 h-4 text-primary bg-background/80 rounded-full" /></div>
+                                  </div>
+                                  
+                                  <div>
+                                    <span className="font-bold text-sm block leading-tight">{c.nome}</span>
+                                    <span className="text-[10px] text-muted-foreground block">{c.especialidade || 'Sem especialidade'}</span>
+                                    {c.is_convidado ? (
+                                       <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-[9px] mt-1 uppercase border-none">Convidado (Preço Fechado)</Badge>
+                                    ) : c.em_recesso ? (
+                                       <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 text-[9px] mt-1 uppercase border-none">Em Recesso / Férias</Badge>
+                                    ) : (
+                                       <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 text-[9px] mt-1 uppercase border-none">Acesso ao App</Badge>
+                                    )}
+                                  </div>
+                               </div>
+                               {c.is_convidado && (
+                                 <div className="flex flex-col gap-1 ml-2">
+                                    <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-emerald-600" onClick={() => { setEditandoConsId(c.id); setEditConsNome(c.nome); setEditConsEspecialidade(c.especialidade || ''); }}><Pencil className="w-3.5 h-3.5"/></Button>
+                                    <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-red-500 hover:bg-red-500/10" onClick={() => apagarConvidado(c.id, c.nome)}><Trash2 className="w-3.5 h-3.5"/></Button>
+                                 </div>
+                               )}
+                            </div>
+                         )}
+                      </div>
+
+                      {/* 🌟 CAMPO DE HORA META DO CONSULTOR COM BOTÃO DE CONFIRMAÇÃO */}
+                      {!c.is_convidado && (() => {
+                        const valorAtualInput = metasEdit[c.id] !== undefined ? metasEdit[c.id] : (c.horas_minimas_mes || 0);
+                        const foiAlterado = metasEdit[c.id] !== undefined && metasEdit[c.id] !== (c.horas_minimas_mes || 0);
+
+                        return (
+                          <div className="flex items-center justify-between bg-muted/30 px-3 py-2 rounded-lg border border-border/60 gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <Target className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <Label htmlFor={`meta-${c.id}`} className="text-xs font-semibold text-foreground/90">
+                                Hora Meta / Ciclo:
+                              </Label>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <div className="relative flex items-center w-20">
+                                <Input
+                                  id={`meta-${c.id}`}
+                                  type="number"
+                                  min={0}
+                                  value={valorAtualInput}
+                                  onChange={(e) => {
+                                    const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                    setMetasEdit(prev => ({ ...prev, [c.id]: val }));
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      atualizarMetaConsultor(c.id, valorAtualInput);
+                                      setMetasEdit(prev => { const n = { ...prev }; delete n[c.id]; return n; });
+                                    }
+                                  }}
+                                  className={`h-8 pr-5 text-right font-mono font-bold text-xs bg-background transition-colors ${
+                                    foiAlterado ? 'border-amber-500 ring-1 ring-amber-500/30' : 'border-emerald-500/30 focus-visible:ring-emerald-500'
+                                  }`}
+                                />
+                                <span className="absolute right-2 text-[10px] font-bold text-muted-foreground">h</span>
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={foiAlterado ? "default" : "outline"}
+                                onClick={() => {
+                                  atualizarMetaConsultor(c.id, valorAtualInput);
+                                  setMetasEdit(prev => { const n = { ...prev }; delete n[c.id]; return n; });
+                                }}
+                                title="Confirmar e salvar Hora Meta"
+                                className={`h-8 px-2.5 text-[10px] font-bold gap-1 transition-all ${
+                                  foiAlterado
+                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
+                                    : 'border-emerald-500/30 text-emerald-700 hover:bg-emerald-500/10'
+                                }`}
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                {foiAlterado ? 'Salvar' : 'OK'}
+                              </Button>
+                            </div>
                           </div>
-                       )}
-                    </div>
-                    
-                    
-                    <div className="flex items-center justify-between border-t pt-3 mt-1">
-                      <div className="flex items-center gap-2">
-                         <Switch 
-                            id={`status-${c.id}`} 
-                            checked={c.status_ativo !== false} 
-                            onCheckedChange={async (checked) => {
-                               setConsultores(p => p.map(user => user.id === c.id ? { ...user, status_ativo: checked } : user));
-                               await supabase.from('consultores').update({ status_ativo: checked }).eq('id', c.id);
-                               await registrarLog("Status de Consultor Alterado", `O status de permissão do(a) engenheiro(a) ${c.nome} foi alterado para ${checked ? 'Ativo' : 'Inativo'}.`);
-                            }} 
-                         />
-                         <Label htmlFor={`status-${c.id}`} className="text-xs cursor-pointer">{c.status_ativo !== false ? 'Ativo' : 'Inativo'}</Label>
-                      </div>
+                        );
+                      })()}
                       
-                      {/* Botão de Recesso */}
-                      <div className="flex items-center gap-2">
-                         <Switch 
-                            id={`recesso-${c.id}`} 
-                            checked={c.em_recesso === true} 
-                            disabled={!c.status_ativo}
-                            onCheckedChange={async (checked) => {
-                               setConsultores(p => p.map(user => user.id === c.id ? { ...user, em_recesso: checked } : user));
-                               await supabase.from('consultores').update({ em_recesso: checked }).eq('id', c.id);
-                               await registrarLog("Recesso de Consultor Alterado", `O status de recesso do(a) engenheiro(a) ${c.nome} foi definido para ${checked ? 'Em Recesso' : 'Trabalhando'}.`);
-                               if (checked) toast.info(`${c.nome} entrou em recesso. Alertas de ociosidade pausados.`);
-                               else toast.success(`${c.nome} retornou do recesso.`);
-                            }} 
-                         />
-                         <Label htmlFor={`recesso-${c.id}`} className="text-xs cursor-pointer text-blue-700 font-medium">Recesso</Label>
+                      <div className="flex items-center justify-between border-t pt-3 mt-auto">
+                        <div className="flex items-center gap-2">
+                           <Switch 
+                              id={`status-${c.id}`} 
+                              checked={c.status_ativo !== false} 
+                              onCheckedChange={async (checked) => {
+                                 setConsultores(p => p.map(user => user.id === c.id ? { ...user, status_ativo: checked } : user));
+                                 await supabase.from('consultores').update({ status_ativo: checked }).eq('id', c.id);
+                                 await registrarLog("Status de Consultor Alterado", `O status de permissão do(a) engenheiro(a) ${c.nome} foi alterado para ${checked ? 'Ativo' : 'Inativo'}.`);
+                              }} 
+                           />
+                           <Label htmlFor={`status-${c.id}`} className="text-xs cursor-pointer">{c.status_ativo !== false ? 'Ativo' : 'Inativo'}</Label>
+                        </div>
+                        
+                        {/* Botão de Recesso */}
+                        <div className="flex items-center gap-2">
+                           <Switch 
+                              id={`recesso-${c.id}`} 
+                              checked={c.em_recesso === true} 
+                              disabled={!c.status_ativo}
+                              onCheckedChange={async (checked) => {
+                                 setConsultores(p => p.map(user => user.id === c.id ? { ...user, em_recesso: checked } : user));
+                                 await supabase.from('consultores').update({ em_recesso: checked }).eq('id', c.id);
+                                 await registrarLog("Recesso de Consultor Alterado", `O status de recesso do(a) engenheiro(a) ${c.nome} foi definido para ${checked ? 'Em Recesso' : 'Trabalhando'}.`);
+                                 if (checked) toast.info(`${c.nome} entrou em recesso. Alertas de ociosidade pausados.`);
+                                 else toast.success(`${c.nome} retornou do recesso.`);
+                              }} 
+                           />
+                           <Label htmlFor={`recesso-${c.id}`} className="text-xs cursor-pointer text-blue-700 font-medium">Recesso</Label>
+                        </div>
                       </div>
                     </div>
+                  ))}
+                </div>
+              )}
+
+              {/* SUB-ABA 2: PROJEÇÃO DE SALDOS POR CICLOS (FASE 5) */}
+              {subAbaEquipe === 'capacidade' && (() => {
+                const consultoresElegiveis = consultores.filter(c => c.status_ativo !== false && !c.is_convidado);
+                const consultoresSelecionadosObj = consultoresElegiveis.filter(c => capConsultoresIds.includes(c.id));
+
+                // Identifica o Ciclo Vigente Atual (regra do dia 25)
+                const now = new Date();
+                const cicloAtualMes = now.getDate() >= 25 ? (now.getMonth() === 11 ? 0 : now.getMonth() + 1) : now.getMonth();
+                const cicloAtualAno = now.getDate() >= 25 && now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+
+                // Calcula o Estoque Disponível na Linha de Base (Matriz) entrando no Ciclo Atual (Ignorando Overhead e Preço Fechado)
+                const estoqueMatrizPorConsultor: Record<string, number> = {};
+                if (capModoVisao === 'matriz') {
+                  consultoresSelecionadosObj.forEach(cons => {
+                    let saldoMatrizTotal = 0;
+                    contratos.filter(ct => ct.status_ativo && ct.tipo !== 'fechado' && ct.tipo !== 'overhead').forEach(ct => {
+                      const basesContrato = allLinhasBase.filter(b => b.contract_id === ct.id);
+                      const latestBasesMap = new Map<string, any>();
+                      basesContrato.forEach(b => {
+                        const key = b.os_id || 'global';
+                        if (!latestBasesMap.has(key) || latestBasesMap.get(key).versao < b.versao) {
+                          latestBasesMap.set(key, b);
+                        }
+                      });
+
+                      // Limite de início do ciclo atual para descontar apenas o que já foi gasto até antes do ciclo atual iniciar
+                      const cbCicloAtual = getCycleBoundsForContract(ct.ciclo_inicio, ct.ciclo_fim, cicloAtualMes.toString(), cicloAtualAno.toString());
+
+                      latestBasesMap.forEach((base) => {
+                        if (base.os_id) {
+                          const osObj = osList.find(o => o.id === base.os_id);
+                          if (osObj && osObj.status_ativa === false) return;
+                        }
+                        const item = allLinhaBaseItems.find(i => i.base_id === base.id && i.user_id === cons.id && i.tipo_pagamento !== 'fechado');
+                        if (item && Number(item.horas_teto) > 0) {
+                          const gastoPassado = allTimesheets
+                            .filter(t =>
+                              t.user_id === cons.id &&
+                              t.contract_id === ct.id &&
+                              (base.os_id ? t.os_id === base.os_id : true) &&
+                              new Date(t.start_at).getTime() < cbCicloAtual.start
+                            )
+                            .reduce((sum, t) => sum + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+
+                          saldoMatrizTotal += Math.max(0, Number(item.horas_teto) - gastoPassado);
+                        }
+                      });
+                    });
+                    estoqueMatrizPorConsultor[cons.id] = saldoMatrizTotal;
+                  });
+                }
+
+                // Se o gestor escolheu começar a visualização num ciclo futuro (depois do Ciclo Atual),
+                // simulamos o abatimento desde o Ciclo Atual até o mês anterior ao escolhido para que o saldo inicial seja fiel:
+                const qtd = parseInt(capQtdCiclos) || 3;
+                const startM = parseInt(capMesInicio);
+                const startY = parseInt(capAnoInicio);
+
+                const estoqueAcumuladoTemp: Record<string, number> = { ...estoqueMatrizPorConsultor };
+
+                if (capModoVisao === 'matriz') {
+                  const totalMonthsAtual = cicloAtualAno * 12 + cicloAtualMes;
+                  const totalMonthsStart = startY * 12 + startM;
+                  if (totalMonthsStart > totalMonthsAtual) {
+                    for (let mIdx = totalMonthsAtual; mIdx < totalMonthsStart; mIdx++) {
+                      const simMesStr = (mIdx % 12).toString();
+                      const simAnoStr = Math.floor(mIdx / 12).toString();
+                      consultoresSelecionadosObj.forEach(cons => {
+                        const meta = Number(cons.horas_minimas_mes || 0);
+                        let orcadoSim = 0;
+                        let gastoSim = 0;
+                        contratos.filter(ct => ct.status_ativo && ct.tipo !== 'fechado' && ct.tipo !== 'overhead').forEach(ct => {
+                          const alocs = allAlocacoes.filter(a => a.user_id === cons.id && a.contract_id === ct.id && a.mes === simMesStr && a.ano === simAnoStr && a.atividade !== 'Preço Fechado (Medição)');
+                          orcadoSim += alocs.reduce((s, a) => s + Number(a.horas_disponiveis || 0), 0);
+                          const cb = getCycleBoundsForContract(ct.ciclo_inicio, ct.ciclo_fim, simMesStr, simAnoStr);
+                          const times = allTimesheets.filter(t => t.user_id === cons.id && t.contract_id === ct.id && new Date(t.start_at).getTime() >= cb.start && new Date(t.start_at).getTime() <= cb.end);
+                          gastoSim += times.reduce((s, t) => s + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+                        });
+                        // Regra: Se já foi alocado >= meta, abate o alocado; caso contrário, abate a meta como projeção mínima
+                        const consumoPrevisto = orcadoSim >= meta ? Math.max(orcadoSim, gastoSim) : Math.max(meta, gastoSim);
+                        estoqueAcumuladoTemp[cons.id] = Math.max(0, (estoqueAcumuladoTemp[cons.id] || 0) - consumoPrevisto);
+                      });
+                    }
+                  }
+                }
+
+                // Lista de alertas gerados no horizonte para exibir aos gestores
+                const alertasCapacidade: Array<{ consultorNome: string; cicloNome: string; meta: number; disponivel: number; deficit: number; modo: string }> = [];
+
+                const dadosGraficoCiclos = Array.from({ length: qtd }).map((_, idx) => {
+                  const totalMonths = startY * 12 + startM + idx;
+                  const cMes = totalMonths % 12;
+                  const cAno = Math.floor(totalMonths / 12);
+                  const cMesStr = cMes.toString();
+                  const cAnoStr = cAno.toString();
+
+                  const isPastCycle = (cAno < cicloAtualAno) || (cAno === cicloAtualAno && cMes < cicloAtualMes);
+                  const isCurrentCycle = (cAno === cicloAtualAno && cMes === cicloAtualMes);
+
+                  const nomeCicloBase = `${MESES_NOME[cMes].substring(0, 3)}/${cAnoStr.substring(2)}`;
+                  const labelEixoX = isPastCycle ? `${nomeCicloBase} (Hist.)` : isCurrentCycle ? `${nomeCicloBase} (Atual)` : nomeCicloBase;
+
+                  const ponto: Record<string, any> = {
+                    cicloLabel: labelEixoX,
+                    cicloNomeCompleto: `${MESES_NOME[cMes]}/${cAnoStr}`,
+                    isPastCycle,
+                    isCurrentCycle,
+                    detalhesConsultor: {} as Record<string, any>,
+                  };
+
+                  consultoresSelecionadosObj.forEach(cons => {
+                    const meta = Number(cons.horas_minimas_mes || 0);
+                    ponto[`meta_${cons.id}`] = meta;
+
+                    // Calcula Orçado e Consumido no ciclo específico
+                    // Na Opção B (matriz), ignora Overhead; na Opção A (mensal), considera os contratos ativos
+                    let orcadoMes = 0;
+                    let gastoMes = 0;
+
+                    contratos.filter(ct => ct.status_ativo && ct.tipo !== 'fechado' && (capModoVisao === 'matriz' ? ct.tipo !== 'overhead' : true)).forEach(ct => {
+                      const alocs = allAlocacoes.filter(a =>
+                        a.user_id === cons.id &&
+                        a.contract_id === ct.id &&
+                        a.mes === cMesStr &&
+                        a.ano === cAnoStr &&
+                        a.atividade !== 'Preço Fechado (Medição)'
+                      );
+                      orcadoMes += alocs.reduce((s, a) => s + Number(a.horas_disponiveis || 0), 0);
+
+                      const cb = getCycleBoundsForContract(ct.ciclo_inicio, ct.ciclo_fim, cMesStr, cAnoStr);
+                      const times = allTimesheets.filter(t =>
+                        t.user_id === cons.id &&
+                        t.contract_id === ct.id &&
+                        new Date(t.start_at).getTime() >= cb.start &&
+                        new Date(t.start_at).getTime() <= cb.end
+                      );
+                      gastoMes += times.reduce((s, t) => s + ((new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000), 0);
+                    });
+
+                    if (capModoVisao === 'mensal') {
+                      // Opção A: Distribuição Mensal
+                      const saldoMensal = Math.max(0, orcadoMes - gastoMes);
+                      const valorExibido = isPastCycle ? Number(gastoMes.toFixed(1)) : Number(saldoMensal.toFixed(1));
+
+                      ponto[`saldo_${cons.id}`] = valorExibido;
+                      ponto[`orcado_${cons.id}`] = Number(orcadoMes.toFixed(1));
+                      ponto.detalhesConsultor[cons.id] = {
+                        modo: 'mensal',
+                        isPastCycle,
+                        orcadoMes: Number(orcadoMes.toFixed(1)),
+                        gastoMes: Number(gastoMes.toFixed(1)),
+                        saldoExibido: valorExibido,
+                        meta,
+                      };
+
+                      if (!isPastCycle && meta > 0 && orcadoMes < meta) {
+                        alertasCapacidade.push({
+                          consultorNome: cons.nome,
+                          cicloNome: `${MESES_NOME[cMes].substring(0, 3)}/${cAnoStr.substring(2)}`,
+                          meta,
+                          disponivel: Number(orcadoMes.toFixed(1)),
+                          deficit: Number((meta - orcadoMes).toFixed(1)),
+                          modo: 'mensal',
+                        });
+                      }
+                    } else {
+                      // Opção B: Projeção de Estoque da Linha de Base (Matriz s/ Overhead)
+                      if (isPastCycle) {
+                        const valorExibido = Number(gastoMes.toFixed(1));
+                        ponto[`saldo_${cons.id}`] = valorExibido;
+                        ponto.detalhesConsultor[cons.id] = {
+                          modo: 'matriz',
+                          isPastCycle: true,
+                          gastoMes: valorExibido,
+                          saldoExibido: valorExibido,
+                          meta,
+                        };
+                      } else {
+                        const estoqueDisponivelNoInicioDoCiclo = Math.max(0, estoqueAcumuladoTemp[cons.id] || 0);
+                        const valorExibido = Number(estoqueDisponivelNoInicioDoCiclo.toFixed(1));
+
+                        // 🌟 REGRA DO GESTOR:
+                        // Se o ciclo já foi alocado acima (ou igual) à meta, abate o valor Alocado (orcadoMes) do teto.
+                        // Se ainda não foi alocado (ou está abaixo da meta), abate a Meta como projeção mínima do ciclo!
+                        const jaAlocadoAcimaDaMeta = orcadoMes >= meta && orcadoMes > 0;
+                        const abatimentoProjetado = jaAlocadoAcimaDaMeta
+                          ? Math.max(orcadoMes, gastoMes)
+                          : Math.max(meta, gastoMes);
+
+                        const saldoAposAbatimento = Math.max(0, estoqueDisponivelNoInicioDoCiclo - abatimentoProjetado);
+
+                        ponto[`saldo_${cons.id}`] = valorExibido;
+                        ponto[`orcado_${cons.id}`] = Number(orcadoMes.toFixed(1));
+                        ponto.detalhesConsultor[cons.id] = {
+                          modo: 'matriz',
+                          isPastCycle: false,
+                          estoqueInicialCiclo: valorExibido,
+                          orcadoMes: Number(orcadoMes.toFixed(1)),
+                          jaAlocadoAcimaDaMeta,
+                          abatimentoProjetado: Number(abatimentoProjetado.toFixed(1)),
+                          saldoAposMeta: Number(saldoAposAbatimento.toFixed(1)),
+                          saldoExibido: valorExibido,
+                          meta,
+                        };
+
+                        // Acende alerta quando o estoque da Matriz para este ciclo não consegue cobrir a Meta!
+                        if (meta > 0 && estoqueDisponivelNoInicioDoCiclo < meta) {
+                          alertasCapacidade.push({
+                            consultorNome: cons.nome,
+                            cicloNome: `${MESES_NOME[cMes].substring(0, 3)}/${cAnoStr.substring(2)}`,
+                            meta,
+                            disponivel: valorExibido,
+                            deficit: Number((meta - estoqueDisponivelNoInicioDoCiclo).toFixed(1)),
+                            modo: 'matriz',
+                          });
+                        }
+
+                        // Passa o saldo restante do teto para o próximo ciclo
+                        estoqueAcumuladoTemp[cons.id] = saldoAposAbatimento;
+                      }
+                    }
+                  });
+
+                  return ponto;
+                });
+
+                return (
+                  <div className="space-y-6 animate-in fade-in-50">
+                    {/* BARRA DE CONTROLES E FILTROS DO GRÁFICO */}
+                    <div className="bg-muted/30 p-4 rounded-xl border space-y-4">
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-border/60 pb-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+                            <Layers className="w-4 h-4 text-emerald-600" />
+                            Planejamento de Capacidade: Saldo de Horas vs. Hora Meta
+                          </h3>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {capModoVisao === 'mensal'
+                              ? 'Opção A (Distribuição Mensal): Avalia o saldo disponível no mês e verifica se o total alocado cobre a Hora Meta.'
+                              : 'Opção B (Estoque da Matriz s/ Overhead): Abate o valor alocado (se >= Meta) ou projeta o abatimento da Hora Meta nos meses ainda não alocados.'}
+                          </p>
+                        </div>
+
+                        {/* ALTERNADOR OPÇÃO A vs OPÇÃO B */}
+                        <div className="flex bg-background p-1 rounded-lg border shadow-xs shrink-0 self-start lg:self-auto">
+                          <Button
+                            size="sm"
+                            type="button"
+                            variant={capModoVisao === 'mensal' ? 'default' : 'ghost'}
+                            onClick={() => setCapModoVisao('mensal')}
+                            className="h-8 text-xs font-bold px-3"
+                          >
+                            Opção A: Distribuição Mensal
+                          </Button>
+                          <Button
+                            size="sm"
+                            type="button"
+                            variant={capModoVisao === 'matriz' ? 'default' : 'ghost'}
+                            onClick={() => setCapModoVisao('matriz')}
+                            className="h-8 text-xs font-bold px-3"
+                          >
+                            Opção B: Estoque da Matriz
+                          </Button>
+                        </div>
+                      </div>
+
+                      {/* LINHA DE SELETORES: CONSULTORES, CICLO INICIAL E QUANTIDADE DE CICLOS */}
+                      <div className="flex flex-wrap items-center gap-3">
+                        {/* MULTI-SELECT DE CONSULTORES */}
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs font-bold uppercase text-muted-foreground">Consultores:</Label>
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button variant="outline" className="w-64 justify-between font-semibold bg-background h-9 text-xs border-emerald-500/40">
+                                <span className="truncate">
+                                  {capConsultoresIds.length === 0
+                                    ? 'Selecione consultores...'
+                                    : capConsultoresIds.length === consultoresElegiveis.length
+                                    ? `Todos os Consultores (${consultoresElegiveis.length})`
+                                    : `${capConsultoresIds.length} Consultor(es) selecionado(s)`}
+                                </span>
+                                <Users className="w-3.5 h-3.5 ml-2 text-emerald-600 shrink-0" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-72 p-3 bg-card border shadow-lg" align="start">
+                              <div className="flex items-center justify-between pb-2 mb-2 border-b">
+                                <span className="text-xs font-bold text-muted-foreground uppercase">Equipe Técnica</span>
+                                <div className="flex gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[10px] font-bold text-primary"
+                                    onClick={() => setCapConsultoresIds(consultoresElegiveis.map(c => c.id))}
+                                  >
+                                    Todos
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[10px] text-muted-foreground"
+                                    onClick={() => setCapConsultoresIds([])}
+                                  >
+                                    Limpar
+                                  </Button>
+                                </div>
+                              </div>
+                              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                                {consultoresElegiveis.map((c, i) => {
+                                  const cor = CORES_GRAFICO[i % CORES_GRAFICO.length];
+                                  return (
+                                    <div key={c.id} className="flex items-center justify-between py-1 hover:bg-muted/30 px-1.5 rounded">
+                                      <div className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id={`chk-cap-cons-${c.id}`}
+                                          checked={capConsultoresIds.includes(c.id)}
+                                          onCheckedChange={(checked) => {
+                                            if (checked) setCapConsultoresIds(prev => [...prev, c.id]);
+                                            else setCapConsultoresIds(prev => prev.filter(id => id !== c.id));
+                                          }}
+                                        />
+                                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: cor }} />
+                                        <Label htmlFor={`chk-cap-cons-${c.id}`} className="cursor-pointer text-xs font-medium leading-none">
+                                          {c.nome}
+                                        </Label>
+                                      </div>
+                                      <span className="text-[10px] font-mono text-muted-foreground">
+                                        Meta: {c.horas_minimas_mes || 0}h
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        </div>
+
+                        <div className="h-6 w-px bg-border hidden sm:block" />
+
+                        {/* CICLO DE PARTIDA */}
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs font-bold uppercase text-muted-foreground">A partir de:</Label>
+                          <Select value={capMesInicio} onValueChange={setCapMesInicio}>
+                            <SelectTrigger className="w-32 h-9 text-xs bg-background font-semibold"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              {MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                          <Select value={capAnoInicio} onValueChange={setCapAnoInicio}>
+                            <SelectTrigger className="w-24 h-9 text-xs bg-background font-semibold"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="2025">2025</SelectItem>
+                              <SelectItem value="2026">2026</SelectItem>
+                              <SelectItem value="2027">2027</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {(parseInt(capMesInicio) !== cicloAtualMes || parseInt(capAnoInicio) !== cicloAtualAno) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setCapMesInicio(cicloAtualMes.toString());
+                                setCapAnoInicio(cicloAtualAno.toString());
+                              }}
+                              className="h-9 text-xs text-primary border-primary/30 hover:bg-primary/10"
+                              title="Voltar para o Ciclo Atual"
+                            >
+                              Ciclo Atual
+                            </Button>
+                          )}
+                        </div>
+
+                        <div className="h-6 w-px bg-border hidden sm:block" />
+
+                        {/* QUANTIDADE DE CICLOS NO EIXO X */}
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs font-bold uppercase text-muted-foreground">Horizonte:</Label>
+                          <Select value={capQtdCiclos} onValueChange={setCapQtdCiclos}>
+                            <SelectTrigger className="w-36 h-9 text-xs bg-background font-bold text-emerald-700 border-emerald-500/40">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="2">2 Ciclos</SelectItem>
+                              <SelectItem value="3">3 Ciclos (Padrão)</SelectItem>
+                              <SelectItem value="4">4 Ciclos</SelectItem>
+                              <SelectItem value="6">6 Ciclos (Semestre)</SelectItem>
+                              <SelectItem value="12">12 Ciclos (Anual)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 🌟 BANNER DE ALERTA DE PROSPECÇÃO (QUANDO O SALDO/ALOCAÇÃO NÃO ATINGE A META) */}
+                    {alertasCapacidade.length > 0 && (
+                      <div className="bg-red-500/10 border-l-4 border-red-500 p-4 rounded-r-xl border shadow-xs animate-in fade-in-50">
+                        <div className="flex items-start gap-3">
+                          <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5 animate-bounce" />
+                          <div className="flex-1 space-y-2">
+                            <div>
+                              <h4 className="text-xs font-black uppercase tracking-wider text-red-700 dark:text-red-400">
+                                Alerta de Capacidade / Necessidade de Prospecção ({alertasCapacidade.length} ocorrência{alertasCapacidade.length > 1 ? 's' : ''})
+                              </h4>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {capModoVisao === 'matriz'
+                                  ? 'Os consultores abaixo ficarão com estoque de horas na Matriz abaixo da Hora Meta mínima nos ciclos indicados (necessário prospectar/aditivar contratos):'
+                                  : 'Os consultores abaixo estão com horas alocadas abaixo da Hora Meta nos ciclos indicados (necessário distribuir horas ou prospectar demandas):'}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {alertasCapacidade.map((al, i) => (
+                                <Badge
+                                  key={i}
+                                  variant="outline"
+                                  className="bg-background/90 border-red-500/30 text-red-700 dark:text-red-400 font-mono text-[10px] py-1 px-2.5"
+                                >
+                                  <strong>{al.consultorNome.split(' ')[0]}</strong> • {al.cicloNome}: Disp. {al.disponivel}h / Meta {al.meta}h (Faltam {al.deficit}h)
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* GRÁFICO RECHARTS: SALDO (BARRA SÓLIDA) VS META (LINHA TRACEJADA) */}
+                    {loadingDash ? (
+                      <div className="flex justify-center py-16"><Loader2 className="w-8 h-8 animate-spin text-emerald-600" /></div>
+                    ) : consultoresSelecionadosObj.length === 0 ? (
+                      <div className="p-12 text-center text-muted-foreground border-2 border-dashed rounded-xl bg-muted/10">
+                        <Users className="w-10 h-10 mx-auto mb-2 opacity-40" />
+                        <p className="font-semibold text-sm">Nenhum consultor selecionado</p>
+                        <p className="text-xs mt-1">Selecione 1 ou mais consultores no filtro acima para comparar os saldos e metas nos ciclos.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="border rounded-2xl p-4 sm:p-6 bg-card shadow-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                            <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                              <span className="flex items-center gap-1.5 font-semibold">
+                                <span className="w-3 h-3 rounded-xs bg-emerald-500 inline-block" /> Barra Sólida = {capModoVisao === 'mensal' ? 'Saldo Mensal (ou Entregue no Passado)' : 'Estoque Disponível no Teto da Matriz'}
+                              </span>
+                              <span className="flex items-center gap-1.5 font-semibold">
+                                <span className="w-5 border-t-2 border-dashed border-emerald-500 inline-block" /> Linha Tracejada = Hora Meta do Consultor
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="h-96 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={dadosGraficoCiclos} margin={{ top: 15, right: 20, left: 0, bottom: 10 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#88888822" />
+                                <XAxis
+                                  dataKey="cicloLabel"
+                                  tickLine={false}
+                                  axisLine={false}
+                                  style={{ fontSize: '12px', fontWeight: 700 }}
+                                />
+                                <YAxis
+                                  tickLine={false}
+                                  axisLine={false}
+                                  style={{ fontSize: '11px' }}
+                                  tickFormatter={(v) => `${v}h`}
+                                />
+                                <RechartsTooltip
+                                  cursor={{ fill: '#88888811' }}
+                                  wrapperStyle={{ zIndex: 100, pointerEvents: 'none' }}
+                                  content={({ active, payload }) => {
+                                    if (!active || !payload || payload.length === 0) return null;
+                                    const row = payload[0].payload;
+                                    const totalCons = consultoresSelecionadosObj.length;
+                                    const gridClass =
+                                      totalCons > 6
+                                        ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 min-w-[680px]'
+                                        : totalCons > 3
+                                        ? 'grid-cols-1 sm:grid-cols-2 min-w-[460px]'
+                                        : 'grid-cols-1 min-w-64';
+
+                                    return (
+                                      <div className="bg-card/95 backdrop-blur-md border shadow-2xl rounded-xl p-3 text-xs space-y-2">
+                                        <div className="border-b pb-1.5 flex items-center justify-between gap-4">
+                                          <span className="font-black text-sm text-foreground">{row.cicloNomeCompleto}</span>
+                                          <Badge variant="outline" className="text-[10px]">
+                                            {row.isPastCycle ? 'Ciclo Passado (Histórico)' : row.isCurrentCycle ? 'Ciclo Vigente' : 'Ciclo Futuro'}
+                                          </Badge>
+                                        </div>
+                                        <div className={`grid gap-2 ${gridClass}`}>
+                                          {consultoresSelecionadosObj.map((cons) => {
+                                            const corIdx = consultoresElegiveis.findIndex(x => x.id === cons.id);
+                                            const cor = CORES_GRAFICO[corIdx % CORES_GRAFICO.length];
+                                            const det = row.detalhesConsultor?.[cons.id];
+                                            if (!det) return null;
+
+                                            // Na Opção A (mensal), a cobertura da meta é baseada no Alocado (orcadoMes - meta)
+                                            // Na Opção B (matriz), a cobertura é baseada no Estoque disponível entrando no ciclo (estoqueInicialCiclo - meta)
+                                            const baseComparacaoMeta = det.modo === 'mensal' ? det.orcadoMes : det.saldoExibido;
+                                            const diffMeta = baseComparacaoMeta - det.meta;
+
+                                            return (
+                                              <div
+                                                key={cons.id}
+                                                className={`p-2 rounded-lg border space-y-1 ${
+                                                  !det.isPastCycle && det.meta > 0 && diffMeta < 0
+                                                    ? 'bg-red-500/10 border-red-500/40'
+                                                    : 'bg-muted/40 border-border/60'
+                                                }`}
+                                              >
+                                                <div className="flex items-center justify-between font-bold gap-2">
+                                                  <span className="flex items-center gap-1.5 truncate" style={{ color: cor }}>
+                                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cor }} />
+                                                    <span className="truncate">{cons.nome.split(' ').slice(0, 2).join(' ')}</span>
+                                                  </span>
+                                                  <span className="font-mono text-[10px] text-foreground shrink-0">Meta: {det.meta}h</span>
+                                                </div>
+
+                                                {det.isPastCycle ? (
+                                                  <div className="flex justify-between text-[10px] text-muted-foreground">
+                                                    <span>Entregue no Ciclo:</span>
+                                                    <span className="font-mono font-bold text-foreground">{det.gastoMes}h</span>
+                                                  </div>
+                                                ) : det.modo === 'mensal' ? (
+                                                  <>
+                                                    <div className="flex justify-between text-[10px] text-muted-foreground">
+                                                      <span>Aloc: <strong className="text-foreground">{det.orcadoMes}h</strong> | Gasto: {det.gastoMes}h</span>
+                                                      <span className="font-mono font-bold text-primary">Saldo: {det.saldoExibido}h</span>
+                                                    </div>
+                                                    <div className={`text-[10px] font-bold leading-tight ${diffMeta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                                                      {diffMeta >= 0
+                                                        ? `✅ Meta coberta (Alocado +${diffMeta.toFixed(1)}h)`
+                                                        : `🚨 ALERTA: Alocado abaixo da meta (-${Math.abs(diffMeta).toFixed(1)}h)`}
+                                                    </div>
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <div className="flex justify-between text-[10px] text-muted-foreground">
+                                                      <span>Teto Disponível no Ciclo:</span>
+                                                      <span className="font-mono font-bold text-foreground">{det.estoqueInicialCiclo}h</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-[10px] text-muted-foreground">
+                                                      <span>Abatimento ({det.jaAlocadoAcimaDaMeta ? 'Alocado' : 'Projeção Meta'}):</span>
+                                                      <span className="font-mono font-semibold text-foreground">-{det.abatimentoProjetado}h</span>
+                                                    </div>
+                                                    <div className={`text-[10px] font-bold leading-tight ${diffMeta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                                                      {diffMeta >= 0
+                                                        ? `✅ Cobre a meta (Passa ${det.saldoAposMeta}h p/ próx.)`
+                                                        : `🚨 ALERTA: Faltam ${Math.abs(diffMeta).toFixed(1)}h no Teto!`}
+                                                    </div>
+                                                  </>
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    );
+                                  }}
+                                />
+                                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '12px' }} />
+
+                                {/* BARRAS SÓLIDAS DE SALDO POR CONSULTOR */}
+                                {consultoresSelecionadosObj.map((cons) => {
+                                  const corIdx = consultoresElegiveis.findIndex(x => x.id === cons.id);
+                                  const cor = CORES_GRAFICO[corIdx % CORES_GRAFICO.length];
+                                  const primeiroNome = cons.nome.split(' ')[0];
+                                  return (
+                                    <Bar
+                                      key={`bar-${cons.id}`}
+                                      dataKey={`saldo_${cons.id}`}
+                                      name={`${primeiroNome} (${capModoVisao === 'mensal' ? 'Saldo' : 'Teto Disp.'})`}
+                                      fill={cor}
+                                      radius={[4, 4, 0, 0]}
+                                      maxBarSize={45}
+                                    />
+                                  );
+                                })}
+
+                                {/* LINHAS TRACEJADAS DE HORA META POR CONSULTOR */}
+                                {consultoresSelecionadosObj.map((cons) => {
+                                  const corIdx = consultoresElegiveis.findIndex(x => x.id === cons.id);
+                                  const cor = CORES_GRAFICO[corIdx % CORES_GRAFICO.length];
+                                  const primeiroNome = cons.nome.split(' ')[0];
+                                  return (
+                                    <Line
+                                      key={`line-${cons.id}`}
+                                      type="monotone"
+                                      dataKey={`meta_${cons.id}`}
+                                      name={`${primeiroNome} (Meta: ${cons.horas_minimas_mes || 0}h)`}
+                                      stroke={cor}
+                                      strokeWidth={2.5}
+                                      strokeDasharray="6 4"
+                                      dot={{ r: 4, fill: cor, strokeWidth: 2, stroke: '#ffffff' }}
+                                      activeDot={{ r: 6 }}
+                                    />
+                                  );
+                                })}
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+
+                        {/* MATRIZ EXECUTIVA DE DIAGNÓSTICO (PROSPECÇÃO vs CONTRATAÇÃO) */}
+                        <div className="border rounded-xl overflow-hidden bg-card shadow-xs">
+                          <div className="bg-muted/30 px-4 py-3 border-b flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                              <Target className="w-4 h-4 text-emerald-600" />
+                              Diagnóstico Executivo por Ciclo (Saldo vs. Hora Meta)
+                            </span>
+                            <span className="text-[11px] text-muted-foreground">
+                              Verde = Meta Coberta | Vermelho = Alerta de Prospecção / Falta de Saldo
+                            </span>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs text-left">
+                              <thead className="bg-muted/20 border-b text-muted-foreground uppercase text-[10px]">
+                                <tr>
+                                  <th className="p-3 font-bold">Consultor</th>
+                                  <th className="p-3 font-bold text-right">Hora Meta</th>
+                                  {dadosGraficoCiclos.map((ciclo, idx) => (
+                                    <th key={idx} className="p-3 font-bold text-right">{ciclo.cicloLabel}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y">
+                                {consultoresSelecionadosObj.map((cons) => {
+                                  const corIdx = consultoresElegiveis.findIndex(x => x.id === cons.id);
+                                  const cor = CORES_GRAFICO[corIdx % CORES_GRAFICO.length];
+                                  const meta = Number(cons.horas_minimas_mes || 0);
+                                  return (
+                                    <tr key={cons.id} className="hover:bg-muted/10">
+                                      <td className="p-3 font-bold flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: cor }} />
+                                        {cons.nome}
+                                      </td>
+                                      <td className="p-3 text-right font-mono font-bold text-muted-foreground">
+                                        {meta.toFixed(0)}h
+                                      </td>
+                                      {dadosGraficoCiclos.map((ciclo, idx) => {
+                                        const valSaldo = Number(ciclo[`saldo_${cons.id}`] || 0);
+                                        const valOrcado = Number(ciclo[`orcado_${cons.id}`] || 0);
+                                        const det = ciclo.detalhesConsultor?.[cons.id];
+                                        const baseMeta = capModoVisao === 'mensal' ? valOrcado : valSaldo;
+                                        const diff = baseMeta - meta;
+                                        const faltaTrabalho = meta > 0 && diff < 0;
+                                        return (
+                                          <td key={idx} className="p-3 text-right font-mono">
+                                            <span className={`font-bold px-2 py-0.5 rounded inline-flex items-center gap-1 ${
+                                              ciclo.isPastCycle
+                                                ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
+                                                : faltaTrabalho
+                                                ? 'bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30'
+                                                : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                                            }`}>
+                                              {!ciclo.isPastCycle && faltaTrabalho && <AlertTriangle className="w-3 h-3 text-red-500 shrink-0" />}
+                                              {valSaldo.toFixed(1)}h
+                                            </span>
+                                            {!ciclo.isPastCycle && (
+                                              <span className={`block text-[10px] mt-0.5 ${faltaTrabalho ? 'text-red-500 font-bold' : 'text-muted-foreground'}`}>
+                                                {capModoVisao === 'mensal'
+                                                  ? `Aloc: ${valOrcado.toFixed(0)}h (${diff >= 0 ? `+${diff.toFixed(0)}h meta` : `Faltam ${Math.abs(diff).toFixed(0)}h`})`
+                                                  : `${det?.jaAlocadoAcimaDaMeta ? `Aloc: ${valOrcado.toFixed(0)}h` : `Proj. Meta: -${meta.toFixed(0)}h`} (${diff >= 0 ? `Restam ${det?.saldoAposMeta ?? 0}h` : `Faltam ${Math.abs(diff).toFixed(0)}h`})`}
+                                              </span>
+                                            )}
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
-                ))}
-              </div>
+                );
+              })()}
+
+              {/* SUB-ABA 3: PERFORMANCE DA EQUIPE (VELOCITY) */}
+              {subAbaEquipe === 'performance' && (() => {
+                 const desempenho = consultores.filter(c => c.status_ativo).map(c => {
+                    const uTimes = allTimesheets.filter(t => t.user_id === c.id);
+                    const mesesTrabalhados = new Map<string, { horas: number, contratos: Set<string>, atividades: Map<string, number> }>();
+                    
+                    const now = new Date();
+                    let currM = now.getMonth();
+                    let currY = now.getFullYear();
+                    if (now.getDate() >= 25) {
+                       currM = currM === 11 ? 0 : currM + 1;
+                       if (currM === 0) currY++;
+                    }
+                    const currentActiveMKey = `${currY}-${String(currM + 1).padStart(2, '0')}`;
+
+                    uTimes.forEach(t => {
+                        const d = new Date(t.start_at);
+                        let m = d.getMonth();
+                        let y = d.getFullYear();
+                        
+                        const cObj = contratos.find(x => x.id === t.contract_id);
+                        if (cObj && cObj.ciclo_inicio > cObj.ciclo_fim && d.getDate() >= cObj.ciclo_inicio) {
+                            m = m === 11 ? 0 : m + 1;
+                            if (m === 0) y++;
+                        }
+                        const mKey = `${y}-${String(m + 1).padStart(2, '0')}`;
+                        
+                        if (mKey === currentActiveMKey) return;
+
+                        if (!mesesTrabalhados.has(mKey)) {
+                            mesesTrabalhados.set(mKey, { horas: 0, contratos: new Set(), atividades: new Map() });
+                        }
+                        
+                        const dadosMes = mesesTrabalhados.get(mKey)!;
+                        const dur = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
+                        
+                        dadosMes.horas += dur;
+                        
+                        if (cObj && cObj.tipo !== 'overhead') {
+                            dadosMes.contratos.add(cObj.id);
+                        }
+                        
+                        const aKey = `${t.contract_id}-${t.activity}`;
+                        dadosMes.atividades.set(aKey, (dadosMes.atividades.get(aKey) || 0) + dur);
+                    });
+
+                    const ultimosMeses = Array.from(mesesTrabalhados.keys()).sort().slice(-6);
+                    
+                    let somaHoras = 0; let somaContratos = 0; let focos: number[] = [];
+                    const chartData: any[] = [];
+
+                    ultimosMeses.forEach(mKey => {
+                        const [yStr, mStr] = mKey.split('-');
+                        const labelMes = `${MESES_NOME[parseInt(mStr) - 1].substring(0,3)}/${yStr.substring(2)}`;
+                        const dados = mesesTrabalhados.get(mKey)!;
+                        
+                        somaHoras += dados.horas;
+                        somaContratos += dados.contratos.size;
+                        
+                        const ativs = Array.from(dados.atividades.values()).sort((a,b) => b - a);
+                        const top2 = (ativs[0] || 0) + (ativs[1] || 0);
+                        const focoMes = dados.horas > 0 ? (top2 / dados.horas) * 100 : 0;
+                        focos.push(focoMes);
+
+                        chartData.push({ name: labelMes, horas: Number(dados.horas.toFixed(1)) });
+                    });
+
+                    const qtd = ultimosMeses.length;
+                    return { 
+                        ...c, 
+                        mediaHoras: qtd > 0 ? (somaHoras / qtd) : 0, 
+                        mediaContratos: qtd > 0 ? (somaContratos / qtd) : 0,
+                        mediaFoco: focos.length > 0 ? (focos.reduce((a,b)=>a+b,0) / focos.length) : 0,
+                        chartData 
+                    };
+                 }).sort((a,b) => b.mediaHoras - a.mediaHoras);
+
+                 return (
+                   <div className="space-y-6 animate-in fade-in-50">
+                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
+                       <div>
+                          <h3 className="text-base font-bold tracking-tight text-primary flex items-center gap-2">
+                             <Activity className="w-4 h-4"/> Curva de Velocidade & Capacidade (Velocity)
+                             <span title="Análise puramente em horas efetivas do quão rápido o consultor produz historicamente e quantos clientes atende simultaneamente." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span>
+                          </h3>
+                          <p className="text-xs text-muted-foreground mt-0.5">Indicadores reais de mochila de engenharia: Horas Entregues, Carga Paralela e Foco Direcional.</p>
+                       </div>
+                     </div>
+
+                     <div className="grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                        {desempenho.map(c => (
+                           <Card key={c.id} className="shadow-sm overflow-hidden border-border/60 hover:border-primary/40 transition-colors flex flex-col group">
+                              <div className="p-4 flex items-start gap-4">
+                                 {c.avatar_url ? (
+                                    <img src={c.avatar_url} alt="Avatar" className="w-14 h-14 rounded-full border-2 border-primary/20 object-cover shadow-sm shrink-0" />
+                                 ) : (
+                                    <div className="w-14 h-14 rounded-full border-2 border-primary/20 bg-primary/10 flex items-center justify-center text-primary font-black shadow-sm shrink-0">
+                                       {c.nome.substring(0,2).toUpperCase()}
+                                    </div>
+                                 )}
+                                 <div className="flex-1 min-w-0">
+                                    <h3 className="font-bold text-foreground text-sm truncate">{c.nome}</h3>
+                                    <Input 
+                                       placeholder="Definir especialidade..." 
+                                       defaultValue={c.especialidade || ''}
+                                       onBlur={async (e) => {
+                                          const val = e.target.value;
+                                          if(val !== c.especialidade) {
+                                             setConsultores(p => p.map(u => u.id === c.id ? { ...u, especialidade: val } : u));
+                                             await supabase.from('consultores').update({ especialidade: val }).eq('id', c.id);
+                                             await registrarLog("Especialidade Editada", `A especialidade de engenharia de ${c.nome} foi atualizada para "${val}".`);
+                                             toast.success("Especialidade salva!");
+                                          }
+                                       }}
+                                       className="h-7 text-[10px] mt-1 bg-muted/20 border-transparent hover:border-primary/30 focus-visible:ring-primary shadow-none"
+                                    />
+                                 </div>
+                              </div>
+
+                              <div className="px-5 pb-4 grid grid-cols-2 gap-4 border-b border-border/60">
+                                 <div className="space-y-1.5">
+                                    <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1"><Zap className="w-3.5 h-3.5 text-amber-500"/> Entrega Média</span>
+                                    <div className="flex items-baseline gap-1">
+                                      <p className="text-2xl font-black font-mono text-primary leading-none">{c.mediaHoras.toFixed(0)}<span className="text-sm text-muted-foreground font-semibold">h</span></p>
+                                    </div>
+                                    {c.horas_minimas_mes > 0 ? (
+                                      <div className="w-full bg-muted rounded-full h-1.5 mt-2" title={`Meta de ${c.horas_minimas_mes}h/mês`}>
+                                        <div className={`h-1.5 rounded-full ${c.mediaHoras >= c.horas_minimas_mes ? 'bg-green-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, (c.mediaHoras / c.horas_minimas_mes) * 100)}%` }}></div>
+                                      </div>
+                                    ) : (
+                                      <p className="text-[9px] text-muted-foreground mt-1">Sem meta definida</p>
+                                    )}
+                                 </div>
+                                 <div className="space-y-1.5 text-right flex flex-col items-end">
+                                    <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1"><Briefcase className="w-3.5 h-3.5 text-blue-500"/> Setup / Carga</span>
+                                    <p className="text-2xl font-black font-mono text-foreground leading-none">{c.mediaContratos.toFixed(1)}</p>
+                                    <p className="text-[9px] text-muted-foreground leading-tight max-w-24 mt-1">Projetos paralelos atendidos/mês</p>
+                                 </div>
+                              </div>
+
+                              <div className="px-5 py-3 border-b border-border/60 bg-muted/10 flex justify-between items-center">
+                                 <div>
+                                    <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1">
+                                       <Target className="w-3 h-3 text-green-500"/> Índice de Foco
+                                       <span title="Calculado dividindo a soma de horas das 2 disciplinas mais trabalhadas no mês pelo total de horas trabalhadas naquele ciclo. Ajuda a entender a dispersão de contexto da engenharia." className="cursor-help ml-1"><HelpCircle className="w-3 h-3 text-muted-foreground hover:text-green-500 transition-colors" /></span>
+                                    </span>
+                                    <p className="text-[9px] text-muted-foreground leading-tight max-w-37.5 mt-0.5">Grau de concentração nas Top 2 tarefas.</p>
+                                 </div>
+                                 <div className="text-right">
+                                    <p className={`text-lg font-black font-mono ${c.mediaFoco >= 75 ? 'text-green-600' : c.mediaFoco >= 50 ? 'text-amber-500' : 'text-red-500'}`}>
+                                       {c.mediaFoco.toFixed(0)}%
+                                    </p>
+                                 </div>
+                              </div>
+
+                              <div className="h-28 w-full mt-auto relative">
+                                 <div className="absolute inset-0 bg-linear-to-b from-transparent to-primary/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                                 <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={c.chartData} margin={{ top: 10, right: 0, left: 0, bottom: 0 }}>
+                                       <defs>
+                                          <linearGradient id={`colorPerf-${c.id}`} x1="0" y1="0" x2="0" y2="1">
+                                             <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
+                                             <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                                          </linearGradient>
+                                       </defs>
+                                       <RechartsTooltip cursor={false} contentStyle={{borderRadius: '8px', fontSize: '12px'}} formatter={(v: number) => [`${v}h entregues`, 'Histórico de Horas']} />
+                                       <Area type="monotone" dataKey="horas" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill={`url(#colorPerf-${c.id})`} />
+                                    </AreaChart>
+                                 </ResponsiveContainer>
+                                 {c.chartData.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground uppercase font-bold">Sem dados de horas finalizadas</div>}
+                              </div>
+                           </Card>
+                        ))}
+                     </div>
+                   </div>
+                 );
+              })()}
             </CardContent>
+
             {/* 🌟 FASE 4: Modal de Criação de Consultor Convidado */}
             <Dialog open={isNovoConsultorModalOpen} onOpenChange={setIsNovoConsultorModalOpen}>
               <DialogContent className="sm:max-w-md">
@@ -5030,188 +6007,7 @@ export function AdminDashboard() {
           </Card>
         )}
 
-        {/* VIEW: PERFORMANCE DA EQUIPE (ITEM 9) */}
-        {menuAtivo === 'performance-consultores' && (() => {
-           // Motor de Cálculo de Performance (Velocidade Bruta e Capacidade Cognitiva)
-           const desempenho = consultores.filter(c => c.status_ativo).map(c => {
-              const uTimes = allTimesheets.filter(t => t.user_id === c.id);
-              const mesesTrabalhados = new Map<string, { horas: number, contratos: Set<string>, atividades: Map<string, number> }>();
-              
-              // 1. Identificar o "Ciclo Atual Vigente" (que ainda não fechou e não deve entrar na média)
-              const now = new Date();
-              let currM = now.getMonth();
-              let currY = now.getFullYear();
-              if (now.getDate() >= 25) {
-                 currM = currM === 11 ? 0 : currM + 1;
-                 if (currM === 0) currY++;
-              }
-              const currentActiveMKey = `${currY}-${String(currM + 1).padStart(2, '0')}`;
-
-              uTimes.forEach(t => {
-                  const d = new Date(t.start_at);
-                  let m = d.getMonth();
-                  let y = d.getFullYear();
-                  
-                  const cObj = contratos.find(x => x.id === t.contract_id);
-                  // Mapeia a hora consumida para o seu ciclo fiscal correto (Dia 25 a Dia 24)
-                  if (cObj && cObj.ciclo_inicio > cObj.ciclo_fim && d.getDate() >= cObj.ciclo_inicio) {
-                      m = m === 11 ? 0 : m + 1;
-                      if (m === 0) y++;
-                  }
-                  const mKey = `${y}-${String(m + 1).padStart(2, '0')}`;
-                  
-                  // 🚫 IGNORA O CICLO ATUAL (pois não foi concluído)
-                  if (mKey === currentActiveMKey) return;
-
-                  if (!mesesTrabalhados.has(mKey)) {
-                      mesesTrabalhados.set(mKey, { horas: 0, contratos: new Set(), atividades: new Map() });
-                  }
-                  
-                  const dadosMes = mesesTrabalhados.get(mKey)!;
-                  const dur = (new Date(t.end_at || Date.now()).getTime() - new Date(t.start_at).getTime()) / 3600000;
-                  
-                  dadosMes.horas += dur;
-                  
-                  if (cObj && cObj.tipo !== 'overhead') {
-                      dadosMes.contratos.add(cObj.id);
-                  }
-                  
-                  const aKey = `${t.contract_id}-${t.activity}`;
-                  dadosMes.atividades.set(aKey, (dadosMes.atividades.get(aKey) || 0) + dur);
-              });
-
-              const ultimosMeses = Array.from(mesesTrabalhados.keys()).sort().slice(-6);
-              
-              let somaHoras = 0; let somaContratos = 0; let focos: number[] = [];
-              const chartData: any[] = [];
-
-              ultimosMeses.forEach(mKey => {
-                  const [yStr, mStr] = mKey.split('-');
-                  const labelMes = `${MESES_NOME[parseInt(mStr) - 1].substring(0,3)}/${yStr.substring(2)}`;
-                  const dados = mesesTrabalhados.get(mKey)!;
-                  
-                  somaHoras += dados.horas;
-                  somaContratos += dados.contratos.size;
-                  
-                  // Índice de Foco: (Top 2 atividades / Total Horas) * 100
-                  const ativs = Array.from(dados.atividades.values()).sort((a,b) => b - a);
-                  const top2 = (ativs[0] || 0) + (ativs[1] || 0);
-                  const focoMes = dados.horas > 0 ? (top2 / dados.horas) * 100 : 0;
-                  focos.push(focoMes);
-
-                  chartData.push({ name: labelMes, horas: Number(dados.horas.toFixed(1)) });
-              });
-
-              const qtd = ultimosMeses.length;
-              return { 
-                  ...c, 
-                  mediaHoras: qtd > 0 ? (somaHoras / qtd) : 0, 
-                  mediaContratos: qtd > 0 ? (somaContratos / qtd) : 0,
-                  mediaFoco: focos.length > 0 ? (focos.reduce((a,b)=>a+b,0) / focos.length) : 0,
-                  chartData 
-              };
-           }).sort((a,b) => b.mediaHoras - a.mediaHoras);
-
-           return (
-             <div className="space-y-6 animate-in fade-in-50">
-               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
-                 <div>
-                    <h2 className="text-xl font-bold tracking-tight text-primary flex items-center gap-2">
-                       <Activity className="w-5 h-5"/> Curva de Velocidade & Capacidade (Velocity)
-                       <span title="Análise puramente em horas efetivas do quão rápido o consultor produz historicamente e quantos clientes atende simultaneamente." className="cursor-help"><HelpCircle className="w-4 h-4 text-muted-foreground hover:text-primary transition-colors" /></span>
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-1">Indicadores reais de mochila de engenharia: Horas Entregues, Carga Paralela e Foco Direcional.</p>
-                 </div>
-               </div>
-
-               <div className="grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-                  {desempenho.map(c => (
-                     <Card key={c.id} className="shadow-sm overflow-hidden border-border/60 hover:border-primary/40 transition-colors flex flex-col group">
-                        <div className="p-4 flex items-start gap-4">
-                           {c.avatar_url ? (
-                              <img src={c.avatar_url} alt="Avatar" className="w-14 h-14 rounded-full border-2 border-primary/20 object-cover shadow-sm shrink-0" />
-                           ) : (
-                              <div className="w-14 h-14 rounded-full border-2 border-primary/20 bg-primary/10 flex items-center justify-center text-primary font-black shadow-sm shrink-0">
-                                 {c.nome.substring(0,2).toUpperCase()}
-                              </div>
-                           )}
-                           <div className="flex-1 min-w-0">
-                              <h3 className="font-bold text-foreground text-sm truncate">{c.nome}</h3>
-                              <Input 
-                                 placeholder="Definir especialidade..." 
-                                 defaultValue={c.especialidade || ''}
-                                 onBlur={async (e) => {
-                                    const val = e.target.value;
-                                    if(val !== c.especialidade) {
-                                       setConsultores(p => p.map(u => u.id === c.id ? { ...u, especialidade: val } : u));
-                                       await supabase.from('consultores').update({ especialidade: val }).eq('id', c.id);
-                                       await registrarLog("Especialidade Editada", `A especialidade de engenharia de ${c.nome} foi atualizada para "${val}".`);
-                                       toast.success("Especialidade salva!");
-                                    }
-                                 }}
-                                 className="h-7 text-[10px] mt-1 bg-muted/20 border-transparent hover:border-primary/30 focus-visible:ring-primary shadow-none"
-                              />
-                           </div>
-                        </div>
-
-                        <div className="px-5 pb-4 grid grid-cols-2 gap-4 border-b border-border/60">
-                           <div className="space-y-1.5">
-                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1"><Zap className="w-3.5 h-3.5 text-amber-500"/> Entrega Média</span>
-                              <div className="flex items-baseline gap-1">
-                                <p className="text-2xl font-black font-mono text-primary leading-none">{c.mediaHoras.toFixed(0)}<span className="text-sm text-muted-foreground font-semibold">h</span></p>
-                              </div>
-                              {c.horas_minimas_mes > 0 ? (
-                                <div className="w-full bg-muted rounded-full h-1.5 mt-2" title={`Meta de ${c.horas_minimas_mes}h/mês`}>
-                                  <div className={`h-1.5 rounded-full ${c.mediaHoras >= c.horas_minimas_mes ? 'bg-green-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, (c.mediaHoras / c.horas_minimas_mes) * 100)}%` }}></div>
-                                </div>
-                              ) : (
-                                <p className="text-[9px] text-muted-foreground mt-1">Sem meta definida</p>
-                              )}
-                           </div>
-                           <div className="space-y-1.5 text-right flex flex-col items-end">
-                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1"><Briefcase className="w-3.5 h-3.5 text-blue-500"/> Setup / Carga</span>
-                              <p className="text-2xl font-black font-mono text-foreground leading-none">{c.mediaContratos.toFixed(1)}</p>
-                              <p className="text-[9px] text-muted-foreground leading-tight max-w-24 mt-1">Projetos paralelos atendidos/mês</p>
-                           </div>
-                        </div>
-
-                        <div className="px-5 py-3 border-b border-border/60 bg-muted/10 flex justify-between items-center">
-                           <div>
-                              <span className="text-[10px] uppercase font-bold text-muted-foreground flex items-center gap-1">
-                                 <Target className="w-3 h-3 text-green-500"/> Índice de Foco
-                                 <span title="Calculado dividindo a soma de horas das 2 disciplinas mais trabalhadas no mês pelo total de horas trabalhadas naquele ciclo. Ajuda a entender a dispersão de contexto da engenharia." className="cursor-help ml-1"><HelpCircle className="w-3 h-3 text-muted-foreground hover:text-green-500 transition-colors" /></span>
-                              </span>
-                              <p className="text-[9px] text-muted-foreground leading-tight max-w-37.5 mt-0.5">Grau de concentração nas Top 2 tarefas.</p>
-                           </div>
-                           <div className="text-right">
-                              <p className={`text-lg font-black font-mono ${c.mediaFoco >= 75 ? 'text-green-600' : c.mediaFoco >= 50 ? 'text-amber-500' : 'text-red-500'}`}>
-                                 {c.mediaFoco.toFixed(0)}%
-                              </p>
-                           </div>
-                        </div>
-
-                        <div className="h-28 w-full mt-auto relative">
-                           <div className="absolute inset-0 bg-linear-to-b from-transparent to-primary/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                           <ResponsiveContainer width="100%" height="100%">
-                              <AreaChart data={c.chartData} margin={{ top: 10, right: 0, left: 0, bottom: 0 }}>
-                                 <defs>
-                                    <linearGradient id={`colorPerf-${c.id}`} x1="0" y1="0" x2="0" y2="1">
-                                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
-                                       <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                                    </linearGradient>
-                                 </defs>
-                                 <RechartsTooltip cursor={false} contentStyle={{borderRadius: '8px', fontSize: '12px'}} formatter={(v: number) => [`${v}h entregues`, 'Histórico de Horas']} />
-                                 <Area type="monotone" dataKey="horas" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill={`url(#colorPerf-${c.id})`} />
-                              </AreaChart>
-                           </ResponsiveContainer>
-                           {c.chartData.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground uppercase font-bold">Sem dados de horas finalizadas</div>}
-                        </div>
-                     </Card>
-                  ))}
-               </div>
-             </div>
-           )
-        })()}
+        
 
           {/* ========================================================= */}
           {/* 🌟 RADAR DE ALERTAS EXECUTIVOS — GOVERNANÇA (DIEGO & RUAN)  */}

@@ -159,6 +159,27 @@ function TimesheetPage() {
   const [panelDataInicio, setPanelDataInicio] = useState<string>(getTodayStr());
   const [panelDataFim, setPanelDataFim] = useState<string>(getTodayStr());
 
+  // 🌟 TRAVA DE SEGURANÇA: Calcula o Ciclo Vigente Atual (limite máximo visível ao consultor)
+  const cicloMaximoPermitido = useMemo(() => {
+    const now = new Date();
+    const maxMes = now.getDate() >= 25 ? (now.getMonth() === 11 ? 0 : now.getMonth() + 1) : now.getMonth();
+    const maxAno = now.getDate() >= 25 && now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+    const anos = Array.from({ length: maxAno - 2025 + 1 }, (_, idx) => (2025 + idx).toString());
+    return { mes: maxMes, ano: maxAno, anos };
+  }, []);
+
+  // Impede que o consultor fique em um mês futuro ao trocar o ano para o ano atual
+  useEffect(() => {
+    const anoSel = parseInt(panelAno);
+    const mesSel = parseInt(panelMes);
+    if (anoSel > cicloMaximoPermitido.ano) {
+      setPanelAno(cicloMaximoPermitido.ano.toString());
+      setPanelMes(cicloMaximoPermitido.mes.toString());
+    } else if (anoSel === cicloMaximoPermitido.ano && mesSel > cicloMaximoPermitido.mes) {
+      setPanelMes(cicloMaximoPermitido.mes.toString());
+    }
+  }, [panelAno, panelMes, cicloMaximoPermitido]);
+
   
 
   // 🌟 BLINDAGEM: Reseta para 'ciclo' sempre que o consultor fechar/voltar do painel
@@ -1094,7 +1115,8 @@ function TimesheetPage() {
       
       {showUpdatePassword && (
         <UpdatePassword 
-          onUpdateSuccess={() => {
+          onUpdateSuccess={async () => {
+            if (user?.id) await fetchUserProfile(user.id);
             setShowUpdatePassword(false);
             window.location.href = window.location.pathname; 
           }} 
@@ -1332,14 +1354,28 @@ function TimesheetPage() {
                     <Select value={panelMes} onValueChange={setPanelMes}>
                       <SelectTrigger className="w-28 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        {MESES_NOME.map((m, i) => <SelectItem key={i} value={i.toString()}>{m}</SelectItem>)}
+                        {MESES_NOME.map((m, i) => {
+                          const isMesFuturoBloqueado =
+                            parseInt(panelAno) === cicloMaximoPermitido.ano && i > cicloMaximoPermitido.mes;
+                          if (isMesFuturoBloqueado) return null;
+                          return <SelectItem key={i} value={i.toString()}>{m}</SelectItem>;
+                        })}
                       </SelectContent>
                     </Select>
-                    <Select value={panelAno} onValueChange={setPanelAno}>
+                    <Select
+                      value={panelAno}
+                      onValueChange={(novoAno) => {
+                        setPanelAno(novoAno);
+                        if (parseInt(novoAno) === cicloMaximoPermitido.ano && parseInt(panelMes) > cicloMaximoPermitido.mes) {
+                          setPanelMes(cicloMaximoPermitido.mes.toString());
+                        }
+                      }}
+                    >
                       <SelectTrigger className="w-20 h-8 text-xs bg-background"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="2025">2025</SelectItem>
-                        <SelectItem value="2026">2026</SelectItem>
+                        {cicloMaximoPermitido.anos.map(ano => (
+                          <SelectItem key={ano} value={ano}>{ano}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1349,14 +1385,37 @@ function TimesheetPage() {
                     <Input
                       type="date"
                       value={panelDataInicio}
-                      onChange={e => setPanelDataInicio(e.target.value)}
+                      max={panelDataFim < getTodayStr() ? panelDataFim : getTodayStr()}
+                      onChange={e => {
+                        const val = e.target.value;
+                        const hoje = getTodayStr();
+                        if (val > hoje) {
+                          toast.warning("Não é permitido selecionar datas futuras.");
+                          setPanelDataInicio(hoje);
+                        } else {
+                          setPanelDataInicio(val);
+                          if (panelDataFim && val > panelDataFim) setPanelDataFim(val);
+                        }
+                      }}
                       className="h-8 text-xs w-32 px-2 font-mono bg-background shadow-xs"
                     />
                     <span className="text-xs text-muted-foreground font-medium">até</span>
                     <Input
                       type="date"
                       value={panelDataFim}
-                      onChange={e => setPanelDataFim(e.target.value)}
+                      min={panelDataInicio}
+                      max={getTodayStr()}
+                      onChange={e => {
+                        const val = e.target.value;
+                        const hoje = getTodayStr();
+                        if (val > hoje) {
+                          toast.warning("Não é permitido selecionar datas futuras.");
+                          setPanelDataFim(hoje);
+                        } else {
+                          setPanelDataFim(val);
+                          if (panelDataInicio && val < panelDataInicio) setPanelDataInicio(val);
+                        }
+                      }}
                       className="h-8 text-xs w-32 px-2 font-mono bg-background shadow-xs"
                     />
                   </div>
